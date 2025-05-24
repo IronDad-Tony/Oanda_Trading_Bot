@@ -28,3 +28,4 @@ data/mmap_s5_universal/
 # 其他您不想追蹤的文件或資料夾
 *.bak
 *.tmp
+.gitignore
