@@ -107,6 +107,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.last_trade_step_per_slot: np.ndarray = np.full(self.num_env_slots, -1, dtype=np.int32)
         self.total_margin_used_ac: Decimal = Decimal('0.0'); self.portfolio_value_ac: Decimal = Decimal('0.0'); self.equity_ac: Decimal = Decimal('0.0')
         self.portfolio_value_history: List[float] = []; self.reward_history: List[float] = []; self.trade_log: List[Dict[str, Any]] = []
+        
+        # 風險調整後收益計算所需的歷史數據
+        self.returns_history: List[Decimal] = []  # 收益序列，用於計算標準差
+        self.returns_window_size: int = 20  # 滾動窗口大小
+        self.atr_penalty_threshold: Decimal = Decimal('0.02')  # ATR懲罰閾值（2%）</search>
+# 獎勵配置
+
         default_reward_config_decimal = {"portfolio_log_return_factor": Decimal('1.0'), "risk_adjusted_return_factor": Decimal('0.5'), "max_drawdown_penalty_factor": Decimal('2.0'), "commission_penalty_factor": Decimal('1.0'), "margin_call_penalty": Decimal('-100.0'), "profit_target_bonus": Decimal('0.1'), "hold_penalty_factor": Decimal('0.001')}
         if reward_config:
             for key, value in reward_config.items():
@@ -142,6 +149,8 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.total_margin_used_ac = Decimal('0.0')
         self.equity_ac = self.initial_capital; self.portfolio_value_ac = self.initial_capital
         self.portfolio_value_history = [float(self.initial_capital)]; self.reward_history = []; self.trade_log = []
+# 重置收益歷史
+        self.returns_history = []
         self.peak_portfolio_value_episode = self.initial_capital; self.max_drawdown_episode = Decimal('0.0')
         logger.debug(f"Env reset. Initial capital: {self.cash} {ACCOUNT_CURRENCY}. Start step: {self.current_step_in_dataset}")
         all_prices_map, _ = self._get_current_raw_prices_for_all_dataset_symbols()
@@ -293,13 +302,17 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
 
         self.current_positions_units[slot_idx] = new_units
 
-        # 更新該倉位的已用保證金 (根據新的持倉單位、當前市價和保證金率)
+        # 更新該倉位的已用保證金 (根據新的持倉單位、實際交易價格和保證金率)
         current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
-        current_market_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2') if current_bid_qc > 0 and current_ask_qc > 0 else Decimal('0.0')
         
-        if abs(new_units) > Decimal('1e-9') and current_market_price_qc > Decimal('0'):
-            margin_required_qc = abs(new_units) * current_market_price_qc * Decimal(str(details.margin_rate))
+        # 修復：使用實際交易價格而非中間價計算保證金
+        if abs(new_units) > Decimal('1e-9') and trade_price_qc > Decimal('0'):
+            margin_required_qc = abs(new_units) * trade_price_qc * Decimal(str(details.margin_rate))
             self.margin_used_per_position_ac[slot_idx] = margin_required_qc * exchange_rate_qc_to_ac
+            
+            # 添加保證金緩衝區機制，避免邊界情況下的保證金不足
+            margin_buffer = Decimal('0.02')  # 2% 緩衝區
+            self.margin_used_per_position_ac[slot_idx] *= (Decimal('1.0') + margin_buffer)
         else:
             self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
 
@@ -412,7 +425,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             target_units_final = min(target_units_raw, max_units_by_risk)
             target_units_final = target_units_final.copy_sign(target_position_ratio) # 恢復方向
 
-            # 使用 details.round_units() 進行調整
+            # 改進交易單位精度處理 - 使用 InstrumentDetails.round_units() 方法進行精確調整
             target_units = details.round_units(target_units_final)
 
             # 計算 units_to_trade
@@ -436,8 +449,8 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             # 預計新倉位
             projected_new_units = current_units + units_to_trade
             
-            # 預計新倉位所需的保證金 (基於當前市價)
-            projected_margin_required_qc = abs(projected_new_units) * current_mid_price_qc * Decimal(str(details.margin_rate))
+            # 修復保證金計算精度問題 - 使用實際交易價格（bid/ask）而非中間價計算保證金
+            projected_margin_required_qc = abs(projected_new_units) * trade_price_qc * Decimal(str(details.margin_rate))
             projected_margin_required_ac = projected_margin_required_qc * exchange_rate_qc_to_ac
 
             # 當前該槽位的保證金
@@ -477,17 +490,21 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
 
             # 如果是開倉/加倉，需要檢查是否有足夠的自由保證金
             if units_to_trade.copy_sign(Decimal('1')) == projected_new_units.copy_sign(Decimal('1')) or abs(current_units) < Decimal('1e-9'): # 開倉或加倉
-                if projected_total_margin_used_ac > self.equity_ac * (Decimal('1.0') - OANDA_MARGIN_CLOSEOUT_LEVEL): # 簡單檢查，避免立即觸發追繳
+                # 添加保證金緩衝區機制，避免邊界情況下的保證金不足
+                margin_safety_buffer = Decimal('0.1')  # 10% 安全緩衝區
+                safe_margin_threshold = OANDA_MARGIN_CLOSEOUT_LEVEL + margin_safety_buffer
+                
+                if projected_total_margin_used_ac > self.equity_ac * (Decimal('1.0') - safe_margin_threshold): # 使用安全閾值檢查
                     logger.warning(f"保證金不足以執行 {symbol} 的交易 ({units_to_trade:.2f} 單位)。預計總保證金 {projected_total_margin_used_ac:.2f} AC，權益 {self.equity_ac:.2f} AC。縮減交易單位。")
                     # 按比例縮減 units_to_trade
                     # 計算最大可交易單位
-                    max_affordable_margin_ac = self.equity_ac * (Decimal('1.0') - OANDA_MARGIN_CLOSEOUT_LEVEL)
+                    max_affordable_margin_ac = self.equity_ac * (Decimal('1.0') - safe_margin_threshold)
                     if max_affordable_margin_ac <= Decimal('0'):
                         logger.warning(f"無法負擔任何保證金，取消 {symbol} 的交易。")
                         continue
                     
                     # 計算基於最大可負擔保證金的最大單位數
-                    max_units_by_margin_ac = (max_affordable_margin_ac / (current_mid_price_qc * Decimal(str(details.margin_rate)) * exchange_rate_qc_to_ac)).quantize(Decimal('1'), rounding=ROUND_DOWN)
+                    max_units_by_margin_ac = (max_affordable_margin_ac / (trade_price_qc * Decimal(str(details.margin_rate)) * exchange_rate_qc_to_ac)).quantize(Decimal('1'), rounding=ROUND_DOWN)
                     
                     # 縮減 units_to_trade
                     if abs(projected_new_units) > max_units_by_margin_ac:
@@ -702,18 +719,6 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             truncated = True
             terminated = True if not terminated else True # 如果已經終止，保持終止狀態
         
-        return terminated, truncated
-
-    def _check_termination_truncation(self) -> Tuple[bool, bool]:
-        # (與V4.8版本相同)
-        terminated = False; oanda_closeout_level_decimal = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL))
-        if self.portfolio_value_ac < self.initial_capital * oanda_closeout_level_decimal * Decimal('0.4'): logger.warning(f"Episode terminated: Portfolio value ({self.portfolio_value_ac:.2f}) too low."); terminated = True
-        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
-        if self.total_margin_used_ac > Decimal('0'):
-            margin_level = self.equity_ac / self.total_margin_used_ac
-            if margin_level < oanda_closeout_level_decimal: logger.warning(f"強制平倉觸發! Equity={self.equity_ac:.2f}, MarginUsed={self.total_margin_used_ac:.2f}, Level={margin_level:.2%}"); terminated = True
-        truncated = self.episode_step_count >= self.max_episode_steps
-        if self.current_step_in_dataset >= len(self.dataset) : truncated = True; terminated = True if not terminated else True
         return terminated, truncated
 
     def _get_observation(self) -> Dict[str, np.ndarray]:
