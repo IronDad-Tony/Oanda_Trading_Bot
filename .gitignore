@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.db
+env/
+.env  # 非常重要！保護您的API金鑰等敏感信息
+.vscode/ # VS Code的配置文件，通常不需要共享
+*.DS_Store # macOS系統文件
+
+# 日誌文件和數據庫 (根據需要決定是否忽略)
+# 如果日誌和數據庫文件很大，或者包含敏感信息，建議忽略
+logs/*.log 
+# data/database/*.db # 如果您想備份數據庫結構但不備份數據，可以創建一個空的結構文件納入版本控制
+
+# mmap數據文件 (通常很大，不需要版本控制)
+data/mmap_s5_universal/ 
+
+# Streamlit 臨時文件
+.streamlit/
+
+# 其他您不想追蹤的文件或資料夾
+*.bak
+*.tmp

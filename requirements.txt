@@ -1,0 +1,43 @@
+# 核心計算與數據處理
+numpy
+pandas
+scipy # 某些指標或統計可能需要
+
+# 機器學習與深度學習
+torch # PyTorch
+torchvision # 通常與torch一起安裝，某些場景可能需要
+torchaudio # 通常與torch一起安裝
+stable-baselines3[extra] # 強化學習庫，extra包含tensorboard等
+gymnasium # RL 環境標準API (替代舊版gym)
+scikit-learn # 用於數據預處理 (StandardScaler等)
+
+# API交互與網絡請求
+requests
+python-dotenv # 加載.env文件
+
+# 數據庫
+# sqlite3 是Python內建的，不需要單獨列出
+
+# 時間處理
+python-dateutil
+
+# UI框架 (Streamlit)
+streamlit
+plotly # Streamlit 常用的繪圖庫
+matplotlib # 傳統繪圖庫，也可能用到
+
+# 特徵工程輔助
+pywavelets # 小波轉換
+
+# 序列化與配置
+pyyaml # YAML配置文件處理
+
+# 效能監控與進度條 (可選，有些UI內建)
+# tqdm # 命令行進度條，Streamlit UI中可能不需要
+
+# 其他工具
+psutil # 系統資源監控 (可選)
+einops # 張量操作，簡化reshape等
+# pandas-ta # 快速計算技術指標的庫 (可選，或者自己實現)
+protobuf==3.19.6
+typing-extensions==4.5.0

@@ -1,0 +1,10 @@
+2025-05-24 09:00:14 - [DEBUG] - TradingSystem - (logger_setup.<module>:120) - 這是一條 DEBUG 級別的日誌 (應該只出現在文件中)。
+2025-05-24 09:00:14 - [INFO] - TradingSystem - (logger_setup.<module>:121) - 這是一條 INFO 級別的日誌 (應該出現在文件和控制台)。
+2025-05-24 09:00:14 - [WARNING] - TradingSystem - (logger_setup.<module>:122) - 這是一條 WARNING 級別的日誌。
+2025-05-24 09:00:14 - [ERROR] - TradingSystem - (logger_setup.<module>:123) - 這是一條 ERROR 級別的日誌。
+2025-05-24 09:00:14 - [CRITICAL] - TradingSystem - (logger_setup.<module>:124) - 這是一條 CRITICAL 級別的日誌。
+2025-05-24 09:00:14 - [ERROR] - TradingSystem - (logger_setup.<module>:129) - 捕獲到一個異常 (ZeroDivisionError)
+Traceback (most recent call last):
+  File "C:\Users\tonyh\Oanda_Trading_Bot\src\common\logger_setup.py", line 127, in <module>
+    1 / 0
+ZeroDivisionError: division by zero

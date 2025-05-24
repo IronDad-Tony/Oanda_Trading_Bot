@@ -1,0 +1,206 @@
+# src/agent/sac_policy.py
+"""
+定義自定義的 SAC 策略，它使用 AdvancedTransformerFeatureExtractor。
+"""
+from stable_baselines3.sac.policies import SACPolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from gymnasium import spaces
+import torch
+import torch.nn as nn
+from typing import List, Type, Optional, Dict, Any, Union, Callable
+import sys
+from pathlib import Path
+import numpy as np
+import logging # 確保 logging 導入
+
+# --- 全局 logger 的後備定義 (與之前文件類似) ---
+_logger_initialized_by_common_policy = False
+try:
+    from common.logger_setup import logger
+    _logger_initialized_by_common_policy = True
+    logger.debug("sac_policy.py: Successfully imported logger from common.logger_setup.")
+except ImportError:
+    logger = logging.getLogger("sac_policy_fallback_initial")
+    logger.setLevel(logging.DEBUG)
+    _ch_policy_fallback = logging.StreamHandler(sys.stdout)
+    _ch_policy_fallback.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    if not logger.handlers: logger.addHandler(_ch_policy_fallback)
+    logger.warning("sac_policy.py: Failed to import logger from common.logger_setup. Using initial fallback logger.")
+
+try:
+    from agent.feature_extractors import AdvancedTransformerFeatureExtractor
+    # 從config導入必要的常量，主要用於 __main__ 測試塊
+    from common.config import (
+        MAX_SYMBOLS_ALLOWED, TIMESTEPS, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
+    )
+    if not _logger_initialized_by_common_policy: logger.info("Successfully imported common.config (logger was fallback).")
+    else: logger.info("Successfully imported common.config.")
+
+except ImportError:
+    logger.warning("sac_policy.py: Initial import of common.config or agent.feature_extractors failed. Attempting path adjustment...")
+    project_root_policy = Path(__file__).resolve().parent.parent.parent
+    if str(project_root_policy) not in sys.path:
+        sys.path.insert(0, str(project_root_policy))
+        logger.info(f"sac_policy.py: Added project root to sys.path: {project_root_policy}")
+    try:
+        from src.agent.feature_extractors import AdvancedTransformerFeatureExtractor
+        from src.common.config import (
+             MAX_SYMBOLS_ALLOWED, TIMESTEPS, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
+        )
+        if not _logger_initialized_by_common_policy:
+            try:
+                from src.common.logger_setup import logger as common_logger_retry_policy
+                logger = common_logger_retry_policy; _logger_initialized_by_common_policy = True
+                logger.info("sac_policy.py: Direct run: Successfully re-imported common_logger after path adj.")
+            except ImportError: logger.warning("sac_policy.py: Direct run: Failed to re-import common_logger after path adj.")
+        logger.info("sac_policy.py: Direct run: Successfully re-imported common modules after path adjustment.")
+    except ImportError as e_retry_policy:
+        logger.error(f"sac_policy.py: Direct run: Critical import error after path adjustment: {e_retry_policy}", exc_info=True)
+        logger.warning("sac_policy.py: Using fallback values for config (critical error during import).")
+        AdvancedTransformerFeatureExtractor = None # type: ignore
+        MAX_SYMBOLS_ALLOWED = 20; TIMESTEPS = 128; TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
+
+
+class CustomSACPolicy(SACPolicy):
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        lr_schedule: Callable[[float], float],
+        net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
+        activation_fn: Type[nn.Module] = nn.ReLU,
+        features_extractor_class: Type[BaseFeaturesExtractor] = AdvancedTransformerFeatureExtractor, # type: ignore
+        features_extractor_kwargs: Optional[Dict[str, Any]] = None,
+        normalize_images: bool = False,
+        optimizer_class: Type[torch.optim.Optimizer] = torch.optim.Adam,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        n_critics: int = 2,
+        share_features_extractor: bool = True,
+        use_sde: bool = False,
+        # sde_sample_freq 被移除
+        use_expln: bool = False,
+        # squash_output 被移除，它由Actor內部處理
+        log_std_init: float = -3.0,
+        clip_mean: float = 2.0,
+    ):
+        if net_arch is None:
+            net_arch = dict(pi=[256, 256], qf=[256, 256])
+        if features_extractor_kwargs is None:
+            features_extractor_kwargs = {}
+
+        # 確保 features_extractor_class 不是 None (在後備導入情況下可能發生)
+        actual_feat_ext_class = features_extractor_class
+        if actual_feat_ext_class is None and 'AdvancedTransformerFeatureExtractor' in globals() and AdvancedTransformerFeatureExtractor is not None:
+            logger.warning("CustomSACPolicy: features_extractor_class was None, using globally available AdvancedTransformerFeatureExtractor.")
+            actual_feat_ext_class = AdvancedTransformerFeatureExtractor # type: ignore
+        elif actual_feat_ext_class is None:
+            logger.error("CustomSACPolicy: features_extractor_class is None and fallback AdvancedTransformerFeatureExtractor not available!")
+            # 這種情況下，父類初始化會失敗，或者需要提供一個默認的 BaseFeaturesExtractor
+            # 為了能繼續，我們可能需要一個非常基礎的默認，但這會偏離我們的設計
+            # super().__init__ 中 features_extractor_class 是必需的
+            raise ValueError("features_extractor_class cannot be None for CustomSACPolicy")
+
+
+        logger.info(f"Initializing CustomSACPolicy with feature_extractor: {actual_feat_ext_class.__name__}")
+        logger.info(f"Actor/Critic net_arch: {net_arch}")
+
+        super().__init__(
+            observation_space=observation_space,
+            action_space=action_space,
+            lr_schedule=lr_schedule,
+            net_arch=net_arch,
+            activation_fn=activation_fn,
+            features_extractor_class=actual_feat_ext_class, # 使用修正後的
+            features_extractor_kwargs=features_extractor_kwargs,
+            normalize_images=normalize_images,
+            optimizer_class=optimizer_class,
+            optimizer_kwargs=optimizer_kwargs,
+            n_critics=n_critics,
+            share_features_extractor=share_features_extractor,
+            use_sde=use_sde,
+            # sde_sample_freq, # 已移除
+            # use_expln, # Actor的參數，SACPolicy不直接收
+            # squash_output, # Actor的參數，SACPolicy不直接收
+            log_std_init=log_std_init,
+            # clip_mean # Actor的參數，SACPolicy不直接收
+        )
+        # Actor的 squash_output, use_expln, clip_mean 等參數會在 SACPolicy 的 _build 方法中
+        # 創建 Actor 實例時傳遞給 Actor 的構造函數。
+        # 我們不需要在 CustomSACPolicy 的 __init__ 簽名中包含它們，
+        # 除非我們打算重寫 _build_actor_critic 或 make_actor 方法並手動傳遞。
+        # 為了保持與SACPolicy的接口一致性並讓它內部處理，我們從 __init__ 移除它們。
+        # SACPolicy.__init__ 實際上也沒有直接接收 use_expln, squash_output, clip_mean
+        # 它們是 actor_kwargs 的一部分，或者由 make_actor 方法處理。
+        # 為了安全，我們也從 super().__init__ 的調用中移除它們，讓 SACPolicy 的默認行為生效。
+        # 經過查閱 SB3 源碼，SACPolicy 的 __init__ 確實不包含 use_expln 和 clip_mean
+        # 而 log_std_init 是傳遞給 Actor 的。
+        # 最安全的做法是只傳遞 SACPolicy.__init__ 實際定義的參數。
+
+        # 重新檢查 SACPolicy.__init__ 的參數 (基於SB3 v2.x):
+        # observation_space, action_space, lr_schedule,
+        # net_arch, activation_fn, features_extractor_class, features_extractor_kwargs,
+        # normalize_images, optimizer_class, optimizer_kwargs, n_critics, share_features_extractor
+        # use_sde (來自BasePolicy)
+        # actor_kwargs, critic_kwargs (這兩個可以傳遞額外參數給Actor和Critic)
+
+        # 因此，我們上面的 super().__init__ 應該是：
+        # (已在上面修正，只保留 SACPolicy 和 BasePolicy __init__ 直接接受的參數)
+
+
+if __name__ == "__main__":
+    logger.info("正在直接運行 sac_policy.py 進行測試 (僅基礎導入和類定義檢查)...")
+    if 'AdvancedTransformerFeatureExtractor' not in globals() or AdvancedTransformerFeatureExtractor is None:
+        logger.error("AdvancedTransformerFeatureExtractor is None. Test cannot proceed.")
+        sys.exit(1)
+    required_configs = ['MAX_SYMBOLS_ALLOWED', 'TIMESTEPS', 'TRANSFORMER_OUTPUT_DIM_PER_SYMBOL']
+    for cfg_var in required_configs:
+        if cfg_var not in globals():
+            logger.error(f"配置變量 {cfg_var} 未定義。請檢查頂部導入或後備邏輯。")
+            sys.exit(1)
+
+    num_test_input_features_policy = 9
+    _max_symbols = MAX_SYMBOLS_ALLOWED
+    _timesteps = TIMESTEPS
+    _transformer_out_dim = TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
+
+    dummy_obs_space = spaces.Dict({
+        "features_from_dataset": spaces.Box(low=-np.inf, high=np.inf, shape=(_max_symbols, _timesteps, num_test_input_features_policy), dtype=np.float32),
+        "current_positions_nominal_ratio_ac": spaces.Box(low=-1.0, high=1.0, shape=(_max_symbols,), dtype=np.float32),
+        "unrealized_pnl_ratio_ac": spaces.Box(low=-1.0, high=1.0, shape=(_max_symbols,), dtype=np.float32),
+        "margin_level": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
+        "padding_mask": spaces.Box(low=0, high=1, shape=(_max_symbols,), dtype=np.bool_)
+    })
+    dummy_action_space = spaces.Box(low=-1.0, high=1.0, shape=(_max_symbols,), dtype=np.float32)
+
+    def dummy_lr_schedule(progress_remaining: float) -> float:
+        return 3e-4 * progress_remaining
+
+    try:
+        # 創建 CustomSACPolicy 實例時，只傳遞它和其父類 __init__ 方法實際接受的參數
+        policy = CustomSACPolicy(
+            observation_space=dummy_obs_space,
+            action_space=dummy_action_space,
+            lr_schedule=dummy_lr_schedule,
+            # net_arch, activation_fn 等使用默認值
+            features_extractor_kwargs=dict( # 這些會傳給 AdvancedTransformerFeatureExtractor
+                transformer_output_dim_per_symbol=_transformer_out_dim,
+                model_dim=128,
+                num_time_encoder_layers=1,
+                num_cross_asset_layers=1,
+                num_heads=2,
+                ffn_dim=128,
+            ),
+            # use_sde=False, # 如果需要可以設置
+            # log_std_init, clip_mean, use_expln, squash_output 這些是Actor的參數，
+            # SACPolicy 會在創建Actor時通過 actor_kwargs 處理或有默認值。
+            # 我們可以在創建 SAC Agent 時通過 policy_kwargs={"actor_kwargs": {...}} 來傳遞它們。
+            # 為了 __main__ 測試的簡潔，這裡不顯式傳遞它們給 CustomSACPolicy 的構造函數。
+        )
+        logger.info("CustomSACPolicy 實例化成功！")
+        logger.info(f"  Policy features_extractor type: {type(policy.features_extractor)}")
+        logger.info(f"  Policy actor type: {type(policy.actor)}")
+        logger.info(f"  Policy critic type: {type(policy.critic)}")
+
+    except Exception as e:
+        logger.error(f"CustomSACPolicy 測試過程中發生錯誤: {e}", exc_info=True)
+    logger.info("sac_policy.py 測試執行完畢。")

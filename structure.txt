@@ -1,0 +1,22 @@
+trading_system/
+├── data/                     # 原始數據、處理後數據的存放 (可考慮gitignore部分內容)
+│   └── database/             # SQLite 資料庫文件
+├── src/                      # 核心原始碼
+│   ├── common/               # 通用工具、配置管理
+│   ├── data_manager/         # 數據獲取與儲存
+│   ├── feature_engineer/     # 特徵工程
+│   ├── environment/          # RL 環境
+│   ├── models/               # 神經網路模型定義
+│   ├── agent/                # RL 智能體 (SAC等)
+│   ├── trainer/              # 訓練流程管理器
+│   ├── backtester/           # 回測引擎
+│   ├── live_trader/          # 實盤交易 (初期可留空或簡化)
+│   └── risk_manager/         # 風險管理
+├── notebooks/                # Jupyter Notebooks 用於數據分析、模型探索
+├── tests/                    # 單元測試、集成測試
+├── weights/                  # 模型權重
+├── logs/                     # 日誌文件
+├── config/                   # 配置文件 (例如YAML)
+├── .env                      # API Key 等敏感資訊
+├── requirements.txt          # Python 依賴
+└── README.md                 # 專案說明
