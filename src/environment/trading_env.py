@@ -230,31 +230,296 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 self.unrealized_pnl_ac[slot_idx] = pnl_in_ac; self.equity_ac += pnl_in_ac
         self.portfolio_value_ac = self.equity_ac # 淨值等於權益
 
+    def _execute_trade(self, slot_idx: int, units_to_trade: Decimal, trade_price_qc: Decimal, current_timestamp: pd.Timestamp, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Tuple[Decimal, Decimal]:
+        symbol = self.slot_to_symbol_map[slot_idx]
+        if not symbol:
+            logger.error(f"嘗試在無效槽位 {slot_idx} 執行交易。")
+            return Decimal('0.0'), Decimal('0.0')
+
+        details = self.instrument_details_map[symbol]
+        current_units = self.current_positions_units[slot_idx]
+        avg_entry_qc = self.avg_entry_prices_qc[slot_idx]
+        commission_ac = Decimal('0.0')
+        realized_pnl_ac = Decimal('0.0')
+        trade_type = "UNKNOWN"
+        
+        # 計算交易名義價值 (報價貨幣和賬戶貨幣)
+        nominal_value_qc = abs(units_to_trade) * trade_price_qc
+        exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+        if exchange_rate_qc_to_ac <= Decimal('0'):
+            logger.warning(f"無法獲取 {details.quote_currency} 到 {ACCOUNT_CURRENCY} 的匯率，取消交易。")
+            return Decimal('0.0'), Decimal('0.0')
+        nominal_value_ac = nominal_value_qc * exchange_rate_qc_to_ac
+
+        # 計算手續費並從 cash 中扣除
+        commission_ac = nominal_value_ac * self.commission_percentage
+        if self.cash < commission_ac:
+            logger.warning(f"現金不足支付手續費 {commission_ac:.2f} AC，取消交易。")
+            return Decimal('0.0'), Decimal('0.0')
+        self.cash -= commission_ac
+
+        # 處理開倉/平倉/加倉/減倉/反向開倉
+        new_units = current_units + units_to_trade
+
+        if abs(current_units) < Decimal('1e-9'): # 當前無倉位
+            trade_type = "OPEN"
+            self.avg_entry_prices_qc[slot_idx] = trade_price_qc
+        elif current_units.copy_sign(Decimal('1')) == units_to_trade.copy_sign(Decimal('1')): # 同向加倉
+            trade_type = "ADD"
+            # 重新計算加權平均價
+            total_value_at_old_avg = current_units * avg_entry_qc
+            total_value_at_new_trade = units_to_trade * trade_price_qc
+            self.avg_entry_prices_qc[slot_idx] = (total_value_at_old_avg + total_value_at_new_trade) / new_units
+        else: # 反向交易 (平倉或反向開倉)
+            if abs(units_to_trade) >= abs(current_units): # 完全平倉或反向開倉
+                trade_type = "CLOSE_AND_REVERSE" if abs(units_to_trade) > abs(current_units) else "CLOSE"
+                # 計算已實現盈虧
+                pnl_per_unit_qc = (trade_price_qc - avg_entry_qc) if current_units > 0 else (avg_entry_qc - trade_price_qc)
+                realized_pnl_qc = pnl_per_unit_qc * abs(current_units)
+                realized_pnl_ac = realized_pnl_qc * exchange_rate_qc_to_ac
+                self.cash += realized_pnl_ac
+                if abs(new_units) < Decimal('1e-9'): # 完全平倉
+                    self.avg_entry_prices_qc[slot_idx] = Decimal('0.0')
+                else: # 反向開倉
+                    self.avg_entry_prices_qc[slot_idx] = trade_price_qc
+            else: # 部分平倉
+                trade_type = "REDUCE"
+                # 計算已實現盈虧 (只針對平倉部分)
+                pnl_per_unit_qc = (trade_price_qc - avg_entry_qc) if current_units > 0 else (avg_entry_qc - trade_price_qc)
+                realized_pnl_qc = pnl_per_unit_qc * abs(units_to_trade)
+                realized_pnl_ac = realized_pnl_qc * exchange_rate_qc_to_ac
+                self.cash += realized_pnl_ac
+                # 平均入場價不變
+
+        self.current_positions_units[slot_idx] = new_units
+
+        # 更新該倉位的已用保證金 (根據新的持倉單位、當前市價和保證金率)
+        current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+        current_market_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2') if current_bid_qc > 0 and current_ask_qc > 0 else Decimal('0.0')
+        
+        if abs(new_units) > Decimal('1e-9') and current_market_price_qc > Decimal('0'):
+            margin_required_qc = abs(new_units) * current_market_price_qc * Decimal(str(details.margin_rate))
+            self.margin_used_per_position_ac[slot_idx] = margin_required_qc * exchange_rate_qc_to_ac
+        else:
+            self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
+
+        # 記錄到 trade_log
+        trade_direction = "LONG" if units_to_trade > 0 else "SHORT"
+        position_direction = "LONG" if new_units > 0 else ("SHORT" if new_units < 0 else "FLAT")
+        self.trade_log.append({
+            "step": self.episode_step_count,
+            "timestamp": current_timestamp.isoformat(),
+            "symbol": symbol,
+            "trade_type": trade_type,
+            "trade_direction": trade_direction,
+            "position_direction": position_direction,
+            "units_traded": float(units_to_trade),
+            "trade_price_qc": float(trade_price_qc),
+            "trade_price_ac": float(trade_price_qc * exchange_rate_qc_to_ac), # 這裡的交易價格是QC，轉換為AC
+            "realized_pnl_ac": float(realized_pnl_ac),
+            "commission_ac": float(commission_ac),
+            "current_position_units": float(new_units),
+            "avg_entry_price_qc": float(self.avg_entry_prices_qc[slot_idx]),
+            "margin_used_ac": float(self.margin_used_per_position_ac[slot_idx]),
+            "cash_after_trade": float(self.cash),
+            "equity_after_trade": float(self.equity_ac + realized_pnl_ac - commission_ac) # 這裡的equity_after_trade是預估值，最終會在_update_portfolio_and_equity_value更新
+        })
+        self.last_trade_step_per_slot[slot_idx] = self.episode_step_count
+        logger.info(f"執行交易: {symbol}, 類型: {trade_type}, 單位: {units_to_trade:.2f}, 價格: {trade_price_qc:.5f} QC, 手續費: {commission_ac:.2f} AC, 實現盈虧: {realized_pnl_ac:.2f} AC, 現金: {self.cash:.2f} AC, 新倉位: {new_units:.2f}")
+        return units_to_trade, commission_ac
+
     # --- (詳細的 step, _calculate_reward, _check_termination_truncation, _get_observation, _get_info, render, close 方法將緊隨其後) ---
 
     # ... (if __name__ == "__main__": 測試塊與V4.8版本相同) ...
     # <在此處粘貼您上一個版本 UniversalTradingEnvV4 (V4.8) 中 if __name__ == "__main__": 塊的全部內容>
     # 為確保完整性，我將再次粘貼並檢查
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
-        # (與V4.8相同的簡化版step)
         self.episode_step_count += 1
         all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
         prev_portfolio_value_ac = self.portfolio_value_ac
         self._update_atr_values(all_prices_map); self._update_stop_loss_prices(all_prices_map)
+        
+        total_commission_this_step_ac = Decimal('0.0') # 用於獎勵計算
+
+        # 1. 處理止損
+        commission_from_sl = self._apply_stop_loss(all_prices_map, current_timestamp)
+        total_commission_this_step_ac += commission_from_sl
+
+        # 2. 處理保證金追繳 (如果止損後仍觸發)
+        commission_from_mc = self._handle_margin_call(all_prices_map, current_timestamp)
+        total_commission_this_step_ac += commission_from_mc
+
+        # 3. 執行智能體動作
         for slot_idx in self.current_episode_tradable_slot_indices:
-            units = self.current_positions_units[slot_idx]; stop_loss_price_qc = self.stop_loss_prices_qc[slot_idx]
             symbol = self.slot_to_symbol_map.get(slot_idx)
-            if symbol and abs(units) > Decimal('1e-9') and stop_loss_price_qc > Decimal('0'):
-                current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
-                closed_by_sl = False
-                if units > 0 and current_bid_qc <= stop_loss_price_qc and current_bid_qc > 0 : closed_by_sl = True
-                elif units < 0 and current_ask_qc >= stop_loss_price_qc and current_ask_qc > 0: closed_by_sl = True
-                if closed_by_sl:
-                    logger.info(f"止損觸發 for {symbol} at step {self.episode_step_count}.")
-                    self.current_positions_units[slot_idx] = Decimal('0.0'); self.avg_entry_prices_qc[slot_idx] = Decimal('0.0'); self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
+            if not symbol: continue
+
+            details = self.instrument_details_map[symbol]
+            current_units = self.current_positions_units[slot_idx]
+            current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            
+            if current_bid_qc <= Decimal('0') or current_ask_qc <= Decimal('0'):
+                logger.warning(f"跳過 {symbol} 的交易，因為當前價格無效。")
+                continue
+
+            # 計算目標單位數 (target_units)
+            # 使用 self.max_account_risk_per_trade 和 self.atr_values_qc[slot_idx] 以及止損乘數來確定基於風險的最大單位數。
+            # 結合智能體動作 action[slot_idx]（目標倉位比例）和 self.equity_ac（或 self.initial_capital）來計算目標名義價值。
+            # 將目標名義價值轉換為報價貨幣，再除以當前價格得到目標單位數。
+            # 使用 details.round_units() 進行調整。
+
+            # 這裡使用 equity_ac 作為基礎，因為它反映了當前賬戶的真實價值
+            risk_per_unit_qc = self.atr_values_qc[slot_idx] * self.stop_loss_atr_multiplier
+            if risk_per_unit_qc <= Decimal('0'):
+                logger.debug(f"跳過 {symbol} 的交易，因為 ATR 風險為零。")
+                continue
+
+            # 計算每單位在賬戶貨幣中的風險
+            exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+            if exchange_rate_qc_to_ac <= Decimal('0'):
+                logger.warning(f"無法獲取 {details.quote_currency} 到 {ACCOUNT_CURRENCY} 的匯率，跳過交易。")
+                continue
+            
+            risk_per_unit_ac = risk_per_unit_qc * exchange_rate_qc_to_ac
+
+            if risk_per_unit_ac <= Decimal('0'):
+                logger.debug(f"跳過 {symbol} 的交易，因為每單位風險為零。")
+                continue
+
+            # 基於風險的最大單位數
+            max_risk_capital = self.equity_ac * self.max_account_risk_per_trade
+            max_units_by_risk = (max_risk_capital / risk_per_unit_ac).quantize(Decimal('1'), rounding=ROUND_DOWN) # 確保是整數單位
+
+            # 智能體動作 (目標倉位比例)
+            target_position_ratio = Decimal(str(action[slot_idx])) # 動作範圍 -1.0 到 1.0
+
+            # 計算目標名義價值 (基於目標倉位比例和賬戶淨值)
+            # 這裡使用 self.equity_ac 作為基礎，因為它反映了當前賬戶的真實價值
+            target_nominal_value_ac = abs(target_position_ratio) * self.equity_ac
+
+            # 將目標名義價值轉換為報價貨幣
+            # 使用中間價作為轉換價格
+            current_mid_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2')
+            if current_mid_price_qc <= Decimal('0'):
+                logger.warning(f"跳過 {symbol} 的交易，因為中間價無效。")
+                continue
+
+            # 計算目標單位數 (未調整精度)
+            target_units_raw = (target_nominal_value_ac / (current_mid_price_qc * exchange_rate_qc_to_ac)).quantize(Decimal('1e-9'), rounding=ROUND_HALF_UP) # 暫時保留精度
+
+            # 結合風險限制和動作目標
+            # 最終目標單位數不應超過基於風險計算的最大單位數
+            target_units_final = min(target_units_raw, max_units_by_risk)
+            target_units_final = target_units_final.copy_sign(target_position_ratio) # 恢復方向
+
+            # 使用 details.round_units() 進行調整
+            target_units = details.round_units(target_units_final)
+
+            # 計算 units_to_trade
+            units_to_trade = target_units - current_units
+            
+            if abs(units_to_trade) < details.minimum_trade_size:
+                logger.debug(f"跳過 {symbol} 的交易，因為交易單位 {units_to_trade:.2f} 小於最小交易單位 {details.minimum_trade_size:.2f}。")
+                continue
+
+            # 確定交易價格 (買入用 Ask, 賣出用 Bid)
+            trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
+            if trade_price_qc <= Decimal('0'):
+                logger.warning(f"跳過 {symbol} 的交易，因為交易價格無效。")
+                continue
+
+            # 保證金檢查
+            # 計算執行 units_to_trade 預計會改變多少保證金。
+            # 檢查 self.equity_ac - self.total_margin_used_ac (現有的) - 預計佣金 >= 新增保證金。
+            # 如果不足，則按比例縮減 units_to_trade（確保縮減後的單位數仍符合最小交易單位）或取消該筆交易。記錄此類事件。
+
+            # 預計新倉位
+            projected_new_units = current_units + units_to_trade
+            
+            # 預計新倉位所需的保證金 (基於當前市價)
+            projected_margin_required_qc = abs(projected_new_units) * current_mid_price_qc * Decimal(str(details.margin_rate))
+            projected_margin_required_ac = projected_margin_required_qc * exchange_rate_qc_to_ac
+
+            # 當前該槽位的保證金
+            current_margin_for_slot_ac = self.margin_used_per_position_ac[slot_idx]
+
+            # 預計總保證金 (假設其他槽位不變)
+            projected_total_margin_used_ac = self.total_margin_used_ac - current_margin_for_slot_ac + projected_margin_required_ac
+
+            # 預計交易手續費
+            projected_commission_ac = abs(units_to_trade) * trade_price_qc * exchange_rate_qc_to_ac * self.commission_percentage
+
+            # 檢查可用資金是否足夠支付新增保證金和手續費
+            # 可用現金 = self.cash - projected_commission_ac
+            # 可用權益 = self.equity_ac - projected_commission_ac
+            
+            # 這裡的邏輯應該是：新的總保證金不能導致保證金水平低於關閉水平
+            # 也就是說，(self.equity_ac - projected_commission_ac) / projected_total_margin_used_ac >= OANDA_MARGIN_CLOSEOUT_LEVEL
+            # 或者更直接地，確保有足夠的自由保證金
+            free_margin_before_trade = self.equity_ac - self.total_margin_used_ac
+
+            # 考慮交易後，新的自由保證金
+            # 這裡需要考慮交易對現金和未實現盈虧的影響，但為了保證金檢查的簡潔性，我們主要關注保證金的變化
+            # 簡化：只考慮新增保證金和手續費對現金的影響
+            margin_change_ac = projected_margin_required_ac - current_margin_for_slot_ac
+            
+            # 如果是平倉，margin_change_ac 會是負數，表示釋放保證金
+            # 如果是開倉/加倉，margin_change_ac 會是正數，表示需要更多保證金
+
+            # 檢查是否會導致保證金追繳
+            # 這裡的檢查應該是：執行這筆交易後，我的總權益減去新的總保證金，是否仍然大於一個安全閾值
+            # 或者，更直接地，新的總保證金加上預計手續費，是否會超過我的可用現金/權益
+            
+            # 預計交易後的總權益 (考慮手續費，但不考慮未實現盈虧，因為那是浮動的)
+            # 這裡的 equity_ac 已經包含了未實現盈虧，所以我們直接用它來判斷保證金水平
+            # 預計交易後的現金 (只考慮手續費)
+            projected_cash_after_commission = self.cash - projected_commission_ac
+
+            # 如果是開倉/加倉，需要檢查是否有足夠的自由保證金
+            if units_to_trade.copy_sign(Decimal('1')) == projected_new_units.copy_sign(Decimal('1')) or abs(current_units) < Decimal('1e-9'): # 開倉或加倉
+                if projected_total_margin_used_ac > self.equity_ac * (Decimal('1.0') - OANDA_MARGIN_CLOSEOUT_LEVEL): # 簡單檢查，避免立即觸發追繳
+                    logger.warning(f"保證金不足以執行 {symbol} 的交易 ({units_to_trade:.2f} 單位)。預計總保證金 {projected_total_margin_used_ac:.2f} AC，權益 {self.equity_ac:.2f} AC。縮減交易單位。")
+                    # 按比例縮減 units_to_trade
+                    # 計算最大可交易單位
+                    max_affordable_margin_ac = self.equity_ac * (Decimal('1.0') - OANDA_MARGIN_CLOSEOUT_LEVEL)
+                    if max_affordable_margin_ac <= Decimal('0'):
+                        logger.warning(f"無法負擔任何保證金，取消 {symbol} 的交易。")
+                        continue
+                    
+                    # 計算基於最大可負擔保證金的最大單位數
+                    max_units_by_margin_ac = (max_affordable_margin_ac / (current_mid_price_qc * Decimal(str(details.margin_rate)) * exchange_rate_qc_to_ac)).quantize(Decimal('1'), rounding=ROUND_DOWN)
+                    
+                    # 縮減 units_to_trade
+                    if abs(projected_new_units) > max_units_by_margin_ac:
+                        # 如果是開倉，直接限制為 max_units_by_margin_ac
+                        if abs(current_units) < Decimal('1e-9'):
+                            units_to_trade = max_units_by_margin_ac.copy_sign(units_to_trade)
+                        else: # 加倉，需要計算可以加多少
+                            units_can_add = max_units_by_margin_ac - abs(current_units)
+                            units_to_trade = units_can_add.copy_sign(units_to_trade)
+                        
+                        units_to_trade = details.round_units(units_to_trade)
+                        if abs(units_to_trade) < details.minimum_trade_size:
+                            logger.warning(f"縮減後 {symbol} 的交易單位 {units_to_trade:.2f} 小於最小交易單位，取消交易。")
+                            continue
+                        logger.info(f"縮減 {symbol} 的交易單位至 {units_to_trade:.2f}，以符合保證金要求。")
+            
+            # 如果可以交易，則調用 _execute_trade()
+            if abs(units_to_trade) > Decimal('0'):
+                traded_units, commission = self._execute_trade(slot_idx, units_to_trade, trade_price_qc, current_timestamp, all_prices_map)
+                total_commission_this_step_ac += commission
+            else:
+                logger.debug(f"槽位 {slot_idx} ({symbol}) 無需交易。")
+
+        # 在所有槽位交易循環結束後，重新計算 self.total_margin_used_ac = sum(self.margin_used_per_position_ac)。
+        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
+
+        # 在所有交易和止損執行後，調用 _update_portfolio_and_equity_value() 更新最終狀態。
         self._update_portfolio_and_equity_value(all_prices_map)
         self.portfolio_value_history.append(float(self.portfolio_value_ac))
-        reward = self._calculate_reward(prev_portfolio_value_ac, Decimal('0.0'))
+        
+        # 獎勵計算
+        reward = self._calculate_reward(prev_portfolio_value_ac, total_commission_this_step_ac)
         self.current_step_in_dataset += 1
         terminated, truncated = self._check_termination_truncation()
         next_observation = self._get_observation()
@@ -262,19 +527,182 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         return next_observation, reward, terminated, truncated, info
 
     def _calculate_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
-        # (與V4.8版本相同)
         log_return = Decimal('0.0')
         if prev_portfolio_value_ac > Decimal('0'): log_return = (self.portfolio_value_ac / prev_portfolio_value_ac).ln()
+        
         reward_val = self.reward_config["portfolio_log_return_factor"] * log_return
+        
+        # 手續費懲罰
         commission_penalty = self.reward_config["commission_penalty_factor"] * (commission_this_step_ac / self.initial_capital)
         reward_val -= commission_penalty
+
+        # 最大回撤懲罰
         self.peak_portfolio_value_episode = max(self.peak_portfolio_value_episode, self.portfolio_value_ac)
         current_dd = (self.peak_portfolio_value_episode - self.portfolio_value_ac) / (self.peak_portfolio_value_episode + Decimal('1e-9'))
         if current_dd > self.max_drawdown_episode :
             reward_val -= self.reward_config["max_drawdown_penalty_factor"] * (current_dd - self.max_drawdown_episode)
             self.max_drawdown_episode = current_dd
-        elif current_dd > Decimal('0'): reward_val -= self.reward_config["max_drawdown_penalty_factor"] * current_dd * Decimal('0.1')
+        elif current_dd > Decimal('0'):
+            reward_val -= self.reward_config["max_drawdown_penalty_factor"] * current_dd * Decimal('0.1') # 對於持續回撤的輕微懲罰
+
+        # 風險調整後收益 (簡化夏普比率)
+        # 這裡可以考慮使用過去一段時間的收益標準差來計算，但為了簡化，先使用一個基於波動性的懲罰
+        # 假設我們希望獎勵平穩的收益，懲罰劇烈波動
+        # 這裡可以考慮使用 ATR 或其他波動性指標
+        # 暫時不引入複雜的風險調整，因為這需要歷史數據，而我們在 step 中只處理當前數據
+        # 如果要實現，可能需要在 info 中傳遞更多歷史數據，或者在環境中維護收益序列
+        # 這裡可以簡單地懲罰高波動性，或者獎勵低波動性
+        # 例如，如果 ATR 很高，可以給予輕微懲罰
+        # 為了實現更精確的風險調整後收益指標（如差分夏普比率的簡化版本），我們需要維護一個收益序列。
+        # 目前的 log_return 已經是收益的一部分。
+
+        # 其他可能的獎勵/懲罰項 (持倉時間、過度交易等)
+        # 持倉時間獎勵：如果一個倉位持有時間較長且盈利，可以給予獎勵
+        # 過度交易懲罰：已經通過 commission_penalty 實現了一部分，可以考慮額外懲罰頻繁交易
+        # 這裡暫時不引入，保持簡潔。
+
         return float(reward_val)
+
+    def _apply_stop_loss(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], current_timestamp: pd.Timestamp) -> Decimal:
+        """
+        檢查並執行止損。
+        返回因止損而產生的總手續費。
+        """
+        commission_from_sl = Decimal('0.0')
+        for slot_idx in self.current_episode_tradable_slot_indices:
+            units = self.current_positions_units[slot_idx]
+            stop_loss_price_qc = self.stop_loss_prices_qc[slot_idx]
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+
+            if symbol and abs(units) > Decimal('1e-9') and stop_loss_price_qc > Decimal('0'):
+                current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+                
+                if current_bid_qc <= Decimal('0') or current_ask_qc <= Decimal('0'):
+                    logger.warning(f"止損檢查: {symbol} 的當前價格無效。")
+                    continue
+
+                closed_by_sl = False
+                trade_price_for_sl = Decimal('0.0')
+
+                if units > 0: # 多頭倉位
+                    if current_bid_qc <= stop_loss_price_qc:
+                        closed_by_sl = True
+                        trade_price_for_sl = current_bid_qc # 賣出平倉用 Bid
+                elif units < 0: # 空頭倉位
+                    if current_ask_qc >= stop_loss_price_qc:
+                        closed_by_sl = True
+                        trade_price_for_sl = current_ask_qc # 買入平倉用 Ask
+                
+                if closed_by_sl and trade_price_for_sl > Decimal('0'):
+                    logger.info(f"止損觸發 for {symbol} at step {self.episode_step_count}. 價格: {trade_price_for_sl:.5f} QC, 止損價: {stop_loss_price_qc:.5f} QC.")
+                    # 調用 _execute_trade 進行平倉
+                    # units_to_trade 應該是 -current_units (反向平倉所有單位)
+                    traded_units, commission = self._execute_trade(slot_idx, -units, trade_price_for_sl, current_timestamp, all_prices_map)
+                    commission_from_sl += commission
+                    # 止損後，該倉位的保證金會被釋放，_execute_trade 會處理
+                    # 平均入場價也會被重置為 0，_execute_trade 會處理
+        return commission_from_sl
+
+    def _handle_margin_call(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], current_timestamp: pd.Timestamp) -> Decimal:
+        """
+        處理保證金追繳。如果保證金水平低於 OANDA_MARGIN_CLOSEOUT_LEVEL，則強制平倉。
+        返回因強平而產生的總手續費。
+        """
+        commission_from_mc = Decimal('0.0')
+        oanda_closeout_level_decimal = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL))
+        
+        # 重新計算總保證金使用量和權益，因為止損可能已經改變了它們
+        self._update_portfolio_and_equity_value(all_prices_map)
+        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
+
+        if self.total_margin_used_ac <= Decimal('0'):
+            return Decimal('0.0') # 沒有保證金使用，無需處理強平
+
+        margin_level = self.equity_ac / self.total_margin_used_ac
+
+        if margin_level < oanda_closeout_level_decimal:
+            logger.warning(f"強制平倉觸發! Equity={self.equity_ac:.2f}, MarginUsed={self.total_margin_used_ac:.2f}, Level={margin_level:.2%}. 開始平倉。")
+            
+            # 獲取所有持倉，按未實現虧損排序 (虧損最大的先平)
+            positions_to_close = []
+            for slot_idx in self.current_episode_tradable_slot_indices:
+                units = self.current_positions_units[slot_idx]
+                if abs(units) > Decimal('1e-9'):
+                    symbol = self.slot_to_symbol_map[slot_idx]
+                    unrealized_pnl = self.unrealized_pnl_ac[slot_idx] # 這是負數表示虧損
+                    positions_to_close.append((unrealized_pnl, slot_idx, symbol, units))
+            
+            # 按未實現盈虧升序排序 (虧損最大的在前面)
+            positions_to_close.sort(key=lambda x: x[0])
+
+            for pnl, slot_idx, symbol, units_to_close in positions_to_close:
+                # 重新檢查保證金水平，如果已經恢復則停止平倉
+                self._update_portfolio_and_equity_value(all_prices_map)
+                self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
+                if self.total_margin_used_ac > Decimal('0') and (self.equity_ac / self.total_margin_used_ac) >= oanda_closeout_level_decimal:
+                    logger.info(f"保證金水平已恢復 ({self.equity_ac / self.total_margin_used_ac:.2%})，停止強平。")
+                    break
+                
+                # 確定平倉價格
+                current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+                trade_price_for_mc = Decimal('0.0')
+                if units_to_close > 0: # 多頭倉位，賣出平倉
+                    trade_price_for_mc = current_bid_qc
+                elif units_to_close < 0: # 空頭倉位，買入平倉
+                    trade_price_for_mc = current_ask_qc
+                
+                if trade_price_for_mc <= Decimal('0'):
+                    logger.warning(f"強平: {symbol} 的交易價格無效，無法平倉。")
+                    continue
+
+                logger.info(f"強平 {symbol}: 平倉 {units_to_close:.2f} 單位，價格 {trade_price_for_mc:.5f} QC。")
+                traded_units, commission = self._execute_trade(slot_idx, -units_to_close, trade_price_for_mc, current_timestamp, all_prices_map)
+                commission_from_mc += commission
+                
+                # 每次平倉後更新權益和保證金使用情況
+                self._update_portfolio_and_equity_value(all_prices_map)
+                self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
+                
+                # 如果所有倉位都平了，也停止
+                if all(abs(u) < Decimal('1e-9') for u in self.current_positions_units):
+                    logger.info("所有倉位已平倉，停止強平。")
+                    break
+            
+            # 如果強平後保證金水平仍未恢復，則可能需要額外處理 (例如，直接終止 episode)
+            self._update_portfolio_and_equity_value(all_prices_map)
+            self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
+            if self.total_margin_used_ac > Decimal('0') and (self.equity_ac / self.total_margin_used_ac) < oanda_closeout_level_decimal:
+                logger.error(f"強平後保證金水平仍未恢復! Equity={self.equity_ac:.2f}, MarginUsed={self.total_margin_used_ac:.2f}, Level={self.equity_ac / self.total_margin_used_ac:.2%}. Episode 將終止。")
+                # 環境將在 _check_termination_truncation 中被標記為 terminated
+            
+            # 懲罰：強平會導致一個大的負獎勵
+            # 這裡不直接返回懲罰，而是讓 _check_termination_truncation 觸發 terminated，然後在 _calculate_reward 中處理
+            # 但可以在 info 中標記強平事件
+            # self.reward_config["margin_call_penalty"] 可以在 _calculate_reward 中使用
+        return commission_from_mc
+
+    def _check_termination_truncation(self) -> Tuple[bool, bool]:
+        terminated = False
+        oanda_closeout_level_decimal = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL))
+
+        # 檢查權益是否過低
+        if self.portfolio_value_ac < self.initial_capital * oanda_closeout_level_decimal * Decimal('0.4'):
+            logger.warning(f"Episode terminated: Portfolio value ({self.portfolio_value_ac:.2f}) too low."); terminated = True
+        
+        # 檢查保證金水平是否觸發強平
+        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
+        if self.total_margin_used_ac > Decimal('0'):
+            margin_level = self.equity_ac / self.total_margin_used_ac
+            if margin_level < oanda_closeout_level_decimal:
+                logger.warning(f"強制平倉觸發! Equity={self.equity_ac:.2f}, MarginUsed={self.total_margin_used_ac:.2f}, Level={margin_level:.2%}. Episode 將終止。")
+                terminated = True
+        
+        truncated = self.episode_step_count >= self.max_episode_steps
+        if self.current_step_in_dataset >= len(self.dataset):
+            truncated = True
+            terminated = True if not terminated else True # 如果已經終止，保持終止狀態
+        
+        return terminated, truncated
 
     def _check_termination_truncation(self) -> Tuple[bool, bool]:
         # (與V4.8版本相同)
