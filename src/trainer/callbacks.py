@@ -181,11 +181,12 @@ class UniversalCheckpointCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.model is None or self.logger is None: logger.error("Callback model/logger未初始化"); return False
 
-        # 1. 定期保存
+        # 1. 定期保存 - 只保存一個中間模型，避免佔用太多空間
         if self.n_calls > 0 and self.n_calls % self.save_freq == 0:
-            path = self.save_path / f"{self.name_prefix}_{self.num_timesteps}_steps.zip"
-            self.model.save(path); logger.info(f"定期保存模型到: {path}")
-            self.model.save(self.save_path / f"{self.name_prefix}_latest.zip")
+            # 使用固定名稱的中間模型，每次覆蓋
+            intermediate_path = self.save_path / f"{self.name_prefix}_checkpoint.zip"
+            self.model.save(intermediate_path)
+            logger.info(f"定期保存模型到: {intermediate_path} (步數: {self.num_timesteps})")
 
         # 2. 定期評估
         if self.eval_env is not None and self.n_calls > 0 and self.n_calls % self.eval_freq == 0:
@@ -236,13 +237,11 @@ class UniversalCheckpointCallback(BaseCallback):
 
     def _on_training_end(self) -> None:
         logger.info(f"訓練結束 (UniversalCheckpointCallback)。總步數: {self.num_timesteps}, 總調用次數: {self.n_calls}")
-        # 保存最終模型 (如果不是因為早停或中斷而正常結束，或者即使是中斷，也在這裡再保存一次)
-        final_save_path = self.save_path / f"{self.name_prefix}_final_at_{self.num_timesteps}.zip"
+        # 只保存latest模型，避免產生太多文件
         if self.model is not None:
-            self.model.save(final_save_path)
-            logger.info(f"最終模型已保存到: {final_save_path}")
-            # 也更新 latest
-            self.model.save(self.save_path / f"{self.name_prefix}_latest.zip")
+            latest_path = self.save_path / f"{self.name_prefix}_latest.zip"
+            self.model.save(latest_path)
+            logger.info(f"最終模型已保存到: {latest_path}")
 
 
 if __name__ == "__main__":

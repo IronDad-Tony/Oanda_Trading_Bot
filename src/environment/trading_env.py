@@ -479,7 +479,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             if units_to_trade.copy_sign(Decimal('1')) == projected_new_units.copy_sign(Decimal('1')) or abs(current_units) < Decimal('1e-9'): # 開倉或加倉
                 # 添加保證金緩衝區機制，避免邊界情況下的保證金不足
                 margin_safety_buffer = Decimal('0.1')  # 10% 安全緩衝區
-                safe_margin_threshold = OANDA_MARGIN_CLOSEOUT_LEVEL + margin_safety_buffer
+                safe_margin_threshold = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) + margin_safety_buffer
                 
                 if projected_total_margin_used_ac > self.equity_ac * (Decimal('1.0') - safe_margin_threshold): # 使用安全閾值檢查
                     logger.warning(f"保證金不足以執行 {symbol} 的交易 ({units_to_trade:.2f} 單位)。預計總保證金 {projected_total_margin_used_ac:.2f} AC，權益 {self.equity_ac:.2f} AC。縮減交易單位。")

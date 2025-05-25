@@ -41,6 +41,13 @@ if logger.hasHandlers():
 
 # --- 控制台處理程序 (Console Handler) ---
 # 將日誌輸出到標準輸出 (終端)
+# 在 Windows 上設置正確的編碼以支持中文
+import io
+if sys.platform == 'win32':
+    # 在 Windows 上使用 UTF-8 編碼的流
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO) # 控制台可以只顯示INFO及以上級別的日誌
 console_formatter = logging.Formatter(
@@ -48,6 +55,9 @@ console_formatter = logging.Formatter(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 console_handler.setFormatter(console_formatter)
+# 設置控制台處理程序的編碼
+if hasattr(console_handler.stream, 'reconfigure'):
+    console_handler.stream.reconfigure(encoding='utf-8')
 logger.addHandler(console_handler)
 
 # --- 文件處理程序 (File Handler) ---
@@ -56,11 +66,13 @@ logger.addHandler(console_handler)
 # maxBytes: 每個日誌文件的最大大小 (這裡是 5MB)
 # backupCount: 保留的舊日誌文件數量
 try:
+    # 在多進程環境中，使用延遲創建文件的方式避免權限衝突
     file_handler = RotatingFileHandler(
         LOG_FILE_PATH,
         maxBytes=5*1024*1024, # 5 MB
         backupCount=5,        # 保留5個備份文件
-        encoding='utf-8'      # 確保支持中文等字符
+        encoding='utf-8',     # 確保支持中文等字符
+        delay=True            # 延遲創建文件，直到第一次寫入
     )
     file_handler.setLevel(logging.DEBUG) # 文件日誌記錄所有DEBUG及以上級別的信息
     file_formatter = logging.Formatter(
