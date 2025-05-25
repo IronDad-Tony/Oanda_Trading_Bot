@@ -15,6 +15,9 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, ROUND_CEILIN
 import sys
 from pathlib import Path
 import logging
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.figure import Figure
 
 getcontext().prec = 30
 logger: logging.Logger = logging.getLogger("trading_env_module_init") # type: ignore
@@ -57,13 +60,6 @@ TIMESTEPS = _config_values_env_v5.get("TIMESTEPS", 128); MAX_SYMBOLS_ALLOWED = _
 
 
 class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
-    # ... ( __init__, reset, _get_current_raw_prices_for_all_dataset_symbols, 
-    #       _get_specific_rate, _get_exchange_rate_to_account_currency,
-    #       _update_atr_values, _update_stop_loss_prices, _update_portfolio_and_equity_value,
-    #       _get_observation, _get_info, _init_render_figure, render, close
-    #       這些方法的實現與您上一個版本 V4.9 的保持一致) ...
-    # <在此處粘貼您上一個版本 UniversalTradingEnvV4 (V4.9) 中這些方法的完整實現>
-    # 我將重新粘貼它們以確保完整性。
     metadata = {'render_modes': ['human', 'array'], 'render_fps': 10}
     def __init__(self, dataset: UniversalMemoryMappedDataset, instrument_info_manager: InstrumentInfoManager, active_symbols_for_episode: List[str], # type: ignore
                  initial_capital: float = float(DEFAULT_INITIAL_CAPITAL), max_episode_steps: Optional[int] = None,
@@ -132,10 +128,6 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         if self.render_mode == 'human': self._init_render_figure()
         logger.info(f"UniversalTradingEnvV4 (Detailed Step - V5.0) 初始化完成。")
 
-    # --- (reset, _get_current_raw_prices_for_all_dataset_symbols, _get_specific_rate, _get_exchange_rate_to_account_currency,
-    #      _update_atr_values, _update_stop_loss_prices, _update_portfolio_and_equity_value,
-    #      _get_observation, _get_info, _init_render_figure, render, close 與 V4.9 基本相同) ---
-    # <在此處粘貼您上一個版本 UniversalTradingEnvV4 (V4.9) 中這些方法的完整實現>
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         super().reset(seed=seed); self.current_step_in_dataset = 0; self.episode_step_count = 0
         if len(self.dataset) == 0: raise RuntimeError("Dataset is empty, cannot reset environment.")
@@ -341,11 +333,6 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         logger.info(f"執行交易: {symbol}, 類型: {trade_type}, 單位: {units_to_trade:.2f}, 價格: {trade_price_qc:.5f} QC, 手續費: {commission_ac:.2f} AC, 實現盈虧: {realized_pnl_ac:.2f} AC, 現金: {self.cash:.2f} AC, 新倉位: {new_units:.2f}")
         return units_to_trade, commission_ac
 
-    # --- (詳細的 step, _calculate_reward, _check_termination_truncation, _get_observation, _get_info, render, close 方法將緊隨其後) ---
-
-    # ... (if __name__ == "__main__": 測試塊與V4.8版本相同) ...
-    # <在此處粘貼您上一個版本 UniversalTradingEnvV4 (V4.8) 中 if __name__ == "__main__": 塊的全部內容>
-    # 為確保完整性，我將再次粘貼並檢查
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         self.episode_step_count += 1
         all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
@@ -752,11 +739,125 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         margin_level_val = float(self.equity_ac / (self.total_margin_used_ac + Decimal('1e-9')))
         return {"features_from_dataset": obs_f, "current_positions_nominal_ratio_ac": np.clip(obs_pr, -5.0, 5.0).astype(np.float32), "unrealized_pnl_ratio_ac": np.clip(obs_upl_r, -1.0, 5.0).astype(np.float32), "margin_level": np.clip(np.array([margin_level_val]), 0.0, 100.0).astype(np.float32), "time_since_last_trade_ratio": obs_tslt_ratio.astype(np.float32), "padding_mask": obs_pm}
 
+    def _init_render_figure(self):
+        """初始化matplotlib圖表用於渲染"""
+        try:
+            self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 8))
+            self.fig.suptitle('交易環境監控', fontsize=14)
+            
+            # 上圖：投資組合價值
+            self.ax1.set_title('投資組合價值歷史')
+            self.ax1.set_ylabel(f'價值 ({ACCOUNT_CURRENCY})')
+            self.ax1.grid(True, alpha=0.3)
+            
+            # 下圖：持倉狀況
+            self.ax2.set_title('當前持倉狀況')
+            self.ax2.set_ylabel('持倉單位')
+            self.ax2.set_xlabel('交易對象')
+            self.ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            logger.info("渲染圖表初始化完成")
+        except Exception as e:
+            logger.warning(f"渲染圖表初始化失敗: {e}")
+            self.fig = None
+            self.ax1 = None
+            self.ax2 = None
+
+    def render(self):
+        """渲染當前環境狀態"""
+        if self.render_mode != 'human' or not hasattr(self, 'fig') or self.fig is None:
+            return
+        
+        try:
+            # 清除之前的圖表內容
+            self.ax1.clear()
+            self.ax2.clear()
+            
+            # 重新設置標題和標籤
+            self.ax1.set_title('投資組合價值歷史')
+            self.ax1.set_ylabel(f'價值 ({ACCOUNT_CURRENCY})')
+            self.ax1.grid(True, alpha=0.3)
+            
+            # 繪製投資組合價值歷史
+            if len(self.portfolio_value_history) > 1:
+                steps = list(range(len(self.portfolio_value_history)))
+                self.ax1.plot(steps, self.portfolio_value_history, 'b-', linewidth=2, label='投資組合價值')
+                self.ax1.axhline(y=float(self.initial_capital), color='r', linestyle='--', alpha=0.7, label='初始資本')
+                self.ax1.legend()
+            
+            # 繪製當前持倉狀況
+            self.ax2.set_title('當前持倉狀況')
+            self.ax2.set_ylabel('持倉單位')
+            self.ax2.set_xlabel('交易對象')
+            self.ax2.grid(True, alpha=0.3)
+            
+            # 收集有效持倉數據
+            symbols = []
+            positions = []
+            colors = []
+            
+            for slot_idx in self.current_episode_tradable_slot_indices:
+                symbol = self.slot_to_symbol_map.get(slot_idx)
+                if symbol:
+                    units = float(self.current_positions_units[slot_idx])
+                    if abs(units) > 1e-9:  # 只顯示有意義的持倉
+                        symbols.append(symbol)
+                        positions.append(units)
+                        colors.append('green' if units > 0 else 'red')
+            
+            if symbols:
+                bars = self.ax2.bar(symbols, positions, color=colors, alpha=0.7)
+                self.ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+                
+                # 添加數值標籤
+                for bar, pos in zip(bars, positions):
+                    height = bar.get_height()
+                    self.ax2.text(bar.get_x() + bar.get_width()/2., height,
+                                f'{pos:.2f}', ha='center', va='bottom' if height >= 0 else 'top')
+            else:
+                self.ax2.text(0.5, 0.5, '無持倉', ha='center', va='center', transform=self.ax2.transAxes)
+            
+            # 添加環境信息
+            info_text = f"步驟: {self.episode_step_count}\n"
+            info_text += f"現金: {float(self.cash):.2f} {ACCOUNT_CURRENCY}\n"
+            info_text += f"權益: {float(self.equity_ac):.2f} {ACCOUNT_CURRENCY}\n"
+            info_text += f"已用保證金: {float(self.total_margin_used_ac):.2f} {ACCOUNT_CURRENCY}"
+            
+            self.fig.text(0.02, 0.02, info_text, fontsize=10, verticalalignment='bottom',
+                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            
+            plt.tight_layout()
+            plt.pause(0.01)  # 短暫暫停以更新顯示
+            
+        except Exception as e:
+            logger.warning(f"渲染過程中發生錯誤: {e}")
+    def close(self):
+        """關閉環境並清理資源"""
+        logger.info("關閉 TradingEnvV4。")
+        try:
+            if hasattr(self, 'fig') and self.fig is not None:
+                plt.close(self.fig)
+                self.fig = None
+                self.ax1 = None
+                self.ax2 = None
+                logger.debug("已關閉matplotlib圖表")
+        except Exception as e:
+            logger.warning(f"關閉圖表時發生錯誤: {e}")
+
     def _get_info(self) -> Dict[str, Any]:
-        return {"cash_ac": float(self.cash), "portfolio_value_ac": float(self.portfolio_value_ac), "equity_ac": float(self.equity_ac), "total_margin_used_ac": float(self.total_margin_used_ac), "episode_step": self.episode_step_count}
-    def _init_render_figure(self): pass
-    def render(self): pass
-    def close(self): logger.info("關閉 TradingEnvV4。"); pass
+        """獲取環境信息"""
+        return {
+            "cash_ac": float(self.cash),
+            "portfolio_value_ac": float(self.portfolio_value_ac),
+            "equity_ac": float(self.equity_ac),
+            "total_margin_used_ac": float(self.total_margin_used_ac),
+            "episode_step": self.episode_step_count,
+            "max_drawdown": float(self.max_drawdown_episode),
+            "peak_portfolio_value": float(self.peak_portfolio_value_episode),
+            "active_positions": sum(1 for units in self.current_positions_units if abs(units) > Decimal('1e-9')),
+            "trade_count": len(self.trade_log)
+        }
 
 # --- if __name__ == "__main__": 測試塊 (與V4.8版本相同) ---
 if __name__ == "__main__":
