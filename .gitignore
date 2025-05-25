@@ -25,17 +25,18 @@ data/mmap_s5_universal/
 # Streamlit 臨時文件
 .streamlit/
 
+# 權重檔案和模型檔案 (通常很大，不需要版本控制)
+*.zip
+weights/
+*.h5
+*.pkl
+*.pt
+*.pth
+*.ckpt
+
+# TensorBoard 日誌
+logs/sac_tensorboard_logs_*/
+
 # 其他您不想追蹤的文件或資料夾
 *.bak
 *.tmp
-.gitignore
-weights/sac_universal_trader_20250525-095619/sac_universal_trader_50_steps.zip
-weights/sac_universal_trader_20250525-095619/sac_universal_trader_100_steps.zip
-weights/sac_universal_trader_20250525-095619/sac_universal_trader_150_steps.zip
-weights/sac_universal_trader_20250525-095619/sac_universal_trader_200_steps.zip
-weights/sac_universal_trader_20250525-095619/sac_universal_trader_250_steps.zip
-weights/sac_universal_trader_20250525-095619/sac_universal_trader_final_at_256.zip
-weights/sac_universal_trader_20250525-095619/sac_universal_trader_latest.zip
-weights/sac_universal_trader_20250525-095619/best_model/sac_universal_trader_best.zip
-.gitignore
-.gitignore
