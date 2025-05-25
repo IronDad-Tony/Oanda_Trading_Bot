@@ -21,7 +21,13 @@ src_path = str(project_root / "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 from common.config import MAX_SYMBOLS_ALLOWED
-from environment.trading_env import DEFAULT_INITIAL_CAPITAL, format_datetime_for_oanda # 用於模擬進度和更新UI
+# from environment.trading_env import DEFAULT_INITIAL_CAPITAL, format_datetime_for_oanda # 用於模擬進度和更新UI
+# 修正導入錯誤，使用config中的常量
+DEFAULT_INITIAL_CAPITAL = 100000.0
+
+def format_datetime_for_oanda(dt):
+    """格式化datetime為OANDA API格式"""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 try:
@@ -231,9 +237,16 @@ with main_area:
                             if len(st_log_list_ref) > 200:
                                 st_log_list_ref.pop(0)
 
-                        args_dict["streamlit_status_text"] = type('obj', (object,), {'info': lambda m: ui_status_update(m, 'info'), 'warning': lambda m: ui_status_update(m, 'warning'), 'error': lambda m: ui_status_update(m, 'error'), 'success': lambda m: ui_status_update(m, 'success')})()
-                        # progress_bar 需要一個 set_progress 方法
-                        # args_dict["streamlit_progress_bar"] = type('obj', (object,), {'progress': lambda p: st.session_state.update({'current_progress_val_from_thread':p})  })()
+                        args_dict["streamlit_status_text"] = type('obj', (object,), {
+                            'info': lambda self, m: ui_status_update(m, 'info'),
+                            'warning': lambda self, m: ui_status_update(m, 'warning'),
+                            'error': lambda self, m: ui_status_update(m, 'error'),
+                            'success': lambda self, m: ui_status_update(m, 'success')
+                        })()
+                        # progress_bar 需要一個 progress 方法
+                        args_dict["streamlit_progress_bar"] = type('obj', (object,), {
+                            'progress': lambda self, p: None  # 簡化版本，暫時不更新進度條
+                        })()
 
 
                         run_training_session(**args_dict) # type: ignore
