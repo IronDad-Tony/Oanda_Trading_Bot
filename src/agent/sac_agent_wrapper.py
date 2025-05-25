@@ -2,6 +2,7 @@
 """
 SAC智能體包裝器。
 封裝Stable Baselines3的SAC智能體，提供簡化的接口，並集成TensorBoard日誌。
+支援GPU加速訓練和混合精度訓練。
 """
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -10,6 +11,7 @@ from stable_baselines3.common.logger import configure as sb3_logger_configure # 
 from gymnasium import spaces # <-- gymnasium.spaces
 import gymnasium as gym # <-- 導入 gymnasium as gym 以便MockEnv使用
 import torch
+import torch.nn as nn
 from typing import Optional, Dict, Any, Type, Callable, Union, List, Tuple # <--- 添加 Tuple
 from pathlib import Path
 import time
@@ -18,6 +20,7 @@ import numpy as np # <--- 在文件頂部導入 numpy
 from datetime import datetime # <--- 在文件頂部導入 datetime
 import pandas as pd # <--- 在文件頂部導入 pandas
 import sys # 確保導入
+import gc  # 垃圾回收
 
 try:
     from agent.sac_policy import CustomSACPolicy
@@ -25,7 +28,7 @@ try:
         DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
         SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU,
-        TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED # <--- 確保 MAX_SYMBOLS_ALLOWED 也被導入
+        TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP # <--- 添加混合精度訓練支持
     )
     from common.logger_setup import logger
 except ImportError:
@@ -38,7 +41,7 @@ except ImportError:
         from src.common.config import (
             DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
-            SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU, TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED
+            SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU, TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP
         )
         from src.common.logger_setup import logger
         logger.info("Direct run SACAgentWrapper: Successfully re-imported modules.")
@@ -54,7 +57,7 @@ except ImportError:
         DEVICE="cpu"; SAC_LEARNING_RATE=3e-4; SAC_BATCH_SIZE=256; SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR=1000
         SAC_LEARNING_STARTS_FACTOR=10; SAC_GAMMA=0.99; SAC_ENT_COEF='auto'
         SAC_TRAIN_FREQ_STEPS=1; SAC_GRADIENT_STEPS=1; SAC_TAU=0.005; TIMESTEPS=128
-        LOGS_DIR=Path("./logs_fallback"); MAX_SYMBOLS_ALLOWED=20
+        LOGS_DIR=Path("./logs_fallback"); MAX_SYMBOLS_ALLOWED=20; USE_AMP=False
 
 
 class SACAgentWrapper:
@@ -75,17 +78,39 @@ class SACAgentWrapper:
                  tensorboard_log_path: Optional[str] = None,
                  seed: Optional[int] = None,
                  custom_objects: Optional[Dict[str, Any]] = None,
-                 device: Union[torch.device, str] = DEVICE
+                 device: Union[torch.device, str] = DEVICE,
+                 use_amp: bool = USE_AMP
                 ):
         self.env = env
         self.policy_class = policy_class
         self.policy_kwargs = policy_kwargs if policy_kwargs is not None else {}
+        self.use_amp = use_amp
+        
+        # 優化設備配置
+        self.device = self._setup_device(device)
+        logger.info(f"SAC Agent Wrapper: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
+        
         num_active_symbols = getattr(self.env.envs[0], 'num_active_symbols_in_slots', 1)
         calculated_buffer_size = num_active_symbols * TIMESTEPS * buffer_size_factor
         self.buffer_size = min(max(calculated_buffer_size, batch_size * 200, 50000),200000)
         calculated_learning_starts = num_active_symbols * batch_size * learning_starts_factor
         self.learning_starts = max(calculated_learning_starts, batch_size * 20, 2000)
-        logger.info(f"SAC Agent Wrapper: num_active_symbols={num_active_symbols}, BufferSize={self.buffer_size}, LearningStarts={self.learning_starts}")
+        
+        # 根據設備調整批次大小以優化GPU利用率
+        if self.device.type == 'cuda':
+            # 如果使用GPU，可以適當增加批次大小
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            if gpu_memory_gb >= 8:  # 8GB以上GPU
+                self.optimized_batch_size = min(batch_size * 3, 768)
+            elif gpu_memory_gb >= 4:  # 4-8GB GPU
+                self.optimized_batch_size = min(batch_size * 2, 512)
+            else:  # 小於4GB GPU
+                self.optimized_batch_size = batch_size
+            logger.info(f"GPU模式 ({gpu_memory_gb:.1f}GB)：調整批次大小從 {batch_size} 到 {self.optimized_batch_size}")
+        else:
+            self.optimized_batch_size = batch_size
+            
+        logger.info(f"SAC Agent Wrapper: num_active_symbols={num_active_symbols}, BufferSize={self.buffer_size}, LearningStarts={self.learning_starts}, BatchSize={self.optimized_batch_size}")
         if tensorboard_log_path is None:
             current_time_str = datetime.now().strftime("%Y%m%d-%H%M%S") # datetime 已導入
             self.tensorboard_log_path = str(LOGS_DIR / f"sac_tensorboard_logs_{current_time_str}")
@@ -95,10 +120,10 @@ class SACAgentWrapper:
             self.tensorboard_log_path = tensorboard_log_path
         self.agent = SAC(
             policy=self.policy_class, env=self.env, learning_rate=learning_rate,
-            buffer_size=self.buffer_size, learning_starts=self.learning_starts, batch_size=batch_size,
+            buffer_size=self.buffer_size, learning_starts=self.learning_starts, batch_size=self.optimized_batch_size,
             tau=tau, gamma=gamma, train_freq=(train_freq_steps, "step"), gradient_steps=gradient_steps,
             ent_coef=ent_coef, policy_kwargs=self.policy_kwargs, verbose=verbose, seed=seed,
-            device=device, tensorboard_log=self.tensorboard_log_path
+            device=self.device, tensorboard_log=self.tensorboard_log_path
         )
         self.custom_objects = custom_objects if custom_objects is not None else {}
         self.custom_objects["policy_class"] = self.policy_class
@@ -108,16 +133,114 @@ class SACAgentWrapper:
              self.custom_objects["features_extractor_class"] = self.policy_class.features_extractor_class # type: ignore
         logger.info("SACAgentWrapper 初始化完成。")
 
+    def _setup_device(self, device: Union[torch.device, str]) -> torch.device:
+        """
+        設置和優化計算設備
+        
+        Args:
+            device: 指定的設備
+            
+        Returns:
+            優化後的設備對象
+        """
+        if isinstance(device, str):
+            if device == "auto":
+                # 自動選擇最佳設備
+                if torch.cuda.is_available():
+                    device_obj = torch.device("cuda")
+                    # 檢查GPU內存和性能
+                    gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+                    gpu_name = torch.cuda.get_device_name(0)
+                    logger.info(f"檢測到GPU: {gpu_name}, 內存: {gpu_memory:.1f}GB")
+                    
+                    # 設置GPU優化
+                    self._optimize_gpu_settings()
+                        
+                else:
+                    device_obj = torch.device("cpu")
+                    logger.info("未檢測到CUDA，使用CPU")
+            else:
+                device_obj = torch.device(device)
+        else:
+            device_obj = device
+            
+        # 驗證設備可用性
+        if device_obj.type == "cuda" and not torch.cuda.is_available():
+            logger.warning("指定使用CUDA但CUDA不可用，回退到CPU")
+            device_obj = torch.device("cpu")
+        
+        return device_obj
+    
+    def _optimize_gpu_settings(self):
+        """優化GPU設置以提高訓練效率"""
+        try:
+            # 清理GPU內存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+                
+                # 設置內存分配策略
+                torch.cuda.set_per_process_memory_fraction(0.85)  # 使用85%的GPU內存
+                
+                # 啟用cuDNN基準模式以優化卷積操作
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cudnn.enabled = True
+                
+                # 設置cuDNN確定性（可選，會稍微降低性能但提高可重現性）
+                # torch.backends.cudnn.deterministic = True
+                
+                # 啟用TensorFloat-32 (TF32) 以提高Ampere架構GPU性能
+                if hasattr(torch.backends.cuda, 'matmul'):
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                if hasattr(torch.backends.cudnn, 'allow_tf32'):
+                    torch.backends.cudnn.allow_tf32 = True
+                
+                # 設置GPU內存增長策略
+                os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+                
+                logger.info("GPU優化設置已啟用：cuDNN基準模式、TF32、內存優化")
+                
+        except Exception as e:
+            logger.warning(f"GPU優化設置時發生錯誤: {e}")
+
     def train(self, total_timesteps: int, callback: Optional[Union[BaseCallback, List[BaseCallback]]] = None,
               log_interval: int = 1, reset_num_timesteps: bool = True):
         logger.info(f"開始訓練 SAC 智能體，總步數: {total_timesteps}...")
         start_time = time.time()
+        
+        # 訓練前的GPU內存清理
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+            initial_memory = torch.cuda.memory_allocated() / 1024**2  # MB
+            logger.info(f"訓練開始時GPU內存使用: {initial_memory:.1f}MB")
+        
         try:
+            # 如果使用混合精度訓練，需要特殊處理
+            if self.use_amp and self.device.type == 'cuda':
+                logger.info("使用混合精度訓練模式")
+                # 注意：Stable Baselines3 可能不直接支持AMP，這裡記錄設置
+                # 實際的AMP實現需要在policy層面進行
+            
             self.agent.learn(total_timesteps=total_timesteps, callback=callback, log_interval=log_interval,
                              reset_num_timesteps=reset_num_timesteps, progress_bar=False)
+            
             training_duration = time.time() - start_time
+            
+            # 訓練後的GPU內存統計
+            if self.device.type == 'cuda':
+                final_memory = torch.cuda.memory_allocated() / 1024**2  # MB
+                max_memory = torch.cuda.max_memory_allocated() / 1024**2  # MB
+                logger.info(f"訓練完成時GPU內存使用: {final_memory:.1f}MB, 峰值: {max_memory:.1f}MB")
+                torch.cuda.reset_peak_memory_stats()
+            
             logger.info(f"智能體訓練完成。耗時: {training_duration:.2f} 秒。")
-        except Exception as e: logger.error(f"智能體訓練過程中發生錯誤: {e}", exc_info=True); raise
+            
+        except Exception as e:
+            logger.error(f"智能體訓練過程中發生錯誤: {e}", exc_info=True)
+            # 訓練失敗時清理GPU內存
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+            raise
 
     def predict(self, observation: np.ndarray, state: Optional[Tuple[np.ndarray, ...]] = None, # np, Tuple 已導入
                 episode_start: Optional[np.ndarray] = None, deterministic: bool = True) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:

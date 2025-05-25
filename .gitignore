@@ -18,9 +18,10 @@ env/
 # 如果日誌和數據庫文件很大，或者包含敏感信息，建議忽略
 logs/*.log
 data/database/*.db # 排除所有資料庫檔案，避免將大型資料檔案納入版本控制
+data/ # 排除整個data目錄
 
 # mmap數據文件 (通常很大，不需要版本控制)
-data/mmap_s5_universal/ 
+data/mmap_s5_universal/
 
 # Streamlit 臨時文件
 .streamlit/
@@ -36,6 +37,12 @@ weights/
 
 # TensorBoard 日誌
 logs/sac_tensorboard_logs_*/
+
+# 測試文件和臨時文件
+test_emergency_fixes.py
+test_fixes_simple.py
+temp_training_data/
+test_callback_saves/
 
 # 其他您不想追蹤的文件或資料夾
 *.bak

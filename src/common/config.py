@@ -114,11 +114,11 @@ BEST_MODEL_SUBDIR = "best_model" # 相對於 WEIGHTS_DIR
 # SAC 相關
 SAC_GAMMA = 0.95             # 折扣因子
 SAC_LEARNING_RATE = 3e-5     # 學習率
-SAC_BATCH_SIZE = 64          # 批次大小
+SAC_BATCH_SIZE = 128         # 增加批次大小以更好利用GPU
 SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # 每個symbol的Replay Buffer大小因子 (總大小 = N_symbols * TIMESTEPS * factor)
 SAC_LEARNING_STARTS_FACTOR = 200 # 學習開始前收集的最小樣本數因子 (總樣本 = N_symbols * BATCH_SIZE * factor)
-SAC_TRAIN_FREQ_STEPS = 64    # 每多少環境步驟執行一次訓練迭代 (gradient_steps)
-SAC_GRADIENT_STEPS = 64      # 每次訓練迭代執行多少梯度步數
+SAC_TRAIN_FREQ_STEPS = 32    # 減少訓練頻率以提高效率
+SAC_GRADIENT_STEPS = 32      # 每次訓練迭代執行多少梯度步數
 SAC_ENT_COEF = 'auto'        # 熵系數 ('auto' 或 float)
 SAC_TARGET_UPDATE_INTERVAL = 1 # Target network 更新頻率 (相對於gradient_steps)
 SAC_TAU = 0.005              # Target network 軟更新系數
@@ -128,9 +128,32 @@ INITIAL_CAPITAL = 100000.0              # 初始模擬資金 (以ACCOUNT_CURRENC
 MAX_EPISODE_STEPS_DEFAULT = 20000       # 每個訓練episode的最大步數 (可調整)
 TOTAL_TRAINING_TIMESTEPS_TARGET = 1_000_000 # 總訓練目標步數 (可根據需要調整)
 SAVE_MODEL_INTERVAL_STEPS = 50000       # 模型保存間隔 (按總訓練steps)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# --- GPU優化配置 ---
+def setup_gpu_optimization():
+    """設置GPU優化配置"""
+    if torch.cuda.is_available():
+        # 啟用TensorFloat-32 (TF32) 以提高性能
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        # 設置cuDNN基準測試以優化卷積性能
+        torch.backends.cudnn.benchmark = True
+        
+        # 設置內存分配策略
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512,expandable_segments:True"
+        
+        # 啟用混合精度訓練
+        return True
+    return False
+
+# 設備配置
+GPU_OPTIMIZED = setup_gpu_optimization()
+DEVICE = "auto"  # 讓SACAgentWrapper自動選擇最佳設備
+
 # 混合精度訓練 (如果GPU支持且希望加速)
-USE_AMP = True if DEVICE.type == 'cuda' else False
+USE_AMP = GPU_OPTIMIZED
+USE_CUDA_GRAPHS = GPU_OPTIMIZED  # 啟用CUDA圖優化
 
 # --- 風險管理參數 ---
 MAX_ACCOUNT_RISK_PERCENTAGE = 0.02  # 單筆交易最大可承受賬戶風險百分比 (例如 2%)
