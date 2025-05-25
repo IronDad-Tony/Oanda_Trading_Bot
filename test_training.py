@@ -15,7 +15,7 @@ from pathlib import Path
 
 # 導入所有必要的模組
 from common.config import *
-from common.logger_setup import setup_logger
+from common.logger_setup import logger
 from data_manager.database_manager import DatabaseManager
 from data_manager.instrument_info_manager import InstrumentInfoManager
 from data_manager.mmap_dataset import UniversalMemoryMappedDataset
@@ -26,8 +26,7 @@ from trainer.callbacks import UniversalCheckpointCallback
 def main():
     """執行快速訓練測試"""
     
-    # 設置日誌
-    logger = setup_logger("test_training", LOGS_DIR / "test_training.log")
+    # 使用全局日誌記錄器
     logger.info("開始快速訓練測試...")
     
     # 測試參數
