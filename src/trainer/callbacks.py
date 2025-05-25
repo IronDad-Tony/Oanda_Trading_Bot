@@ -25,8 +25,8 @@ _config_cb_v5: Dict[str, Any] = {}
 try:
     from common.logger_setup import logger as common_logger_cb_v5; _logger_cb_v5 = common_logger_cb_v5; logger = _logger_cb_v5
     logger.debug("callbacks.py (V5): Successfully imported logger from common.logger_setup.")
-    from common.config import WEIGHTS_DIR as _WEIGHTS_DIR, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY
-    _config_cb_v5 = {"WEIGHTS_DIR": _WEIGHTS_DIR, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY}
+    from common.config import LOGS_DIR as _LOGS_DIR, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY
+    _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY}
     logger.info("callbacks.py (V5): Successfully imported common.config.")
 except ImportError:
     logger_temp_cb_v5 = logging.getLogger("callbacks_v5_fallback_initial"); logger_temp_cb_v5.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_cb_v5.setLevel(logging.DEBUG)
@@ -38,14 +38,14 @@ except ImportError:
         # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.logger_setup import logger as common_logger_retry_cb_v5; logger = common_logger_retry_cb_v5
         logger.info("callbacks.py (V5): Successfully re-imported common_logger.")
-        from src.common.config import WEIGHTS_DIR as _WEIGHTS_DIR_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R
-        _config_cb_v5 = {"WEIGHTS_DIR": _WEIGHTS_DIR_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R}
+        from src.common.config import LOGS_DIR as _LOGS_DIR_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R
+        _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R}
         logger.info("callbacks.py (V5): Successfully re-imported common.config after path adjustment.")
     except ImportError as e_retry_cb_v5_critical:
         logger.error(f"callbacks.py (V5): Critical import error after path adjustment: {e_retry_cb_v5_critical}", exc_info=True)
         logger.warning("callbacks.py (V5): Using fallback values for config.")
-        _config_cb_v5 = {"WEIGHTS_DIR": Path("./weights_fallback"), "ACCOUNT_CURRENCY": "AUD"}
-WEIGHTS_DIR = _config_cb_v5.get("WEIGHTS_DIR", Path("./weights_fallback_default"))
+        _config_cb_v5 = {"LOGS_DIR": Path("./logs"), "ACCOUNT_CURRENCY": "AUD"}
+LOGS_DIR = _config_cb_v5.get("LOGS_DIR", Path("./logs"))
 ACCOUNT_CURRENCY = _config_cb_v5.get("ACCOUNT_CURRENCY", "AUD")
 
 

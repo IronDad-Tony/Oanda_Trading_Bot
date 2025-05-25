@@ -8,18 +8,18 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-# 嘗試從 config 模組導入 LOGS_DIR 和其他可能的配置
-# 這裡使用 try-except 是為了在單獨測試此文件時，或者在 config 尚未完全可用時，提供一個後備
-try:
-    from .config import LOGS_DIR, DEVICE # 假設 DEVICE 也可能影響日誌內容
-    LOG_FILE_PATH = LOGS_DIR / "trading_system.log"
-except ImportError:
-    # 如果無法導入config (例如，在專案結構尚未完全建立時單獨運行此文件)
-    # 提供一個後備的日誌路徑，通常這種情況不應在正常運行時發生
-    print("警告: 無法從 common.config 導入 LOGS_DIR。日誌將輸出到當前目錄下的 trading_system.log")
-    current_file_dir = Path(__file__).resolve().parent
-    LOG_FILE_PATH = current_file_dir / "trading_system_fallback.log"
-    DEVICE = "cpu" # 後備
+# 避免循環導入，直接設置日誌路徑
+# 計算項目根目錄和日誌目錄
+project_root = Path(__file__).resolve().parent.parent.parent
+logs_dir = project_root / "logs"
+
+# 實作時間戳命名機制 - 每次執行產生新的日誌檔案
+from datetime import datetime
+current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+LOG_FILE_PATH = logs_dir / f"trading_system_{current_time}.log"
+
+# 確保日誌目錄存在
+logs_dir.mkdir(parents=True, exist_ok=True)
 
 # --- 日誌級別 ---
 # DEBUG: 詳細的診斷信息，通常只在調試時開啟。
@@ -70,8 +70,7 @@ try:
     import os
     from logging.handlers import TimedRotatingFileHandler
 
-    # 確保日誌目錄存在
-    LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 日誌目錄已在上面創建
 
     if os.name == 'nt':  # Windows 系統
         logger.info("檢測到 Windows 系統，將使用標準的 TimedRotatingFileHandler (無 fcntl 文件鎖)。")

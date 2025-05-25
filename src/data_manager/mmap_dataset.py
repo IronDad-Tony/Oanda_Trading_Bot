@@ -17,6 +17,9 @@ from sklearn.preprocessing import StandardScaler
 from datetime import datetime, timedelta, timezone
 import sys # 確保 sys 在頂層導入，以便 fallback 和 __main__ 使用
 import logging
+import atexit
+import glob
+import os
 
 try:
     from common.config import (
@@ -59,6 +62,101 @@ except ImportError:
         def manage_data_download_for_symbols(*args, **kwargs): logger.error("Downloader not available.")
 
 
+# 全域變數來追蹤活躍的數據集實例
+_active_datasets = []
+
+def cleanup_mmap_temp_files():
+    """
+    清理 mmap 暫存檔案
+    
+    這個函數會：
+    1. 清理所有活躍數據集的 mmap 檔案
+    2. 清理孤立的 mmap 暫存檔案
+    """
+    try:
+        # 關閉所有活躍的數據集
+        for dataset in _active_datasets[:]:  # 使用副本避免修改時的問題
+            try:
+                if hasattr(dataset, 'close'):
+                    dataset.close()
+                    logger.info(f"已關閉數據集: {getattr(dataset, 'dataset_id', 'unknown')}")
+            except Exception as e:
+                logger.warning(f"關閉數據集時發生錯誤: {e}")
+        
+        _active_datasets.clear()
+        
+        # 清理孤立的 mmap 檔案
+        try:
+            mmap_base_dir = MMAP_DATA_DIR
+            if mmap_base_dir.exists():
+                # 查找所有 .mmap 檔案
+                mmap_files = list(mmap_base_dir.rglob("*.mmap"))
+                if mmap_files:
+                    logger.info(f"發現 {len(mmap_files)} 個 mmap 暫存檔案，正在清理...")
+                    for mmap_file in mmap_files:
+                        try:
+                            mmap_file.unlink()
+                            logger.debug(f"已刪除 mmap 檔案: {mmap_file}")
+                        except Exception as e:
+                            logger.warning(f"無法刪除 mmap 檔案 {mmap_file}: {e}")
+                    
+                    # 清理空的目錄
+                    for dataset_dir in mmap_base_dir.iterdir():
+                        if dataset_dir.is_dir():
+                            try:
+                                # 如果目錄為空，則刪除
+                                if not any(dataset_dir.iterdir()):
+                                    dataset_dir.rmdir()
+                                    logger.debug(f"已刪除空目錄: {dataset_dir}")
+                            except Exception as e:
+                                logger.debug(f"無法刪除目錄 {dataset_dir}: {e}")
+                else:
+                    logger.info("未發現需要清理的 mmap 暫存檔案")
+        except Exception as e:
+            logger.warning(f"清理 mmap 暫存檔案時發生錯誤: {e}")
+            
+    except Exception as e:
+        logger.error(f"mmap 暫存檔案清理過程中發生嚴重錯誤: {e}")
+
+def cleanup_old_mmap_files(max_age_hours: int = 24):
+    """
+    清理超過指定時間的舊 mmap 檔案
+    
+    Args:
+        max_age_hours: 檔案最大保留時間（小時）
+    """
+    try:
+        mmap_base_dir = MMAP_DATA_DIR
+        if not mmap_base_dir.exists():
+            return
+            
+        current_time = datetime.now()
+        cutoff_time = current_time - timedelta(hours=max_age_hours)
+        
+        cleaned_count = 0
+        for dataset_dir in mmap_base_dir.iterdir():
+            if dataset_dir.is_dir():
+                try:
+                    # 檢查目錄的修改時間
+                    dir_mtime = datetime.fromtimestamp(dataset_dir.stat().st_mtime)
+                    if dir_mtime < cutoff_time:
+                        # 刪除整個數據集目錄
+                        shutil.rmtree(dataset_dir)
+                        cleaned_count += 1
+                        logger.info(f"已清理過期的數據集目錄: {dataset_dir}")
+                except Exception as e:
+                    logger.warning(f"清理過期目錄 {dataset_dir} 時發生錯誤: {e}")
+        
+        if cleaned_count > 0:
+            logger.info(f"共清理了 {cleaned_count} 個過期的數據集目錄")
+        else:
+            logger.debug("未發現需要清理的過期數據集目錄")
+            
+    except Exception as e:
+        logger.warning(f"清理過期 mmap 檔案時發生錯誤: {e}")
+
+# 註冊程式退出時的清理函數
+atexit.register(cleanup_mmap_temp_files)
 class UniversalMemoryMappedDataset(Dataset):
     def __init__(self,
                  symbols: List[str],
@@ -105,6 +203,11 @@ class UniversalMemoryMappedDataset(Dataset):
         logger.info(f"數據集初始化完成。總對齊時間步: {self.total_aligned_steps}, "
                     f"每個Symbol的特徵數量: {self.num_features_per_symbol}, "
                     f"樣本歷史步長: {self.timesteps_history}")
+# 註冊到活躍數據集列表，用於程式退出時清理
+        _active_datasets.append(self)
+        
+        # 在初始化時清理舊的 mmap 檔案（超過24小時的）
+        cleanup_old_mmap_files(max_age_hours=24)
 
     def _load_and_preprocess_data(self):
         logger.info("開始從數據庫加載和預處理數據...")
@@ -206,7 +309,13 @@ class UniversalMemoryMappedDataset(Dataset):
                 self._load_and_preprocess_data(); return
             self.total_aligned_steps = metadata["total_aligned_steps"]
             self.num_features_per_symbol = metadata["num_features_per_symbol"]
-            self.timesteps_history = metadata.get("timesteps_history", self.timesteps_history)
+            # 確保 timesteps_history 與配置一致，避免維度不匹配
+            metadata_timesteps = metadata.get("timesteps_history", self.timesteps_history)
+            if metadata_timesteps != self.timesteps_history:
+                logger.warning(f"元數據中的 timesteps_history ({metadata_timesteps}) 與當前配置 ({self.timesteps_history}) 不一致！")
+                logger.warning(f"將使用當前配置值 {self.timesteps_history} 並強制重新加載數據。")
+                self._load_and_preprocess_data(); return
+            self.timesteps_history = metadata_timesteps
             self.feature_columns_ordered_for_metadata = metadata.get("feature_columns_ordered", []) # 加載列順序
             start_dt = pd.to_datetime(self.start_time_iso, utc=True); end_dt = pd.to_datetime(self.end_time_iso, utc=True)
             granularity_freq_str = f"{get_granularity_seconds(self.granularity)}s" # <--- 'S' 改為 's'
@@ -285,6 +394,13 @@ class UniversalMemoryMappedDataset(Dataset):
         # import gc; gc.collect() # 在 __del__ 中通常不建議強制gc
         
         log_func(f"數據集 {dataset_id_to_log} 的內存映射文件已關閉。")
+        
+        # 從活躍數據集列表中移除
+        try:
+            if self in _active_datasets:
+                _active_datasets.remove(self)
+        except (ValueError, NameError):
+            pass  # 如果已經不在列表中或列表不存在，忽略錯誤
 
     def __del__(self):
         # __del__ 應該盡可能簡單，避免複雜操作和依賴外部狀態

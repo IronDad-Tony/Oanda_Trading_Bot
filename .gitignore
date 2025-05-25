@@ -22,6 +22,12 @@ logs/*.log
 *.db
 data/database/
 data/mmap_s5_universal/
+# MMap 暫存檔案 (內存映射檔案，程式運行時產生的暫存檔)
+*.mmap
+mmap_data/
+data/mmap_data/
+**/mmap_data/
+**/*.mmap
 
 # Streamlit 臨時文件
 .streamlit/

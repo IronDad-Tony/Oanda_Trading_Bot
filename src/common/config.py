@@ -65,7 +65,7 @@ PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
 
 # --- 模型與訓練參數 ---
 # Transformer 相關
-TIMESTEPS = 256             # 輸入Transformer的時間步長 (序列長度) - 根據用戶要求增加
+TIMESTEPS = 128             # 輸入Transformer的時間步長 (序列長度) - 修復維度不匹配錯誤
 TRANSFORMER_MODEL_DIM = 256 # Transformer內部的主要模型維度 (d_model) - 根據用戶要求減小
 TRANSFORMER_NUM_LAYERS = 4  # Transformer Encoder 的層數 - 根據用戶要求減小
 TRANSFORMER_NUM_HEADS = 8   # 多頭注意力機制的頭數 (確保 d_model % num_heads == 0, 256 % 8 == 0)

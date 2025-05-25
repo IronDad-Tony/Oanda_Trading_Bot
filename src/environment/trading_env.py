@@ -119,7 +119,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.reward_config = default_reward_config_decimal
         self.peak_portfolio_value_episode: Decimal = self.initial_capital; self.max_drawdown_episode: Decimal = Decimal('0.0')
         obs_spaces = {
-            "features_from_dataset": spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_env_slots, TIMESTEPS, self.dataset.num_features_per_symbol), dtype=np.float32),
+            "features_from_dataset": spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32),
             "current_positions_nominal_ratio_ac": spaces.Box(low=-5.0, high=5.0, shape=(self.num_env_slots,), dtype=np.float32),
             "unrealized_pnl_ratio_ac": spaces.Box(low=-1.0, high=5.0, shape=(self.num_env_slots,), dtype=np.float32),
             "margin_level": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
@@ -679,7 +679,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         # (與V4.8版本相同)
         dataset_sample = self.dataset[min(self.current_step_in_dataset, len(self.dataset)-1)]
         features_raw = dataset_sample["features"].numpy()
-        obs_f = np.zeros((self.num_env_slots, TIMESTEPS, self.dataset.num_features_per_symbol), dtype=np.float32)
+        obs_f = np.zeros((self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32)
         obs_pr = np.zeros(self.num_env_slots, dtype=np.float32); obs_upl_r = np.zeros(self.num_env_slots, dtype=np.float32)
         obs_tslt_ratio = np.zeros(self.num_env_slots, dtype=np.float32); obs_pm = np.ones(self.num_env_slots, dtype=np.bool_)
         current_prices_map, _ = self._get_current_raw_prices_for_all_dataset_symbols()
@@ -689,7 +689,30 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 if symbol in self.dataset.symbols:
                     try: dataset_symbol_idx = self.dataset.symbols.index(symbol)
                     except ValueError: logger.error(f"Symbol {symbol} in slot_map but not in dataset.symbols for observation."); continue
-                    obs_f[slot_idx, :, :] = features_raw[dataset_symbol_idx, :, :]
+                    # 修復維度不匹配錯誤：確保維度一致
+                    feature_slice = features_raw[dataset_symbol_idx, :, :]
+                    expected_shape = (self.dataset.timesteps_history, self.dataset.num_features_per_symbol)
+                    if feature_slice.shape != expected_shape:
+                        logger.warning(f"維度不匹配修復: Symbol {symbol} 特徵維度 {feature_slice.shape} != 預期 {expected_shape}")
+                        # 如果時間步長不匹配，截取或填充
+                        if feature_slice.shape[0] != self.dataset.timesteps_history:
+                            if feature_slice.shape[0] > self.dataset.timesteps_history:
+                                # 截取最後的時間步
+                                feature_slice = feature_slice[-self.dataset.timesteps_history:, :]
+                            else:
+                                # 用零填充
+                                padded_slice = np.zeros(expected_shape, dtype=np.float32)
+                                padded_slice[-feature_slice.shape[0]:, :] = feature_slice
+                                feature_slice = padded_slice
+                        # 如果特徵數量不匹配，截取或填充
+                        if feature_slice.shape[1] != self.dataset.num_features_per_symbol:
+                            if feature_slice.shape[1] > self.dataset.num_features_per_symbol:
+                                feature_slice = feature_slice[:, :self.dataset.num_features_per_symbol]
+                            else:
+                                padded_slice = np.zeros(expected_shape, dtype=np.float32)
+                                padded_slice[:, :feature_slice.shape[1]] = feature_slice
+                                feature_slice = padded_slice
+                    obs_f[slot_idx, :, :] = feature_slice
                 units = self.current_positions_units[slot_idx]; details = self.instrument_details_map[symbol]
                 current_bid_qc, current_ask_qc = current_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
                 price_for_value_calc_qc = (current_bid_qc + current_ask_qc) / Decimal('2') if current_bid_qc > 0 and current_ask_qc > 0 else Decimal('0.0')
