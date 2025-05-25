@@ -96,8 +96,19 @@ class UniversalCheckpointCallback(BaseCallback):
         self.last_norm_log_ncalls = 0
 
         self.interrupted = False
-        import signal
-        signal.signal(signal.SIGINT, self._handle_interrupt)
+        
+        # 嘗試設置signal處理器，但在非主線程中會失敗
+        try:
+            import signal
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGINT, self._handle_interrupt)
+                logger.info("Signal handler registered for Ctrl+C interruption.")
+            else:
+                logger.info("Running in non-main thread, signal handler not registered.")
+        except Exception as e:
+            logger.warning(f"Could not register signal handler: {e}")
+        
         logger.info(f"UniversalCheckpointCallback initialized. Save path: {self.save_path}, Best model path: {self.best_model_save_path}")
 
     def _handle_interrupt(self, signum, frame):

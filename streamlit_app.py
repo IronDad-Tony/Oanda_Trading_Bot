@@ -48,6 +48,8 @@ if 'training_data' not in st.session_state:
     st.session_state.training_data = []
 if 'trainer' not in st.session_state:
     st.session_state.trainer = None
+if 'training_error' not in st.session_state:
+    st.session_state.training_error = None
 
 # 可用的交易品種
 AVAILABLE_SYMBOLS = [
@@ -110,18 +112,21 @@ def training_worker(trainer, progress_callback):
     """訓練工作線程"""
     try:
         st.session_state.training_status = 'running'
+        st.session_state.training_error = None
         
-        # 模擬訓練進度更新
+        # 執行訓練
         success = trainer.run_full_training_pipeline()
         
         if success:
             st.session_state.training_status = 'completed'
         else:
             st.session_state.training_status = 'error'
+            st.session_state.training_error = "訓練未成功完成"
             
     except Exception as e:
         st.session_state.training_status = 'error'
-        st.error(f"訓練過程中發生錯誤: {e}")
+        st.session_state.training_error = str(e)
+        logger.error(f"訓練過程中發生錯誤: {e}", exc_info=True)
 
 def start_training(symbols, start_date, end_date, total_timesteps, save_freq, eval_freq):
     """啟動訓練"""
@@ -294,6 +299,8 @@ def main():
             if current_status == 'running':
                 st.progress(st.session_state.training_progress / 100)
                 st.markdown(f"**進度**: {st.session_state.training_progress:.1f}%")
+            elif current_status == 'error' and st.session_state.training_error:
+                st.error(f"錯誤詳情: {st.session_state.training_error}")
             
             # 系統資源監控
             st.subheader("💻 系統資源")
