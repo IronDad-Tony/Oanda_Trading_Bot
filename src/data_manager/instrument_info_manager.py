@@ -19,11 +19,12 @@ try:
     )
     from common.logger_setup import logger
 except ImportError:
-    project_root_iim = Path(__file__).resolve().parent.parent.parent
-    src_path_iim = project_root_iim / "src"
-    if str(project_root_iim) not in sys.path:
-        sys.path.insert(0, str(project_root_iim))
+    # project_root_iim = Path(__file__).resolve().parent.parent.parent # 移除
+    # src_path_iim = project_root_iim / "src" # 移除
+    # if str(project_root_iim) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root_iim)) # 移除
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.config import (
             OANDA_API_KEY, OANDA_ACCOUNT_ID, OANDA_BASE_URL,
             OANDA_API_TIMEOUT_SECONDS

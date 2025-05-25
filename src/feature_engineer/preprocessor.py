@@ -15,11 +15,12 @@ try:
 except ImportError:
     import sys
     from pathlib import Path
-    project_root = Path(__file__).resolve().parent.parent.parent
-    src_path = project_root / "src"
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+    # project_root = Path(__file__).resolve().parent.parent.parent # 移除
+    # src_path = project_root / "src" # 移除
+    # if str(project_root) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root)) # 移除
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.config import PRICE_COLUMNS, TIMESTEPS
         from src.common.logger_setup import logger
         logger.info("Direct run Preprocessor: Successfully re-imported common modules.")

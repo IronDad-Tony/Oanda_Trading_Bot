@@ -1,10 +1,60 @@
-2025-05-24 09:00:14 - [DEBUG] - TradingSystem - (logger_setup.<module>:120) - 這是一條 DEBUG 級別的日誌 (應該只出現在文件中)。
-2025-05-24 09:00:14 - [INFO] - TradingSystem - (logger_setup.<module>:121) - 這是一條 INFO 級別的日誌 (應該出現在文件和控制台)。
-2025-05-24 09:00:14 - [WARNING] - TradingSystem - (logger_setup.<module>:122) - 這是一條 WARNING 級別的日誌。
-2025-05-24 09:00:14 - [ERROR] - TradingSystem - (logger_setup.<module>:123) - 這是一條 ERROR 級別的日誌。
-2025-05-24 09:00:14 - [CRITICAL] - TradingSystem - (logger_setup.<module>:124) - 這是一條 CRITICAL 級別的日誌。
-2025-05-24 09:00:14 - [ERROR] - TradingSystem - (logger_setup.<module>:129) - 捕獲到一個異常 (ZeroDivisionError)
-Traceback (most recent call last):
-  File "C:\Users\tonyh\Oanda_Trading_Bot\src\common\logger_setup.py", line 127, in <module>
-    1 / 0
-ZeroDivisionError: division by zero
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (enhanced_trainer.<module>:65) - enhanced_trainer.py: Successfully re-imported common_logger after path adj.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (config.setup_gpu_optimization:147) - PYTORCH_CUDA_ALLOC_CONF set to: max_split_size_mb:256,expandable_segments:True
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (enhanced_trainer.<module>:73) - enhanced_trainer.py: Successfully re-imported common.config after path adjustment.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (enhanced_trainer.<module>:77) - enhanced_trainer.py: Successfully re-imported shared data manager.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (currency_manager.<module>:46) - currency_manager.py: Successfully re-imported common_logger after path adj.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (currency_manager.<module>:49) - currency_manager.py: Successfully re-imported common.config after path adjustment.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (database_manager.<module>:38) - Direct run: Successfully re-imported common modules after path adjustment.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (database_manager.create_tables_if_not_exist:91) - 檢查並初始化資料庫表於: C:\Users\tonyh\Oanda_Trading_Bot\data\database\oanda_s5_data.db
+2025-05-26 00:25:19 - [DEBUG] - TradingSystem - (database_manager.create_tables_if_not_exist:126) - 表 'historical_price_data' 已檢查/創建。
+2025-05-26 00:25:19 - [DEBUG] - TradingSystem - (database_manager.create_tables_if_not_exist:147) - 表 'download_metadata' 已檢查/創建。
+2025-05-26 00:25:19 - [DEBUG] - TradingSystem - (database_manager.create_tables_if_not_exist:168) - 表 'model_registry' 已檢查/創建。
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (database_manager.create_tables_if_not_exist:171) - 資料庫表初始化完成。
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (oanda_downloader.<module>:45) - Direct run OANDA Downloader: Successfully re-imported common modules after path adjustment.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (instrument_info_manager.<module>:32) - Direct run InstrumentInfoManager: Successfully re-imported common modules.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (currency_manager.<module>:53) - currency_manager.py: Successfully re-imported other dependencies after path adjustment.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (preprocessor.<module>:25) - Direct run Preprocessor: Successfully re-imported common modules.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (mmap_dataset.<module>:44) - Direct run MMapDataset: Successfully re-imported common modules.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (trading_env.<module>:40) - trading_env.py (V5.0): Successfully re-imported common_logger after path adj.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (trading_env.<module>:43) - trading_env.py (V5.0): Successfully re-imported and stored common.config after path adjustment.
+2025-05-26 00:25:19 - [INFO] - TradingSystem - (trading_env.<module>:44) - trading_env.py (V5.0): Successfully re-imported other dependencies after path adjustment.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (transformer_model.<module>:77) - Direct run TransformerModel: Successfully re-imported common_logger after path adj.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (transformer_model.<module>:80) - Direct run TransformerModel: Successfully re-imported common.config after path adjustment.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (feature_extractors.<module>:38) - Direct run FeatureExtractor: Successfully re-imported common modules.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (sac_policy.<module>:54) - sac_policy.py: Direct run: Successfully re-imported common_logger after path adj.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (sac_policy.<module>:56) - sac_policy.py: Direct run: Successfully re-imported common modules after path adjustment.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (sac_agent_wrapper.<module>:47) - Direct run SACAgentWrapper: Successfully re-imported modules.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (callbacks.<module>:39) - callbacks.py (V5): Successfully re-imported common_logger after path adj.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (callbacks.<module>:42) - callbacks.py (V5): Successfully re-imported common.config after path adjustment.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (enhanced_trainer.<module>:86) - enhanced_trainer.py: Successfully re-imported other dependencies after path adjustment.
+2025-05-26 00:25:22 - [INFO] - TradingSystem - (streamlit_app.<module>:34) - 成功導入訓練器和共享數據管理器
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (enhanced_trainer.<module>:65) - enhanced_trainer.py: Successfully re-imported common_logger after path adj.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (config.setup_gpu_optimization:147) - PYTORCH_CUDA_ALLOC_CONF set to: max_split_size_mb:256,expandable_segments:True
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (enhanced_trainer.<module>:73) - enhanced_trainer.py: Successfully re-imported common.config after path adjustment.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (enhanced_trainer.<module>:77) - enhanced_trainer.py: Successfully re-imported shared data manager.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (currency_manager.<module>:46) - currency_manager.py: Successfully re-imported common_logger after path adj.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (currency_manager.<module>:49) - currency_manager.py: Successfully re-imported common.config after path adjustment.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (database_manager.<module>:38) - Direct run: Successfully re-imported common modules after path adjustment.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (database_manager.create_tables_if_not_exist:91) - 檢查並初始化資料庫表於: C:\Users\tonyh\Oanda_Trading_Bot\data\database\oanda_s5_data.db
+2025-05-26 00:30:26 - [DEBUG] - TradingSystem - (database_manager.create_tables_if_not_exist:126) - 表 'historical_price_data' 已檢查/創建。
+2025-05-26 00:30:26 - [DEBUG] - TradingSystem - (database_manager.create_tables_if_not_exist:147) - 表 'download_metadata' 已檢查/創建。
+2025-05-26 00:30:26 - [DEBUG] - TradingSystem - (database_manager.create_tables_if_not_exist:168) - 表 'model_registry' 已檢查/創建。
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (database_manager.create_tables_if_not_exist:171) - 資料庫表初始化完成。
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (oanda_downloader.<module>:45) - Direct run OANDA Downloader: Successfully re-imported common modules after path adjustment.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (instrument_info_manager.<module>:32) - Direct run InstrumentInfoManager: Successfully re-imported common modules.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (currency_manager.<module>:53) - currency_manager.py: Successfully re-imported other dependencies after path adjustment.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (preprocessor.<module>:25) - Direct run Preprocessor: Successfully re-imported common modules.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (mmap_dataset.<module>:44) - Direct run MMapDataset: Successfully re-imported common modules.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (trading_env.<module>:40) - trading_env.py (V5.0): Successfully re-imported common_logger after path adj.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (trading_env.<module>:43) - trading_env.py (V5.0): Successfully re-imported and stored common.config after path adjustment.
+2025-05-26 00:30:26 - [INFO] - TradingSystem - (trading_env.<module>:44) - trading_env.py (V5.0): Successfully re-imported other dependencies after path adjustment.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (transformer_model.<module>:77) - Direct run TransformerModel: Successfully re-imported common_logger after path adj.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (transformer_model.<module>:80) - Direct run TransformerModel: Successfully re-imported common.config after path adjustment.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (feature_extractors.<module>:38) - Direct run FeatureExtractor: Successfully re-imported common modules.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (sac_policy.<module>:54) - sac_policy.py: Direct run: Successfully re-imported common_logger after path adj.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (sac_policy.<module>:56) - sac_policy.py: Direct run: Successfully re-imported common modules after path adjustment.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (sac_agent_wrapper.<module>:47) - Direct run SACAgentWrapper: Successfully re-imported modules.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (callbacks.<module>:39) - callbacks.py (V5): Successfully re-imported common_logger after path adj.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (callbacks.<module>:42) - callbacks.py (V5): Successfully re-imported common.config after path adjustment.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (enhanced_trainer.<module>:86) - enhanced_trainer.py: Successfully re-imported other dependencies after path adjustment.
+2025-05-26 00:30:30 - [INFO] - TradingSystem - (streamlit_app.<module>:34) - 成功導入訓練器和共享數據管理器

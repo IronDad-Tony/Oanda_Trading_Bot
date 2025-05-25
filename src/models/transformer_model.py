@@ -56,13 +56,14 @@ try:
         logger.info("Successfully imported common.config.")
 
 except ImportError:
-    logger.warning("Initial import of common.config failed. Attempting path adjustment...")
-    project_root_model = Path(__file__).resolve().parent.parent.parent
-    if str(project_root_model) not in sys.path:
-        sys.path.insert(0, str(project_root_model))
-        logger.info(f"Added project root to sys.path: {project_root_model}")
+    logger.warning("Initial import of common.config failed. Assuming PYTHONPATH is set correctly or this is a critical issue.")
+    # project_root_model = Path(__file__).resolve().parent.parent.parent # 移除
+    # if str(project_root_model) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root_model)) # 移除
+    #     logger.info(f"Added project root to sys.path: {project_root_model}") # 移除
     try:
-        from src.common.config import ( # 使用 src.common 導入
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
+        from src.common.config import (
             TIMESTEPS, MAX_SYMBOLS_ALLOWED,
             TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS, TRANSFORMER_NUM_HEADS,
             TRANSFORMER_FFN_DIM, TRANSFORMER_DROPOUT_RATE, TRANSFORMER_LAYER_NORM_EPS,

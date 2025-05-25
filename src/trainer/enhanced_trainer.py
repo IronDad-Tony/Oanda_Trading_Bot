@@ -51,14 +51,15 @@ except ImportError as e_initial_import_et:
     logger_temp_et.addHandler(logging.StreamHandler(sys.stdout))
     logger_temp_et.setLevel(logging.DEBUG)
     logger = logger_temp_et
-    logger.warning(f"enhanced_trainer.py: Initial import failed: {e_initial_import_et}. Attempting path adjustment...")
+    logger.warning(f"enhanced_trainer.py: Initial import failed: {e_initial_import_et}. Assuming PYTHONPATH is set correctly or this is a critical issue.")
     
-    project_root_et = Path(__file__).resolve().parent.parent.parent
-    if str(project_root_et) not in sys.path:
-        sys.path.insert(0, str(project_root_et))
-        logger.info(f"enhanced_trainer.py: Added project root to sys.path: {project_root_et}")
+    # project_root_et = Path(__file__).resolve().parent.parent.parent # 移除
+    # if str(project_root_et) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root_et)) # 移除
+    #     logger.info(f"enhanced_trainer.py: Added project root to sys.path: {project_root_et}") # 移除
     
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.logger_setup import logger as common_logger_retry_et
         logger = common_logger_retry_et
         _logger_initialized_by_common_et = True
@@ -458,22 +459,46 @@ class EnhancedUniversalTrainer:
             self.tensorboard_log_path = str(LOGS_DIR / f"sac_tensorboard_logs_{current_time_str}")
             
             # 創建SAC智能體包裝器，確保使用GPU優化設置
+            
+            # 計算動態的 buffer_size
+            # 如果數據集已準備好，則使用數據集長度作為 buffer_size
+            # 否則，SACAgentWrapper 內部會使用基於 factor 的預設值
+            dynamic_buffer_size = None
+            if self.dataset and len(self.dataset) > 0:
+                # 根據您的要求，buffer size 與訓練資料筆數相同
+                # len(self.dataset) 返回的是 (總時間步 - timesteps_history + 1)
+                # 這通常是 Replay Buffer 的一個合理大小
+                dynamic_buffer_size = len(self.dataset)
+                logger.info(f"動態設定 Replay Buffer 大小為數據集長度: {dynamic_buffer_size}")
+            else:
+                logger.warning("數據集未準備好或為空，SACAgentWrapper 將使用其內部的預設 buffer size 計算邏輯。")
+
             self.agent = SACAgentWrapper(
                 env=self.vec_env,
                 verbose=1,
                 tensorboard_log_path=self.tensorboard_log_path,
                 device=DEVICE,
-                use_amp=USE_AMP
+                use_amp=USE_AMP,
+                buffer_size=dynamic_buffer_size # 傳遞動態計算的 buffer_size
             )
             
             # 決定要載入的模型路徑
-            model_to_load = load_model_path or self.existing_model_path
+            model_to_load = load_model_path or self.existing_model_path # 恢復之前的邏輯，允許自動載入
             
             # 如果有模型路徑，加載模型
             if model_to_load:
                 logger.info(f"載入既有模型: {model_to_load}")
                 self.agent.load(model_to_load)
+                logger.info(f"模型 {model_to_load} 已載入。")
                 
+                # 手動重置 SB3 內部智能體的 num_timesteps，以確保即使載入模型，計數也從0開始
+                if hasattr(self.agent, 'agent') and hasattr(self.agent.agent, 'num_timesteps'):
+                    original_loaded_timesteps = self.agent.agent.num_timesteps
+                    self.agent.agent.num_timesteps = 0
+                    logger.info(f"已手動將載入模型的 num_timesteps 從 {original_loaded_timesteps} 重置為 0。")
+                else:
+                    logger.warning("無法訪問 self.agent.agent.num_timesteps 來重置步數。")
+
                 # 更新Streamlit狀態
                 if self.streamlit_session_state:
                     self.streamlit_session_state.loaded_existing_model = True
@@ -676,6 +701,10 @@ class EnhancedUniversalTrainer:
                                 logger.debug(f"獲取logger數據失敗: {e}")
                         
                         # 更新共享數據管理器
+                        logger.debug(f"TrainingMonitorCallback: Adding metric at step {self.num_timesteps}: "
+                                     f"reward={current_reward:.4f}, portfolio={current_portfolio_value:.2f}, "
+                                     f"actor_loss={actor_loss:.4f}, critic_loss={critic_loss:.4f}, "
+                                     f"l2_norm={l2_norm:.4f}, grad_norm={grad_norm:.4f}")
                         self.trainer.shared_data_manager.add_training_metric(
                             step=self.num_timesteps,
                             reward=current_reward,
@@ -690,14 +719,21 @@ class EnhancedUniversalTrainer:
                         if hasattr(self.trainer.env, 'get_recent_trades'):
                             try:
                                 recent_trades = self.trainer.env.get_recent_trades()
-                                for trade in recent_trades:
-                                    self.trainer.shared_data_manager.add_trade_record(
-                                        symbol=trade.get('symbol', 'UNKNOWN'),
-                                        action=trade.get('action', 'hold'),
-                                        price=trade.get('price', 1.0),
-                                        quantity=trade.get('quantity', 0.0),
-                                        profit_loss=trade.get('profit_loss', 0.0)
-                                    )
+                                if recent_trades: # 只有當有交易時才記錄
+                                    logger.debug(f"TrainingMonitorCallback: Recent trades found: {len(recent_trades)}")
+                                    for trade_idx, trade in enumerate(recent_trades):
+                                        logger.debug(f"  Trade {trade_idx}: {trade}")
+                                        self.trainer.shared_data_manager.add_trade_record(
+                                            symbol=trade.get('symbol', 'UNKNOWN'),
+                                            action=trade.get('action', 'hold'),
+                                            price=trade.get('price', 1.0),
+                                            quantity=trade.get('quantity', 0.0),
+                                            profit_loss=trade.get('profit_loss', 0.0),
+                                            # 確保傳遞時間戳，如果環境提供的話
+                                            timestamp=trade.get('timestamp')
+                                        )
+                                # else:
+                                    # logger.debug(f"TrainingMonitorCallback: No recent trades at step {self.num_timesteps}")
                             except Exception as e:
                                 logger.debug(f"獲取交易記錄失敗: {e}")
                         

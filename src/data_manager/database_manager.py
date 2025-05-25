@@ -25,14 +25,15 @@ except ModuleNotFoundError:
     # .resolve().parent 是 data_manager 目錄
     # .parent 是 src 目錄
     # .parent 是專案根目錄 Oanda_Trading_Bot
-    project_root = Path(__file__).resolve().parent.parent.parent
-    src_path = project_root / "src" # 確保我們添加的是包含 common 的 src 的父目錄
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-        # print(f"Added to sys.path for direct run: {project_root}") # 調試信息
+    # project_root = Path(__file__).resolve().parent.parent.parent # 移除
+    # src_path = project_root / "src" # 確保我們添加的是包含 common 的 src 的父目錄 # 移除
+    # if str(project_root) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root)) # 移除
+        # print(f"Added to sys.path for direct run: {project_root}") # 調試信息 # 移除
 
     # 再次嘗試導入
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.config import DATABASE_PATH, PRICE_COLUMNS, GRANULARITY
         from src.common.logger_setup import logger
         logger.info("Direct run: Successfully re-imported common modules after path adjustment.")
@@ -48,6 +49,7 @@ except ModuleNotFoundError:
             logger.addHandler(ch)
         logger.error(f"Direct run: Failed to re-import common modules even after path adjustment: {e_retry}. Using fallback logger and config.", exc_info=True)
         # 定義後備的 DATABASE_PATH 等，如果需要
+        project_root = Path(__file__).resolve().parent.parent.parent
         DATABASE_PATH = project_root / "data" / "database" / "fallback_oanda_s5_data.db"
         PRICE_COLUMNS = ['bid_open', 'bid_high', 'bid_low', 'bid_close',
                          'ask_open', 'ask_high', 'ask_low', 'ask_close', 'volume'] # 基礎的

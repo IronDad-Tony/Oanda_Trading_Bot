@@ -37,12 +37,13 @@ try:
     else: logger.info("Successfully imported common.config.")
 
 except ImportError:
-    logger.warning("sac_policy.py: Initial import of common.config or agent.feature_extractors failed. Attempting path adjustment...")
-    project_root_policy = Path(__file__).resolve().parent.parent.parent
-    if str(project_root_policy) not in sys.path:
-        sys.path.insert(0, str(project_root_policy))
-        logger.info(f"sac_policy.py: Added project root to sys.path: {project_root_policy}")
+    logger.warning("sac_policy.py: Initial import of common.config or agent.feature_extractors failed. Assuming PYTHONPATH is set correctly or this is a critical issue.")
+    # project_root_policy = Path(__file__).resolve().parent.parent.parent # 移除
+    # if str(project_root_policy) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root_policy)) # 移除
+    #     logger.info(f"sac_policy.py: Added project root to sys.path: {project_root_policy}") # 移除
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.agent.feature_extractors import AdvancedTransformerFeatureExtractor
         from src.common.config import (
              MAX_SYMBOLS_ALLOWED, TIMESTEPS, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL

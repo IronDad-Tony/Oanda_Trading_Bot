@@ -4,7 +4,7 @@ pandas
 scipy # 某些指標或統計可能需要
 
 # 機器學習與深度學習
-torch # PyTorch
+torch==2.2.0+cu121 # PyTorch，建議指定CUDA版本以確保GPU支援
 torchvision # 通常與torch一起安裝，某些場景可能需要
 torchaudio # 通常與torch一起安裝
 stable-baselines3[extra] # 強化學習庫，extra包含tensorboard等

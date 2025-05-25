@@ -31,12 +31,13 @@ try:
 except ImportError:
     logger_temp_cb_v5 = logging.getLogger("callbacks_v5_fallback_initial"); logger_temp_cb_v5.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_cb_v5.setLevel(logging.DEBUG)
     _logger_cb_v5 = logger_temp_cb_v5; logger = _logger_cb_v5
-    logger.warning(f"callbacks.py (V5): Initial import failed. Attempting path adjustment...")
-    project_root_cb_v5 = Path(__file__).resolve().parent.parent.parent
-    if str(project_root_cb_v5) not in sys.path: sys.path.insert(0, str(project_root_cb_v5)); logger.info(f"callbacks.py (V5): Added project root to sys.path: {project_root_cb_v5}")
+    logger.warning(f"callbacks.py (V5): Initial import failed. Assuming PYTHONPATH is set correctly or this is a critical issue.")
+    # project_root_cb_v5 = Path(__file__).resolve().parent.parent.parent # 移除
+    # if str(project_root_cb_v5) not in sys.path: sys.path.insert(0, str(project_root_cb_v5)); logger.info(f"callbacks.py (V5): Added project root to sys.path: {project_root_cb_v5}") # 移除
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.logger_setup import logger as common_logger_retry_cb_v5; logger = common_logger_retry_cb_v5
-        logger.info("callbacks.py (V5): Successfully re-imported common_logger after path adj.")
+        logger.info("callbacks.py (V5): Successfully re-imported common_logger.")
         from src.common.config import WEIGHTS_DIR as _WEIGHTS_DIR_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R
         _config_cb_v5 = {"WEIGHTS_DIR": _WEIGHTS_DIR_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R}
         logger.info("callbacks.py (V5): Successfully re-imported common.config after path adjustment.")

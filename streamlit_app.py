@@ -326,375 +326,45 @@ def _delete_model_file(file_path: str) -> bool:
         logger.error(f"刪除模型文件時發生錯誤: {e}")
         return False
 
-def training_worker(trainer, progress_callback):
-    """訓練工作線程 - 使用文件共享數據避免session_state問題"""
-    import json
-    import tempfile
-    
-    # 創建臨時文件來共享數據
-    temp_dir = Path("temp_training_data")
-    temp_dir.mkdir(exist_ok=True)
-    
-    status_file = temp_dir / "training_status.json"
-    metrics_file = temp_dir / "training_metrics.json"
-    stop_signal_file = temp_dir / "stop_signal.txt"
-    
-    try:
-        # 清除舊的停止信號
-        if stop_signal_file.exists():
-            stop_signal_file.unlink()
+def simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps):
+    """模擬訓練過程，用於TRAINER_AVAILABLE為False時"""
+    logger.info(f"開始模擬訓練 for symbols: {symbols}, steps: {total_timesteps}")
+    shared_manager.update_training_status('running', 0)
+    for step in range(total_timesteps):
+        if shared_manager.is_stop_requested():
+            logger.info("模擬訓練：收到停止請求。")
+            shared_manager.update_training_status('idle')
+            return False
         
-        # 初始化狀態文件
-        status_data = {
-            'status': 'running',
-            'progress': 0,
-            'error': None,
-            'stop_requested': False
+        progress = (step + 1) / total_timesteps * 100
+        shared_manager.update_training_status('running', progress)
+        
+        # 模擬指標更新
+        current_metrics = {
+            'step': step,
+            'reward': np.random.rand() * 10 - 5, # 隨機獎勵
+            'portfolio_value': float(INITIAL_CAPITAL * (1 + np.random.randn() * 0.01)),
+            'actor_loss': np.random.rand() * 0.1,
+            'critic_loss': np.random.rand() * 0.1,
+            'l2_norm': np.random.rand() * 1.0,
+            'grad_norm': np.random.rand() * 0.5,
+            'timestamp': datetime.now(timezone.utc)
         }
-        with open(status_file, 'w', encoding='utf-8') as f:
-            json.dump(status_data, f)
+        shared_manager.add_training_metric(**current_metrics)
         
-        # 初始化指標文件
-        metrics_data = {
-            'steps': [],
-            'rewards': [],
-            'portfolio_values': [],
-            'losses': [],
-            'norms': [],
-            'symbol_stats': {},
-            'timestamps': []
-        }
-        with open(metrics_file, 'w', encoding='utf-8') as f:
-            json.dump(metrics_data, f, default=str)
-        
-        logger.info("開始訓練工作線程，使用文件共享數據")
-        
-        # 執行訓練（實際或模擬）
-        if hasattr(trainer, 'run_full_training_pipeline') and TRAINER_AVAILABLE:
-            # 實際訓練 - 需要修改訓練器以支持停止信號
-            logger.info("開始實際訓練")
-            try:
-                # 將停止信號文件路徑傳遞給訓練器
-                if hasattr(trainer, 'set_stop_signal_file'):
-                    trainer.set_stop_signal_file(stop_signal_file)
-                success = trainer.run_full_training_pipeline()
-            except Exception as e:
-                logger.error(f"實際訓練失敗，回退到模擬訓練: {e}")
-                success = simulate_training_process_file_based(status_file, metrics_file, stop_signal_file)
-        else:
-            # 模擬訓練
-            logger.info("開始模擬訓練")
-            success = simulate_training_process_file_based(status_file, metrics_file, stop_signal_file)
-        
-        # 更新最終狀態
-        try:
-            with open(status_file, 'r', encoding='utf-8') as f:
-                status_data = json.load(f)
-        except:
-            status_data = {'status': 'error', 'progress': 0, 'stop_requested': False}
-        
-        if stop_signal_file.exists() or status_data.get('stop_requested', False):
-            status_data['status'] = 'idle'
-            logger.info("訓練已被用戶停止")
-        elif success:
-            status_data['status'] = 'completed'
-            status_data['progress'] = 100
-            logger.info("訓練已完成")
-        else:
-            status_data['status'] = 'error'
-            status_data['error'] = "訓練未成功完成"
-        
-        with open(status_file, 'w', encoding='utf-8') as f:
-            json.dump(status_data, f)
+        if step % 100 == 0: # 每100步模擬一次日誌
+            logger.debug(f"模擬訓練進度: {progress:.1f}%")
             
-    except Exception as e:
-        logger.error(f"訓練過程中發生錯誤: {e}", exc_info=True)
-        status_data = {
-            'status': 'error',
-            'error': str(e),
-            'progress': 0,
-            'stop_requested': False
-        }
-        try:
-            with open(status_file, 'w', encoding='utf-8') as f:
-                json.dump(status_data, f)
-        except:
-            pass
-    finally:
-        # 確保訓練停止後釋放資源
-        if hasattr(trainer, 'cleanup'):
-            try:
-                trainer.cleanup()
-            except:
-                pass
+        time.sleep(0.001) # 模擬耗時
         
-        # 清理停止信號文件
-        try:
-            if stop_signal_file.exists():
-                stop_signal_file.unlink()
-        except:
-            pass
-def sync_training_data_from_files():
-    """從文件同步訓練數據到session_state"""
-    temp_dir = Path("temp_training_data")
-    status_file = temp_dir / "training_status.json"
-    metrics_file = temp_dir / "training_metrics.json"
-    
-    try:
-        # 同步訓練狀態
-        if status_file.exists():
-            with open(status_file, 'r', encoding='utf-8') as f:
-                status_data = json.load(f)
-            
-            # 更新session_state中的狀態
-            st.session_state.training_status = status_data.get('status', 'idle')
-            st.session_state.training_progress = status_data.get('progress', 0)
-            if status_data.get('error'):
-                st.session_state.training_error = status_data['error']
-        
-        # 同步訓練指標
-        if metrics_file.exists():
-            with open(metrics_file, 'r', encoding='utf-8') as f:
-                metrics_data = json.load(f)
-            
-            # 轉換時間戳字符串回datetime對象
-            if 'timestamps' in metrics_data:
-                timestamps = []
-                for ts_str in metrics_data['timestamps']:
-                    try:
-                        timestamps.append(datetime.fromisoformat(ts_str))
-                    except:
-                        timestamps.append(datetime.now())
-                metrics_data['timestamps'] = timestamps
-            
-            # 更新session_state中的指標
-            st.session_state.training_metrics.update(metrics_data)
-            
-    except Exception as e:
-        logger.warning(f"同步訓練數據失敗: {e}")
-def simulate_training_process_file_based(status_file, metrics_file, stop_signal_file=None):
-    """基於文件的模擬訓練過程，避免session_state問題"""
-    import numpy as np
-    import json
-    from datetime import datetime
-    
-    try:
-        logger.info("開始基於文件的模擬訓練過程")
-        
-        # 模擬訓練200步，每步0.5秒，更真實的訓練過程
-        total_steps = 200
-        for step in range(total_steps):
-            # 每10步檢查一次停止信號，提高響應速度
-            if step % 10 == 0:
-                # 檢查停止信號文件
-                if stop_signal_file and stop_signal_file.exists():
-                    logger.info(f"在步驟 {step} 檢測到停止信號文件")
-                    return False
-                
-                # 檢查狀態文件中的停止請求
-                try:
-                    with open(status_file, 'r', encoding='utf-8') as f:
-                        status_data = json.load(f)
-                    if status_data.get('stop_requested', False):
-                        logger.info(f"收到停止信號，在第{step}步停止訓練")
-                        # 更新狀態為已停止
-                        status_data['status'] = 'idle'
-                        status_data['progress'] = (step / total_steps) * 100
-                        with open(status_file, 'w', encoding='utf-8') as f:
-                            json.dump(status_data, f)
-                        return True
-                except Exception as e:
-                    logger.warning(f"檢查停止信號失敗: {e}")
-            
-            # 更新進度
-            progress = (step + 1) / total_steps * 100
-            try:
-                with open(status_file, 'r', encoding='utf-8') as f:
-                    status_data = json.load(f)
-                status_data['progress'] = progress
-                with open(status_file, 'w', encoding='utf-8') as f:
-                    json.dump(status_data, f)
-            except Exception as e:
-                logger.warning(f"更新進度失敗: {e}")
-            
-            # 每2步添加一個數據點，提供更多數據
-            if step % 2 == 0:
-                try:
-                    # 讀取現有指標
-                    with open(metrics_file, 'r', encoding='utf-8') as f:
-                        metrics_data = json.load(f)
-                    
-                    current_step = len(metrics_data['steps'])
-                    actual_training_step = current_step * 50  # 每個數據點代表50個實際訓練步
-                    
-                    # 添加新數據點
-                    metrics_data['steps'].append(actual_training_step)
-                    metrics_data['timestamps'].append(datetime.now().isoformat())
-                    
-                    # 生成獎勵值（逐漸改善的趨勢）
-                    base_reward = -2.0 + (current_step * 0.05) + np.random.randn() * 0.3
-                    metrics_data['rewards'].append(base_reward)
-                    
-                    # 更新投資組合價值
-                    if current_step == 0:
-                        portfolio_value = INITIAL_CAPITAL
-                    else:
-                        last_value = metrics_data['portfolio_values'][-1]
-                        return_rate = base_reward * 0.0008
-                        portfolio_value = last_value * (1 + return_rate + np.random.normal(0, 0.003))
-                        portfolio_value = max(portfolio_value, INITIAL_CAPITAL * 0.5)  # 防止過度虧損
-                    metrics_data['portfolio_values'].append(portfolio_value)
-                    
-                    # 添加損失數據（逐漸下降）
-                    metrics_data['losses'].append({
-                        'actor_loss': max(0.01, 0.8 * np.exp(-current_step/25) + 0.1 + np.random.normal(0, 0.05)),
-                        'critic_loss': max(0.01, 1.2 * np.exp(-current_step/20) + 0.15 + np.random.normal(0, 0.08))
-                    })
-                    
-                    # 添加範數數據
-                    metrics_data['norms'].append({
-                        'l2_norm': max(0.1, 12 + 3 * np.sin(current_step/15) + np.random.normal(0, 0.5)),
-                        'grad_norm': max(0.01, 2.0 * np.exp(-current_step/40) + 0.2 + np.random.normal(0, 0.1))
-                    })
-                    
-                    # 生成交易品種統計（每20步更新一次）
-                    if current_step % 20 == 0:
-                        symbols = ['EUR_USD', 'USD_JPY', 'GBP_USD', 'AUD_USD', 'USD_CAD']
-                        for symbol in symbols:
-                            if symbol not in metrics_data['symbol_stats']:
-                                metrics_data['symbol_stats'][symbol] = {
-                                    'trades': 0,
-                                    'total_profit': 0.0,
-                                    'wins': 0,
-                                    'losses': 0,
-                                    'returns': []
-                                }
-                            
-                            # 模擬新交易
-                            if np.random.random() > 0.7:  # 30%概率產生交易
-                                profit_loss = np.random.normal(0.1, 1.5)
-                                metrics_data['symbol_stats'][symbol]['trades'] += 1
-                                metrics_data['symbol_stats'][symbol]['total_profit'] += profit_loss
-                                metrics_data['symbol_stats'][symbol]['returns'].append(profit_loss)
-                                
-                                if profit_loss > 0:
-                                    metrics_data['symbol_stats'][symbol]['wins'] += 1
-                                else:
-                                    metrics_data['symbol_stats'][symbol]['losses'] += 1
-                                
-                                # 計算勝率等統計
-                                total_trades = metrics_data['symbol_stats'][symbol]['trades']
-                                wins = metrics_data['symbol_stats'][symbol]['wins']
-                                metrics_data['symbol_stats'][symbol]['win_rate'] = (wins / total_trades) * 100 if total_trades > 0 else 0
-                                
-                                returns = metrics_data['symbol_stats'][symbol]['returns']
-                                if returns:
-                                    metrics_data['symbol_stats'][symbol]['avg_return'] = np.mean(returns)
-                                    metrics_data['symbol_stats'][symbol]['max_return'] = np.max(returns)
-                                    metrics_data['symbol_stats'][symbol]['max_loss'] = np.min(returns)
-                                    returns_std = np.std(returns)
-                                    metrics_data['symbol_stats'][symbol]['sharpe_ratio'] = metrics_data['symbol_stats'][symbol]['avg_return'] / returns_std if returns_std > 0 else 0
-                    
-                    # 保存更新的指標
-                    with open(metrics_file, 'w', encoding='utf-8') as f:
-                        json.dump(metrics_data, f, default=str)
-                    
-                    logger.info(f"訓練步驟 {actual_training_step}: 獎勵={base_reward:.3f}, 淨值={portfolio_value:.2f}")
-                    
-                except Exception as e:
-                    logger.error(f"更新訓練指標失敗: {e}")
-            
-            time.sleep(0.5)  # 模擬訓練時間，更快的更新
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"基於文件的模擬訓練過程中發生錯誤: {e}", exc_info=True)
-        return False
+    shared_manager.update_training_status('completed', 100)
+    logger.info("模擬訓練完成。")
+    return True
 
-def simulate_training_process():
-    """模擬訓練過程，用於測試按鈕狀態和數據更新"""
-    import numpy as np
-    from datetime import datetime
-    
+def training_worker(trainer, shared_manager, symbols, total_timesteps):
+    """訓練工作線程 - 使用共享數據管理器"""
     try:
-        # 模擬訓練30步，每步1秒
-        for step in range(30):
-            # 安全檢查session_state
-            if not hasattr(st.session_state, 'stop_training'):
-                logger.warning("session_state.stop_training 不存在，停止訓練")
-                break
-                
-            if st.session_state.stop_training:
-                logger.info(f"收到停止信號，在第{step}步停止訓練")
-                break
-            
-            # 更新進度
-            if hasattr(st.session_state, 'training_progress'):
-                st.session_state.training_progress = (step + 1) / 30 * 100
-            
-            # 每5步添加一個數據點
-            if step % 5 == 0:
-                # 安全檢查training_metrics
-                if not hasattr(st.session_state, 'training_metrics'):
-                    logger.warning("session_state.training_metrics 不存在，初始化...")
-                    st.session_state.training_metrics = {
-                        'steps': [],
-                        'rewards': [],
-                        'portfolio_values': [],
-                        'losses': [],
-                        'norms': [],
-                        'symbol_stats': {},
-                        'timestamps': []
-                    }
-                
-                current_step = len(st.session_state.training_metrics['steps'])
-                
-                # 添加新數據點
-                st.session_state.training_metrics['steps'].append(current_step * 100)
-                st.session_state.training_metrics['timestamps'].append(datetime.now())
-                
-                # 生成獎勵值
-                base_reward = -1.0 + (current_step * 0.1) + np.random.randn() * 0.3
-                st.session_state.training_metrics['rewards'].append(base_reward)
-                
-                # 更新投資組合價值
-                if current_step == 0:
-                    portfolio_value = INITIAL_CAPITAL
-                else:
-                    last_value = st.session_state.training_metrics['portfolio_values'][-1]
-                    return_rate = base_reward * 0.001
-                    portfolio_value = last_value * (1 + return_rate + np.random.normal(0, 0.005))
-                st.session_state.training_metrics['portfolio_values'].append(portfolio_value)
-                
-                # 添加損失數據
-                st.session_state.training_metrics['losses'].append({
-                    'actor_loss': max(0, 0.3 * np.exp(-current_step/10) + np.random.normal(0, 0.05)),
-                    'critic_loss': max(0, 0.5 * np.exp(-current_step/8) + np.random.normal(0, 0.08))
-                })
-                
-                # 添加範數數據
-                st.session_state.training_metrics['norms'].append({
-                    'l2_norm': max(0, 10 + np.sin(current_step/5) + np.random.normal(0, 0.3)),
-                    'grad_norm': max(0, 0.8 * np.exp(-current_step/15) + np.random.normal(0, 0.1))
-                })
-                
-                logger.info(f"訓練步驟 {current_step * 100}: 獎勵={base_reward:.3f}, 淨值={portfolio_value:.2f}")
-            
-            time.sleep(1)  # 模擬訓練時間
-            
-    except Exception as e:
-        logger.error(f"模擬訓練過程中發生錯誤: {e}", exc_info=True)
-        # 確保訓練狀態被正確設置為錯誤
-        if hasattr(st.session_state, 'training_status'):
-            st.session_state.training_status = 'error'
-        if hasattr(st.session_state, 'training_error'):
-            st.session_state.training_error = str(e)
-
-def enhanced_training_worker(trainer, shared_manager, symbols, total_timesteps):
-    """增強的訓練工作線程 - 使用共享數據管理器"""
-    try:
-        logger.info("開始增強訓練工作線程，使用共享數據管理器")
+        logger.info("開始訓練工作線程，使用共享數據管理器")
         
         if trainer and TRAINER_AVAILABLE:
             # 真實訓練
@@ -727,95 +397,46 @@ def enhanced_training_worker(trainer, shared_manager, symbols, total_timesteps):
             shared_manager.update_training_status('error', error="訓練未成功完成")
             
     except Exception as e:
-        logger.error(f"增強訓練過程中發生錯誤: {e}", exc_info=True)
+        logger.error(f"訓練過程中發生錯誤: {e}", exc_info=True)
         shared_manager.update_training_status('error', error=str(e))
     finally:
         # 確保訓練停止後釋放資源
         if trainer and hasattr(trainer, 'cleanup'):
             trainer.cleanup()
 
-def simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps):
-    """使用共享數據管理器的模擬訓練過程"""
-    import numpy as np
+def update_streamlit_ui_from_shared_data():
+    """從共享數據管理器同步訓練數據到session_state"""
+    shared_manager = st.session_state.shared_data_manager
     
     try:
-        logger.info("開始基於共享數據管理器的模擬訓練過程")
+        # 同步訓練狀態
+        status_data = shared_manager.get_current_status()
         
-        # 模擬訓練步數 - 更多步數以提供更好的演示效果
-        num_steps = min(100, total_timesteps // 500)  # 最多100步，每步代表500個實際步數
+        # 更新session_state中的狀態
+        st.session_state.training_status = status_data.get('status', 'idle')
+        st.session_state.training_progress = status_data.get('progress', 0)
+        if status_data.get('error'):
+            st.session_state.training_error = status_data['error']
         
-        for step in range(num_steps):
-            # 檢查停止信號
-            if shared_manager.is_stop_requested():
-                logger.info(f"收到停止信號，在第{step}步停止訓練")
-                break
-            
-            # 更新進度
-            progress = (step + 1) / num_steps * 100
-            shared_manager.update_training_status('running', progress)
-            
-            # 每步添加訓練指標
-            current_step = step * 500
-            
-            # 生成獎勵值（逐漸改善的趨勢）
-            base_reward = -1.5 + (step * 0.03) + np.random.randn() * 0.4
-            
-            # 計算投資組合價值
-            if step == 0:
-                portfolio_value = INITIAL_CAPITAL
-            else:
-                # 獲取當前狀態
-                current_status = shared_manager.get_current_status()
-                last_value = current_status['current_metrics']['portfolio_value']
-                return_rate = base_reward * 0.0008
-                portfolio_value = last_value * (1 + return_rate + np.random.normal(0, 0.003))
-                portfolio_value = max(portfolio_value, INITIAL_CAPITAL * 0.7)  # 防止過度虧損
-            
-            # 生成損失數據
-            actor_loss = max(0.01, 0.5 * np.exp(-step/15) + 0.1 + np.random.normal(0, 0.05))
-            critic_loss = max(0.01, 0.8 * np.exp(-step/12) + 0.15 + np.random.normal(0, 0.08))
-            
-            # 生成範數數據
-            l2_norm = max(0.1, 12 + 2 * np.sin(step/10) + np.random.normal(0, 0.5))
-            grad_norm = max(0.01, 1.5 * np.exp(-step/25) + 0.2 + np.random.normal(0, 0.1))
-            
-            # 添加訓練指標到共享管理器
-            shared_manager.add_training_metric(
-                step=current_step,
-                reward=base_reward,
-                portfolio_value=portfolio_value,
-                actor_loss=actor_loss,
-                critic_loss=critic_loss,
-                l2_norm=l2_norm,
-                grad_norm=grad_norm
-            )
-            
-            # 模擬交易記錄
-            if step % 2 == 0:  # 每2步生成一些交易
-                for symbol in symbols[:min(5, len(symbols))]:  # 對前5個品種生成交易
-                    if np.random.random() > 0.6:  # 40%概率生成交易
-                        action = np.random.choice(['buy', 'sell'], p=[0.6, 0.4])  # 更多買入
-                        price = 1.0 + np.random.normal(0, 0.01)
-                        quantity = np.random.randint(1000, 15000)
-                        profit_loss = np.random.normal(0.2, 1.8)  # 稍微偏向盈利
-                        
-                        shared_manager.add_trade_record(
-                            symbol=symbol,
-                            action=action,
-                            price=price,
-                            quantity=quantity,
-                            profit_loss=profit_loss
-                        )
-            
-            logger.info(f"訓練步驟 {current_step}: 獎勵={base_reward:.3f}, 淨值={portfolio_value:.2f}")
-            
-            time.sleep(1.5)  # 稍快的模擬訓練時間
+        # 從共享數據管理器獲取最新指標
+        latest_metrics = shared_manager.get_latest_metrics(1000) # 獲取最近1000個指標
         
-        return True
-        
+        # 構建兼容的metrics格式
+        if latest_metrics:
+            metrics = {
+                'steps': [m['step'] for m in latest_metrics],
+                'rewards': [m['reward'] for m in latest_metrics],
+                'portfolio_values': [m['portfolio_value'] for m in latest_metrics],
+                'losses': [{'actor_loss': m['actor_loss'], 'critic_loss': m['critic_loss']} for m in latest_metrics],
+                'norms': [{'l2_norm': m['l2_norm'], 'grad_norm': m['grad_norm']} for m in latest_metrics],
+                'symbol_stats': status_data['symbol_stats'], # 直接從status_data獲取
+                'timestamps': [m['timestamp'] for m in latest_metrics]
+            }
+            st.session_state.training_metrics.update(metrics)
+            
     except Exception as e:
-        logger.error(f"基於共享數據管理器的模擬訓練過程中發生錯誤: {e}", exc_info=True)
-        return False
+        logger.warning(f"同步訓練數據失敗: {e}")
+
 
 def start_training(symbols, start_date, end_date, total_timesteps, save_freq, eval_freq):
     """啟動訓練"""
@@ -853,7 +474,7 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
         
         # 在後台線程中啟動訓練
         training_thread = threading.Thread(
-            target=enhanced_training_worker,
+            target=training_worker, # 修正：使用已定義的 training_worker
             args=(st.session_state.trainer, shared_manager, symbols, total_timesteps)
         )
         training_thread.daemon = True
@@ -876,9 +497,6 @@ def stop_training():
         shared_manager = st.session_state.shared_data_manager
         shared_manager.request_stop()
         logger.info("已通過共享數據管理器發送停止信號")
-        
-        # 設置舊的停止標誌（向後兼容）
-        st.session_state.stop_training = True
         
         # 如果有訓練器實例，嘗試停止它
         if st.session_state.trainer:

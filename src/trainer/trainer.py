@@ -31,12 +31,13 @@ try:
 except ImportError as e_initial_import_trainer_v22:
     # ... (後備導入邏輯與 V2.1 版本相同) ...
     logger_temp_trainer_v22 = logging.getLogger("trainer_v22_fallback_initial"); logger_temp_trainer_v22.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_trainer_v22.setLevel(logging.DEBUG); logger = logger_temp_trainer_v22
-    logger.warning(f"trainer.py (V2.2): Initial import failed: {e_initial_import_trainer_v22}. Attempting path adjustment...")
-    project_root_trainer_v22 = Path(__file__).resolve().parent.parent.parent
-    if str(project_root_trainer_v22) not in sys.path: sys.path.insert(0, str(project_root_trainer_v22)); logger.info(f"trainer.py (V2.2): Added project root to sys.path: {project_root_trainer_v22}")
+    logger.warning(f"trainer.py (V2.2): Initial import failed: {e_initial_import_trainer_v22}. Assuming PYTHONPATH is set correctly or this is a critical issue.")
+    # project_root_trainer_v22 = Path(__file__).resolve().parent.parent.parent # 移除
+    # if str(project_root_trainer_v22) not in sys.path: sys.path.insert(0, str(project_root_trainer_v22)); logger.info(f"trainer.py (V2.2): Added project root to sys.path: {project_root_trainer_v22}") # 移除
     try:
-        from src.common.logger_setup import logger as common_logger_retry_trainer_v22; logger = common_logger_retry_trainer_v22; logger.info("trainer.py (V2.2): Successfully re-imported common_logger after path adj.")
-        from src.common.config import *; logger.info("trainer.py (V2.2): Successfully re-imported common.config after path adjustment.")
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
+        from src.common.logger_setup import logger as common_logger_retry_trainer_v22; logger = common_logger_retry_trainer_v22; logger.info("trainer.py (V2.2): Successfully re-imported common_logger.")
+        from src.common.config import *; logger.info("trainer.py (V2.2): Successfully re-imported common.config.")
         _config_trainer_v22 = {k: v for k, v in locals().items() if k.isupper() and not k.startswith('_')}
         from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from src.data_manager.instrument_info_manager import InstrumentInfoManager, InstrumentDetails; from src.environment.trading_env import UniversalTradingEnvV4; from src.agent.sac_policy import CustomSACPolicy; from src.agent.sac_agent_wrapper import SACAgentWrapper; from src.trainer.callbacks import UniversalCheckpointCallback; from stable_baselines3.common.vec_env import DummyVecEnv
         logger.info("trainer.py (V2.2): Successfully re-imported other dependencies after path adjustment.")

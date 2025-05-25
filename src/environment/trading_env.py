@@ -15,6 +15,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, ROUND_CEILIN
 import sys
 from pathlib import Path
 import logging
+import time # <--- 導入 time 模組
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.figure import Figure
@@ -32,11 +33,12 @@ try:
     from data_manager.mmap_dataset import UniversalMemoryMappedDataset; from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from data_manager.instrument_info_manager import InstrumentDetails, InstrumentInfoManager; logger.info("trading_env.py (V5.0): Successfully imported other dependencies.")
 except ImportError as e_initial_import_v5:
     logger_temp_v5 = logging.getLogger("trading_env_v5_fallback_initial"); logger_temp_v5.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_v5.setLevel(logging.DEBUG); logger = logger_temp_v5
-    logger.warning(f"trading_env.py (V5.0): Initial import failed: {e_initial_import_v5}. Attempting path adjustment...")
-    project_root_env_v5 = Path(__file__).resolve().parent.parent.parent
-    if str(project_root_env_v5) not in sys.path: sys.path.insert(0, str(project_root_env_v5)); logger.info(f"trading_env.py (V5.0): Added project root to sys.path: {project_root_env_v5}")
+    logger.warning(f"trading_env.py (V5.0): Initial import failed: {e_initial_import_v5}. Assuming PYTHONPATH is set correctly or this is a critical issue.")
+    # project_root_env_v5 = Path(__file__).resolve().parent.parent.parent # 移除
+    # if str(project_root_env_v5) not in sys.path: sys.path.insert(0, str(project_root_env_v5)); logger.info(f"trading_env.py (V5.0): Added project root to sys.path: {project_root_env_v5}") # 移除
     try:
-        from src.common.logger_setup import logger as common_logger_retry_v5; logger = common_logger_retry_v5; _logger_initialized_by_common_env_v5 = True; logger.info("trading_env.py (V5.0): Successfully re-imported common_logger after path adj.")
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
+        from src.common.logger_setup import logger as common_logger_retry_v5; logger = common_logger_retry_v5; _logger_initialized_by_common_env_v5 = True; logger.info("trading_env.py (V5.0): Successfully re-imported common_logger.")
         from src.common.config import (TIMESTEPS as _TIMESTEPS_R, MAX_SYMBOLS_ALLOWED as _MAX_SYMBOLS_ALLOWED_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R, INITIAL_CAPITAL as _DEFAULT_INITIAL_CAPITAL_R, OANDA_MARGIN_CLOSEOUT_LEVEL as _OANDA_MARGIN_CLOSEOUT_LEVEL_R, TRADE_COMMISSION_PERCENTAGE as _TRADE_COMMISSION_PERCENTAGE_R, OANDA_API_KEY as _OANDA_API_KEY_R, ATR_PERIOD as _ATR_PERIOD_R, STOP_LOSS_ATR_MULTIPLIER as _STOP_LOSS_ATR_MULTIPLIER_R, MAX_ACCOUNT_RISK_PERCENTAGE as _MAX_ACCOUNT_RISK_PERCENTAGE_R)
         _config_values_env_v5 = {"TIMESTEPS": _TIMESTEPS_R, "MAX_SYMBOLS_ALLOWED": _MAX_SYMBOLS_ALLOWED_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R, "DEFAULT_INITIAL_CAPITAL": _DEFAULT_INITIAL_CAPITAL_R, "OANDA_MARGIN_CLOSEOUT_LEVEL": _OANDA_MARGIN_CLOSEOUT_LEVEL_R, "TRADE_COMMISSION_PERCENTAGE": _TRADE_COMMISSION_PERCENTAGE_R, "OANDA_API_KEY": _OANDA_API_KEY_R, "ATR_PERIOD": _ATR_PERIOD_R, "STOP_LOSS_ATR_MULTIPLIER": _STOP_LOSS_ATR_MULTIPLIER_R, "MAX_ACCOUNT_RISK_PERCENTAGE": _MAX_ACCOUNT_RISK_PERCENTAGE_R}
         logger.info("trading_env.py (V5.0): Successfully re-imported and stored common.config after path adjustment.")
@@ -340,23 +342,39 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         return units_to_trade, commission_ac
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+        _step_time_start = time.perf_counter()
+        logger.debug(f"--- Step {self.episode_step_count} Start ---")
+
         self.episode_step_count += 1
-        all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
-        prev_portfolio_value_ac = self.portfolio_value_ac
-        self._update_atr_values(all_prices_map); self._update_stop_loss_prices(all_prices_map)
         
-        total_commission_this_step_ac = Decimal('0.0') # 用於獎勵計算
+        _t_get_prices = time.perf_counter()
+        all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
+        logger.debug(f"Step {self.episode_step_count}: _get_current_raw_prices_for_all_dataset_symbols took {time.perf_counter() - _t_get_prices:.6f}s")
+        
+        prev_portfolio_value_ac = self.portfolio_value_ac
+        
+        _t_update_atr_sl = time.perf_counter()
+        self._update_atr_values(all_prices_map); self._update_stop_loss_prices(all_prices_map)
+        logger.debug(f"Step {self.episode_step_count}: _update_atr_values & _update_stop_loss_prices took {time.perf_counter() - _t_update_atr_sl:.6f}s")
+        
+        total_commission_this_step_ac = Decimal('0.0')
 
         # 1. 處理止損
+        _t_apply_sl = time.perf_counter()
         commission_from_sl = self._apply_stop_loss(all_prices_map, current_timestamp)
         total_commission_this_step_ac += commission_from_sl
+        logger.debug(f"Step {self.episode_step_count}: _apply_stop_loss took {time.perf_counter() - _t_apply_sl:.6f}s, commission: {commission_from_sl}")
 
         # 2. 處理保證金追繳 (如果止損後仍觸發)
+        _t_handle_mc = time.perf_counter()
         commission_from_mc = self._handle_margin_call(all_prices_map, current_timestamp)
         total_commission_this_step_ac += commission_from_mc
+        logger.debug(f"Step {self.episode_step_count}: _handle_margin_call took {time.perf_counter() - _t_handle_mc:.6f}s, commission: {commission_from_mc}")
 
         # 3. 執行智能體動作
+        _t_agent_actions_start = time.perf_counter()
         for slot_idx in self.current_episode_tradable_slot_indices:
+            _t_slot_action_start = time.perf_counter()
             symbol = self.slot_to_symbol_map.get(slot_idx)
             if not symbol: continue
 
@@ -365,175 +383,118 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
             
             if current_bid_qc <= Decimal('0') or current_ask_qc <= Decimal('0'):
-                logger.warning(f"跳過 {symbol} 的交易，因為當前價格無效。")
+                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid current prices.")
                 continue
 
             # 計算目標單位數 (target_units)
-            # 使用 self.max_account_risk_per_trade 和 self.atr_values_qc[slot_idx] 以及止損乘數來確定基於風險的最大單位數。
-            # 結合智能體動作 action[slot_idx]（目標倉位比例）和 self.equity_ac（或 self.initial_capital）來計算目標名義價值。
-            # 將目標名義價值轉換為報價貨幣，再除以當前價格得到目標單位數。
-            # 使用 details.round_units() 進行調整。
-
-            # 這裡使用 equity_ac 作為基礎，因為它反映了當前賬戶的真實價值
             risk_per_unit_qc = self.atr_values_qc[slot_idx] * self.stop_loss_atr_multiplier
             if risk_per_unit_qc <= Decimal('0'):
-                logger.debug(f"跳過 {symbol} 的交易，因為 ATR 風險為零。")
+                logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to zero ATR risk.")
                 continue
 
-            # 計算每單位在賬戶貨幣中的風險
             exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
             if exchange_rate_qc_to_ac <= Decimal('0'):
-                logger.warning(f"無法獲取 {details.quote_currency} 到 {ACCOUNT_CURRENCY} 的匯率，跳過交易。")
+                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Cannot get exchange rate for {details.quote_currency} to {ACCOUNT_CURRENCY}, skipping trade.")
                 continue
             
             risk_per_unit_ac = risk_per_unit_qc * exchange_rate_qc_to_ac
-
             if risk_per_unit_ac <= Decimal('0'):
-                logger.debug(f"跳過 {symbol} 的交易，因為每單位風險為零。")
+                logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to zero risk per unit in AC.")
                 continue
 
-            # 基於風險的最大單位數
             max_risk_capital = self.equity_ac * self.max_account_risk_per_trade
-            max_units_by_risk = (max_risk_capital / risk_per_unit_ac).quantize(Decimal('1'), rounding=ROUND_DOWN) # 確保是整數單位
+            max_units_by_risk = (max_risk_capital / risk_per_unit_ac).quantize(Decimal('1'), rounding=ROUND_DOWN)
 
-            # 智能體動作 (目標倉位比例)
-            target_position_ratio = Decimal(str(action[slot_idx])) # 動作範圍 -1.0 到 1.0
-
-            # 計算目標名義價值 (基於目標倉位比例和賬戶淨值)
-            # 這裡使用 self.equity_ac 作為基礎，因為它反映了當前賬戶的真實價值
+            target_position_ratio = Decimal(str(action[slot_idx]))
             target_nominal_value_ac = abs(target_position_ratio) * self.equity_ac
-
-            # 將目標名義價值轉換為報價貨幣
-            # 使用中間價作為轉換價格
             current_mid_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2')
+
             if current_mid_price_qc <= Decimal('0'):
-                logger.warning(f"跳過 {symbol} 的交易，因為中間價無效。")
+                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid mid price.")
                 continue
 
-            # 計算目標單位數 (未調整精度)
-            target_units_raw = (target_nominal_value_ac / (current_mid_price_qc * exchange_rate_qc_to_ac)).quantize(Decimal('1e-9'), rounding=ROUND_HALF_UP) # 暫時保留精度
-
-            # 結合風險限制和動作目標
-            # 最終目標單位數不應超過基於風險計算的最大單位數
+            target_units_raw = (target_nominal_value_ac / (current_mid_price_qc * exchange_rate_qc_to_ac)).quantize(Decimal('1e-9'), rounding=ROUND_HALF_UP)
             target_units_final = min(target_units_raw, max_units_by_risk)
-            target_units_final = target_units_final.copy_sign(target_position_ratio) # 恢復方向
-
-            # 改進交易單位精度處理 - 使用 InstrumentDetails.round_units() 方法進行精確調整
+            target_units_final = target_units_final.copy_sign(target_position_ratio)
             target_units = details.round_units(target_units_final)
-
-            # 計算 units_to_trade
             units_to_trade = target_units - current_units
             
             if abs(units_to_trade) < details.minimum_trade_size:
-                logger.debug(f"跳過 {symbol} 的交易，因為交易單位 {units_to_trade:.2f} 小於最小交易單位 {details.minimum_trade_size:.2f}。")
+                # logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Units to trade {units_to_trade:.2f} is less than min trade size {details.minimum_trade_size:.2f}.")
                 continue
 
-            # 確定交易價格 (買入用 Ask, 賣出用 Bid)
             trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
             if trade_price_qc <= Decimal('0'):
-                logger.warning(f"跳過 {symbol} 的交易，因為交易價格無效。")
+                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid trade price.")
                 continue
-
-            # 保證金檢查
-            # 計算執行 units_to_trade 預計會改變多少保證金。
-            # 檢查 self.equity_ac - self.total_margin_used_ac (現有的) - 預計佣金 >= 新增保證金。
-            # 如果不足，則按比例縮減 units_to_trade（確保縮減後的單位數仍符合最小交易單位）或取消該筆交易。記錄此類事件。
-
-            # 預計新倉位
-            projected_new_units = current_units + units_to_trade
             
-            # 修復保證金計算精度問題 - 使用實際交易價格（bid/ask）而非中間價計算保證金
+            _t_margin_check_start = time.perf_counter()
+            projected_new_units = current_units + units_to_trade
             projected_margin_required_qc = abs(projected_new_units) * trade_price_qc * Decimal(str(details.margin_rate))
             projected_margin_required_ac = projected_margin_required_qc * exchange_rate_qc_to_ac
-
-            # 當前該槽位的保證金
             current_margin_for_slot_ac = self.margin_used_per_position_ac[slot_idx]
-
-            # 預計總保證金 (假設其他槽位不變)
             projected_total_margin_used_ac = self.total_margin_used_ac - current_margin_for_slot_ac + projected_margin_required_ac
+            # projected_commission_ac = abs(units_to_trade) * trade_price_qc * exchange_rate_qc_to_ac * self.commission_percentage # Already calculated in _execute_trade
 
-            # 預計交易手續費
-            projected_commission_ac = abs(units_to_trade) * trade_price_qc * exchange_rate_qc_to_ac * self.commission_percentage
-
-            # 檢查可用資金是否足夠支付新增保證金和手續費
-            # 可用現金 = self.cash - projected_commission_ac
-            # 可用權益 = self.equity_ac - projected_commission_ac
-            
-            # 這裡的邏輯應該是：新的總保證金不能導致保證金水平低於關閉水平
-            # 也就是說，(self.equity_ac - projected_commission_ac) / projected_total_margin_used_ac >= OANDA_MARGIN_CLOSEOUT_LEVEL
-            # 或者更直接地，確保有足夠的自由保證金
-            free_margin_before_trade = self.equity_ac - self.total_margin_used_ac
-
-            # 考慮交易後，新的自由保證金
-            # 這裡需要考慮交易對現金和未實現盈虧的影響，但為了保證金檢查的簡潔性，我們主要關注保證金的變化
-            # 簡化：只考慮新增保證金和手續費對現金的影響
-            margin_change_ac = projected_margin_required_ac - current_margin_for_slot_ac
-            
-            # 如果是平倉，margin_change_ac 會是負數，表示釋放保證金
-            # 如果是開倉/加倉，margin_change_ac 會是正數，表示需要更多保證金
-
-            # 檢查是否會導致保證金追繳
-            # 這裡的檢查應該是：執行這筆交易後，我的總權益減去新的總保證金，是否仍然大於一個安全閾值
-            # 或者，更直接地，新的總保證金加上預計手續費，是否會超過我的可用現金/權益
-            
-            # 預計交易後的總權益 (考慮手續費，但不考慮未實現盈虧，因為那是浮動的)
-            # 這裡的 equity_ac 已經包含了未實現盈虧，所以我們直接用它來判斷保證金水平
-            # 預計交易後的現金 (只考慮手續費)
-            projected_cash_after_commission = self.cash - projected_commission_ac
-
-            # 如果是開倉/加倉，需要檢查是否有足夠的自由保證金
-            if units_to_trade.copy_sign(Decimal('1')) == projected_new_units.copy_sign(Decimal('1')) or abs(current_units) < Decimal('1e-9'): # 開倉或加倉
-                # 添加保證金緩衝區機制，避免邊界情況下的保證金不足
-                margin_safety_buffer = Decimal('0.1')  # 10% 安全緩衝區
+            if units_to_trade.copy_sign(Decimal('1')) == projected_new_units.copy_sign(Decimal('1')) or abs(current_units) < Decimal('1e-9'):
+                margin_safety_buffer = Decimal('0.1')
                 safe_margin_threshold = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) + margin_safety_buffer
                 
-                if projected_total_margin_used_ac > self.equity_ac * (Decimal('1.0') - safe_margin_threshold): # 使用安全閾值檢查
-                    logger.warning(f"保證金不足以執行 {symbol} 的交易 ({units_to_trade:.2f} 單位)。預計總保證金 {projected_total_margin_used_ac:.2f} AC，權益 {self.equity_ac:.2f} AC。縮減交易單位。")
-                    # 按比例縮減 units_to_trade
-                    # 計算最大可交易單位
+                if projected_total_margin_used_ac > self.equity_ac * (Decimal('1.0') - safe_margin_threshold):
+                    logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Insufficient margin for {units_to_trade:.2f} units. Projected total margin {projected_total_margin_used_ac:.2f} AC, Equity {self.equity_ac:.2f} AC. Reducing trade size.")
                     max_affordable_margin_ac = self.equity_ac * (Decimal('1.0') - safe_margin_threshold)
                     if max_affordable_margin_ac <= Decimal('0'):
-                        logger.warning(f"無法負擔任何保證金，取消 {symbol} 的交易。")
+                        logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Cannot afford any margin, cancelling trade.")
                         continue
                     
-                    # 計算基於最大可負擔保證金的最大單位數
                     max_units_by_margin_ac = (max_affordable_margin_ac / (trade_price_qc * Decimal(str(details.margin_rate)) * exchange_rate_qc_to_ac)).quantize(Decimal('1'), rounding=ROUND_DOWN)
                     
-                    # 縮減 units_to_trade
                     if abs(projected_new_units) > max_units_by_margin_ac:
-                        # 如果是開倉，直接限制為 max_units_by_margin_ac
                         if abs(current_units) < Decimal('1e-9'):
                             units_to_trade = max_units_by_margin_ac.copy_sign(units_to_trade)
-                        else: # 加倉，需要計算可以加多少
+                        else:
                             units_can_add = max_units_by_margin_ac - abs(current_units)
                             units_to_trade = units_can_add.copy_sign(units_to_trade)
                         
                         units_to_trade = details.round_units(units_to_trade)
                         if abs(units_to_trade) < details.minimum_trade_size:
-                            logger.warning(f"縮減後 {symbol} 的交易單位 {units_to_trade:.2f} 小於最小交易單位，取消交易。")
+                            logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Reduced units {units_to_trade:.2f} less than min trade size, cancelling trade.")
                             continue
-                        logger.info(f"縮減 {symbol} 的交易單位至 {units_to_trade:.2f}，以符合保證金要求。")
-            
-            # 如果可以交易，則調用 _execute_trade()
+                        logger.info(f"Step {self.episode_step_count} Symbol {symbol}: Trade size reduced to {units_to_trade:.2f} due to margin requirements.")
+            logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Margin check took {time.perf_counter() - _t_margin_check_start:.6f}s")
+
             if abs(units_to_trade) > Decimal('0'):
+                _t_execute_trade_start = time.perf_counter()
                 traded_units, commission = self._execute_trade(slot_idx, units_to_trade, trade_price_qc, current_timestamp, all_prices_map)
                 total_commission_this_step_ac += commission
-            else:
-                logger.debug(f"槽位 {slot_idx} ({symbol}) 無需交易。")
+                logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: _execute_trade for {traded_units} units took {time.perf_counter() - _t_execute_trade_start:.6f}s")
+            # else:
+                # logger.debug(f"Step {self.episode_step_count} Slot {slot_idx} ({symbol}): No trade needed.")
+            logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Action processing for slot took {time.perf_counter() - _t_slot_action_start:.6f}s")
+        logger.debug(f"Step {self.episode_step_count}: Agent actions loop took {time.perf_counter() - _t_agent_actions_start:.6f}s")
 
-        # 在所有槽位交易循環結束後，重新計算 self.total_margin_used_ac = sum(self.margin_used_per_position_ac)。
-        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
-
-        # 在所有交易和止損執行後，調用 _update_portfolio_and_equity_value() 更新最終狀態。
+        _t_update_portfolio_final = time.perf_counter()
+        self.total_margin_used_ac = sum(self.margin_used_per_position_ac) # Recalculate after all trades in loop
         self._update_portfolio_and_equity_value(all_prices_map)
         self.portfolio_value_history.append(float(self.portfolio_value_ac))
+        logger.debug(f"Step {self.episode_step_count}: Final _update_portfolio_and_equity_value took {time.perf_counter() - _t_update_portfolio_final:.6f}s")
         
-        # 獎勵計算
+        _t_calc_reward = time.perf_counter()
         reward = self._calculate_reward(prev_portfolio_value_ac, total_commission_this_step_ac)
+        logger.debug(f"Step {self.episode_step_count}: _calculate_reward took {time.perf_counter() - _t_calc_reward:.6f}s")
+        
         self.current_step_in_dataset += 1
+        
+        _t_check_term = time.perf_counter()
         terminated, truncated = self._check_termination_truncation()
+        logger.debug(f"Step {self.episode_step_count}: _check_termination_truncation took {time.perf_counter() - _t_check_term:.6f}s")
+        
+        _t_get_obs = time.perf_counter()
         next_observation = self._get_observation()
+        logger.debug(f"Step {self.episode_step_count}: _get_observation took {time.perf_counter() - _t_get_obs:.6f}s")
+        
         info = self._get_info(); info["reward_this_step"] = reward
+        logger.debug(f"--- Step {self.episode_step_count} End. Total time: {time.perf_counter() - _step_time_start:.6f}s ---")
         return next_observation, reward, terminated, truncated, info
 
     def _calculate_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:

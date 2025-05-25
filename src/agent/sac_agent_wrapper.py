@@ -32,11 +32,12 @@ try:
     )
     from common.logger_setup import logger
 except ImportError:
-    project_root_wrapper = Path(__file__).resolve().parent.parent.parent
-    src_path_wrapper = project_root_wrapper / "src"
-    if str(project_root_wrapper) not in sys.path:
-        sys.path.insert(0, str(project_root_wrapper))
+    # project_root_wrapper = Path(__file__).resolve().parent.parent.parent # 移除
+    # src_path_wrapper = project_root_wrapper / "src" # 移除
+    # if str(project_root_wrapper) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root_wrapper)) # 移除
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.agent.sac_policy import CustomSACPolicy
         from src.common.config import (
             DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
@@ -66,8 +67,9 @@ class SACAgentWrapper:
                  policy_class: Type[CustomSACPolicy] = CustomSACPolicy, # type: ignore
                  policy_kwargs: Optional[Dict[str, Any]] = None,
                  learning_rate: Union[float, Callable[[float], float]] = SAC_LEARNING_RATE,
-                 batch_size: int = SAC_BATCH_SIZE,
-                 buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
+                 batch_size: int = SAC_BATCH_SIZE, # SAC_BATCH_SIZE 現在是 64
+                 buffer_size: Optional[int] = None, # 改為直接接收 buffer_size
+buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
                  learning_starts_factor: int = SAC_LEARNING_STARTS_FACTOR,
                  gamma: float = SAC_GAMMA,
                  ent_coef: Union[str, float] = SAC_ENT_COEF,
@@ -83,8 +85,15 @@ class SACAgentWrapper:
                 ):
         self.env = env
         self.policy_class = policy_class
-        self.policy_kwargs = policy_kwargs if policy_kwargs is not None else {}
-        self.use_amp = use_amp
+        _policy_kwargs = policy_kwargs if policy_kwargs is not None else {}
+        self.use_amp = use_amp # This is the USE_AMP from common.config
+
+        # Ensure features_extractor_kwargs exists and add use_amp to it
+        if "features_extractor_kwargs" not in _policy_kwargs:
+            _policy_kwargs["features_extractor_kwargs"] = {}
+        _policy_kwargs["features_extractor_kwargs"]["use_amp"] = self.use_amp
+        
+        self.policy_kwargs = _policy_kwargs
         
         # 優化設備配置
         self.device = self._setup_device(device)
@@ -98,15 +107,17 @@ class SACAgentWrapper:
         
         # 根據設備調整批次大小以優化GPU利用率
         if self.device.type == 'cuda':
-            # 如果使用GPU，可以適當增加批次大小
+            # 如果使用GPU，可以適當增加批次大小，但更保守一些
             gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            if gpu_memory_gb >= 8:  # 8GB以上GPU
-                self.optimized_batch_size = min(batch_size * 3, 768)
-            elif gpu_memory_gb >= 4:  # 4-8GB GPU
-                self.optimized_batch_size = min(batch_size * 2, 512)
-            else:  # 小於4GB GPU
-                self.optimized_batch_size = batch_size
-            logger.info(f"GPU模式 ({gpu_memory_gb:.1f}GB)：調整批次大小從 {batch_size} 到 {self.optimized_batch_size}")
+            if gpu_memory_gb >= 12:  # 例如 12GB 以上 GPU
+                self.optimized_batch_size = min(batch_size * 2, 256) # 上限降低
+            elif gpu_memory_gb >= 8:  # 8-12GB GPU
+                self.optimized_batch_size = min(int(batch_size * 1.5), 192) # 上限降低
+            else:  # 小於 8GB GPU 或為了更安全
+                self.optimized_batch_size = batch_size # 不放大，或者設一個更小的值如 64
+            # 確保 optimized_batch_size 不會太小，至少為一個合理值，例如 32 或 64
+            self.optimized_batch_size = max(self.optimized_batch_size, 32) # 進一步減小批次大小下限
+            logger.info(f"GPU模式 ({gpu_memory_gb:.1f}GB)：原始批次大小 {batch_size}，優化後批次大小 {self.optimized_batch_size}")
         else:
             self.optimized_batch_size = batch_size
             

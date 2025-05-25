@@ -32,14 +32,15 @@ except ImportError as e_initial_import_cm:
     logger_temp_cm.addHandler(logging.StreamHandler(sys.stdout))
     logger_temp_cm.setLevel(logging.DEBUG)
     logger = logger_temp_cm
-    logger.warning(f"currency_manager.py: Initial import failed: {e_initial_import_cm}. Attempting path adjustment...")
+    logger.warning(f"currency_manager.py: Initial import failed: {e_initial_import_cm}. Assuming PYTHONPATH is set correctly or this is a critical issue.")
     
-    project_root_cm = Path(__file__).resolve().parent.parent.parent
-    if str(project_root_cm) not in sys.path:
-        sys.path.insert(0, str(project_root_cm))
-        logger.info(f"currency_manager.py: Added project root to sys.path: {project_root_cm}")
+    # project_root_cm = Path(__file__).resolve().parent.parent.parent # 移除
+    # if str(project_root_cm) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root_cm)) # 移除
+    #     logger.info(f"currency_manager.py: Added project root to sys.path: {project_root_cm}") # 移除
     
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.logger_setup import logger as common_logger_retry_cm
         logger = common_logger_retry_cm
         _logger_initialized_by_common_cm = True

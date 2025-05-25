@@ -22,11 +22,12 @@ try:
     )
     from common.logger_setup import logger
 except ImportError:
-    project_root_fe = Path(__file__).resolve().parent.parent.parent
-    src_path_fe = project_root_fe / "src"
-    if str(project_root_fe) not in sys.path:
-        sys.path.insert(0, str(project_root_fe))
+    # project_root_fe = Path(__file__).resolve().parent.parent.parent # 移除
+    # src_path_fe = project_root_fe / "src" # 移除
+    # if str(project_root_fe) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root_fe)) # 移除
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.models.transformer_model import UniversalTradingTransformer
         from src.common.config import (
             TIMESTEPS, MAX_SYMBOLS_ALLOWED,
@@ -46,15 +47,14 @@ except ImportError:
 
 
 class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
-    # ... (類的 __init__ 和 forward 方法與之前版本相同，這裡省略以節省篇幅) ...
-    # <在此處粘貼您上一個版本 AdvancedTransformerFeatureExtractor 類的完整定義>
     def __init__(self, observation_space: spaces.Dict,
                  transformer_output_dim_per_symbol: int = TRANSFORMER_OUTPUT_DIM_PER_SYMBOL,
                  model_dim: int = TRANSFORMER_MODEL_DIM, num_time_encoder_layers: int = TRANSFORMER_NUM_LAYERS // 2,
                  num_cross_asset_layers: int = TRANSFORMER_NUM_LAYERS // 2, num_heads: int = TRANSFORMER_NUM_HEADS,
                  ffn_dim: int = TRANSFORMER_FFN_DIM, dropout_rate: float = TRANSFORMER_DROPOUT_RATE,
                  use_fourier_block: bool = True, fourier_num_modes: int = 32,
-                 use_wavelet_block: bool = True, wavelet_levels: int = 3, wavelet_name: str = 'db4'):
+                 use_wavelet_block: bool = True, wavelet_levels: int = 3, wavelet_name: str = 'db4',
+                 use_amp: bool = False): # 從 common.config 導入 USE_AMP 作為預設值會更好
         transformer_input_shape = observation_space.spaces["features_from_dataset"].shape
         num_input_features_for_transformer = transformer_input_shape[2]
         num_pos_ratio_features = observation_space.spaces["current_positions_nominal_ratio_ac"].shape[0]
@@ -63,8 +63,16 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         _features_dim = (MAX_SYMBOLS_ALLOWED * transformer_output_dim_per_symbol) + \
                         num_pos_ratio_features + num_pnl_ratio_features + num_margin_level_features
         super().__init__(observation_space, _features_dim)
+        
+        self.use_amp = use_amp
+        # 考慮從 common.config 導入 USE_AMP 作為 self.use_amp 的預設值
+        # from common.config import USE_AMP as global_use_amp
+        # self.use_amp = use_amp if use_amp is not None else global_use_amp # 如果參數未提供則使用全局配置
+
         logger.info(f"AdvancedTransformerFeatureExtractor initialized. Input feature dim for Transformer: {num_input_features_for_transformer}")
         logger.info(f"Total flattened output features_dim for SAC: {_features_dim}")
+        logger.info(f"AMP (autocast) enabled for feature extractor: {self.use_amp and torch.cuda.is_available()}")
+
         if UniversalTradingTransformer is None: raise RuntimeError("UniversalTradingTransformer未能正確導入。")
         self.transformer = UniversalTradingTransformer(
             num_input_features=num_input_features_for_transformer, num_symbols_possible=MAX_SYMBOLS_ALLOWED,
@@ -74,17 +82,43 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             fourier_num_modes=min(fourier_num_modes, TIMESTEPS // 2 + 1 if TIMESTEPS > 0 else 16),
             use_wavelet_block=use_wavelet_block, wavelet_levels=wavelet_levels, wavelet_name=wavelet_name,
             output_dim_per_symbol=transformer_output_dim_per_symbol)
+
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         transformer_input_data = observations["features_from_dataset"]
         symbol_padding_mask = observations["padding_mask"]
         current_positions_ratio = observations["current_positions_nominal_ratio_ac"]
         unrealized_pnl_ratio = observations["unrealized_pnl_ratio_ac"]
         margin_level = observations["margin_level"]
-        transformer_output = self.transformer(transformer_input_data, symbol_padding_mask)
+
+        # 僅在啟用AMP且CUDA可用時使用autocast
+        amp_enabled_for_forward = self.use_amp and torch.cuda.is_available()
+        
+        with torch.cuda.amp.autocast(enabled=amp_enabled_for_forward):
+            transformer_output = self.transformer(transformer_input_data, symbol_padding_mask)
+        
+        # 後續操作通常在 autocast 上下文之外進行，除非它們也受益於混合精度
+        # 或者如果它們對精度非常敏感，則應在 autocast 之外。
+        # 這裡的 reshape 和 cat 操作通常不需要在 autocast 內。
         batch_size = transformer_output.size(0)
         flattened_transformer_output = transformer_output.reshape(batch_size, -1)
-        final_features = torch.cat([flattened_transformer_output, current_positions_ratio,
-                                    unrealized_pnl_ratio, margin_level], dim=1)
+        
+        # 確保拼接的張量類型一致，autocast 可能會改變 transformer_output 的 dtype
+        # 如果其他張量是 float32，而 transformer_output 變成了 float16，cat 可能會出錯或執行隱式轉換
+        # 為了安全，可以將所有張量轉換為目標 dtype (例如，transformer_output.dtype 或 torch.float32)
+        # 但通常情況下，如果後續網路期望 float32，這裡的拼接應該還好。
+        # 如果 transformer_output 是 float16，其他是 float32，torch.cat 會將它們提升到 float32
+        
+        final_features = torch.cat([flattened_transformer_output,
+                                    current_positions_ratio.to(flattened_transformer_output.dtype), # 確保類型匹配
+                                    unrealized_pnl_ratio.to(flattened_transformer_output.dtype),    # 確保類型匹配
+                                    margin_level.to(flattened_transformer_output.dtype)], dim=1)   # 確保類型匹配
+        
+        # 在將特徵傳遞給 SAC 策略之前，確保其為 float32
+        # 即使在 autocast 上下文中，我們也希望輸出是 float32 以匹配策略網絡的期望類型
+        if amp_enabled_for_forward and final_features.dtype != torch.float32:
+            final_features = final_features.to(torch.float32)
+            logger.debug(f"Feature extractor output converted to float32. Original dtype: {flattened_transformer_output.dtype}")
+            
         return final_features
 
 

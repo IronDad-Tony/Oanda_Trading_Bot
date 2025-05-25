@@ -27,13 +27,14 @@ try:
         get_download_metadata
     )
 except ImportError:
-    # project_root 和 src_path 的計算保持不變
-    project_root = Path(__file__).resolve().parent.parent.parent
-    src_path = project_root / "src"
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+    # project_root 和 src_path 的計算保持不變 # 移除
+    # project_root = Path(__file__).resolve().parent.parent.parent # 移除
+    # src_path = project_root / "src" # 移除
+    # if str(project_root) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root)) # 移除
     try:
-        from src.common.config import ( # 使用 src.common
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
+        from src.common.config import (
             OANDA_API_KEY, OANDA_ACCOUNT_ID, OANDA_BASE_URL, ACCOUNT_CURRENCY,
             GRANULARITY as DEFAULT_GRANULARITY, PRICE_COLUMNS,
             OANDA_MAX_BATCH_CANDLES, OANDA_REQUEST_INTERVAL, get_granularity_seconds

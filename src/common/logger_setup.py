@@ -49,7 +49,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO) # 控制台可以只顯示INFO及以上級別的日誌
+console_handler.setLevel(logging.DEBUG) # 修改：控制台顯示DEBUG及以上級別的日誌
 console_formatter = logging.Formatter(
     "%(asctime)s - [%(levelname)s] - %(name)s - (%(filename)s:%(lineno)d) - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
@@ -68,60 +68,62 @@ logger.addHandler(console_handler)
 try:
     # 在多進程環境中，使用更安全的日誌配置
     import os
-    import fcntl
     from logging.handlers import TimedRotatingFileHandler
-    
+
     # 確保日誌目錄存在
     LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    
-    # 使用TimedRotatingFileHandler替代RotatingFileHandler以避免多進程衝突
-    # 按天輪轉，保留7天的日誌
-    file_handler = TimedRotatingFileHandler(
-        LOG_FILE_PATH,
-        when='midnight',      # 每天午夜輪轉
-        interval=1,           # 每1天輪轉一次
-        backupCount=7,        # 保留7天的備份文件
-        encoding='utf-8',     # 確保支持中文等字符
-        delay=True            # 延遲創建文件，直到第一次寫入
-    )
-    
-    # 設置文件鎖定以避免多進程寫入衝突
-    class SafeFileHandler(TimedRotatingFileHandler):
-        def emit(self, record):
-            try:
-                if self.stream:
-                    # 在寫入前獲取文件鎖
-                    fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX)
-                    try:
-                        super().emit(record)
-                    finally:
-                        # 釋放文件鎖
-                        fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
-                else:
-                    super().emit(record)
-            except (OSError, IOError):
-                # 如果文件鎖定失敗，回退到普通寫入
-                super().emit(record)
-    
-    # 在Windows系統上，fcntl不可用，使用原始的TimedRotatingFileHandler
-    if os.name == 'nt':  # Windows
+
+    if os.name == 'nt':  # Windows 系統
+        logger.info("檢測到 Windows 系統，將使用標準的 TimedRotatingFileHandler (無 fcntl 文件鎖)。")
         file_handler = TimedRotatingFileHandler(
             LOG_FILE_PATH,
-            when='midnight',
-            interval=1,
-            backupCount=7,
-            encoding='utf-8',
-            delay=True
+            when='midnight',      # 每天午夜輪轉
+            interval=1,           # 每1天輪轉一次
+            backupCount=7,        # 保留7天的備份文件
+            encoding='utf-8',     # 確保支持中文等字符
+            delay=True            # 延遲創建文件，直到第一次寫入
         )
-    else:  # Unix/Linux
-        file_handler = SafeFileHandler(
-            LOG_FILE_PATH,
-            when='midnight',
-            interval=1,
-            backupCount=7,
-            encoding='utf-8',
-            delay=True
-        )
+    else:  # 非 Windows 系統 (Unix/Linux/MacOS等)
+        try:
+            import fcntl
+            logger.info("在非 Windows 系統上檢測到 fcntl 模組，將嘗試使用帶文件鎖的 SafeFileHandler。")
+
+            class SafeFileHandler(TimedRotatingFileHandler):
+                def emit(self, record):
+                    try:
+                        if self.stream is None: # 確保 stream 在使用前已打開
+                            self.stream = self._open()
+                        if self.stream: # 再次檢查 stream 是否成功打開
+                            # 在寫入前獲取文件鎖
+                            fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX)
+                            try:
+                                super().emit(record)
+                            finally:
+                                # 釋放文件鎖
+                                fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
+                        else: # 如果 stream 仍然是 None，則直接調用父類 emit (可能觸發錯誤處理)
+                            super().emit(record)
+                    except Exception: # 捕獲所有可能的異常，包括 stream 為 None 或鎖定失敗
+                        self.handleError(record) # 使用 logging 內建的錯誤處理
+
+            file_handler = SafeFileHandler(
+                LOG_FILE_PATH,
+                when='midnight',
+                interval=1,
+                backupCount=7,
+                encoding='utf-8',
+                delay=True
+            )
+        except ImportError:
+            logger.warning("在非 Windows 系統上導入 fcntl 失敗，將使用標準的 TimedRotatingFileHandler。")
+            file_handler = TimedRotatingFileHandler(
+                LOG_FILE_PATH,
+                when='midnight',
+                interval=1,
+                backupCount=7,
+                encoding='utf-8',
+                delay=True
+            )
     
     file_handler.setLevel(logging.DEBUG) # 文件日誌記錄所有DEBUG及以上級別的信息
     file_formatter = logging.Formatter(

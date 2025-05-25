@@ -28,11 +28,12 @@ try:
     from feature_engineer.preprocessor import preprocess_data_for_model
     from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
 except ImportError:
-    project_root = Path(__file__).resolve().parent.parent.parent
-    src_path = project_root / "src"
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+    # project_root = Path(__file__).resolve().parent.parent.parent # 移除
+    # src_path = project_root / "src" # 移除
+    # if str(project_root) not in sys.path: # 移除
+    #     sys.path.insert(0, str(project_root)) # 移除
     try:
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.config import (
             MMAP_DATA_DIR, TIMESTEPS, PRICE_COLUMNS, GRANULARITY,
             get_granularity_seconds, OANDA_API_KEY

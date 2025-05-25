@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import torch
 from dotenv import load_dotenv
+from .logger_setup import logger # 導入日誌記錄器
 
 # --- 基礎路徑 ---
 # Path(__file__) 會獲取當前文件 (config.py) 的路徑
@@ -64,11 +65,11 @@ PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
 
 # --- 模型與訓練參數 ---
 # Transformer 相關
-TIMESTEPS = 128             # 輸入Transformer的時間步長 (序列長度)
-TRANSFORMER_MODEL_DIM = 512 # Transformer內部的主要模型維度 (d_model)
-TRANSFORMER_NUM_LAYERS = 6  # Transformer Encoder 的層數 (可根據5090性能調整，初始6-8層)
-TRANSFORMER_NUM_HEADS = 8   # 多頭注意力機制的頭數 (通常 d_model % num_heads == 0)
-TRANSFORMER_FFN_DIM = 2048  # Transformer內部前饋網絡的隱藏層維度 (通常是 model_dim * 4)
+TIMESTEPS = 256             # 輸入Transformer的時間步長 (序列長度) - 根據用戶要求增加
+TRANSFORMER_MODEL_DIM = 256 # Transformer內部的主要模型維度 (d_model) - 根據用戶要求減小
+TRANSFORMER_NUM_LAYERS = 4  # Transformer Encoder 的層數 - 根據用戶要求減小
+TRANSFORMER_NUM_HEADS = 8   # 多頭注意力機制的頭數 (確保 d_model % num_heads == 0, 256 % 8 == 0)
+TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 4  # Transformer內部前饋網絡的隱藏層維度 (保持4倍關係)
 TRANSFORMER_DROPOUT_RATE = 0.1
 TRANSFORMER_LAYER_NORM_EPS = 1e-5
 TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING = 5000 # PositionalEncoding 的 max_len
@@ -114,8 +115,8 @@ BEST_MODEL_SUBDIR = "best_model" # 相對於 WEIGHTS_DIR
 # SAC 相關
 SAC_GAMMA = 0.95             # 折扣因子
 SAC_LEARNING_RATE = 3e-5     # 學習率
-SAC_BATCH_SIZE = 128         # 增加批次大小以更好利用GPU
-SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # 每個symbol的Replay Buffer大小因子 (總大小 = N_symbols * TIMESTEPS * factor)
+SAC_BATCH_SIZE = 64          # 根據用戶要求設定批次大小
+SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # 這個參數的用途將被修改，buffer size 將動態設定
 SAC_LEARNING_STARTS_FACTOR = 200 # 學習開始前收集的最小樣本數因子 (總樣本 = N_symbols * BATCH_SIZE * factor)
 SAC_TRAIN_FREQ_STEPS = 32    # 減少訓練頻率以提高效率
 SAC_GRADIENT_STEPS = 32      # 每次訓練迭代執行多少梯度步數
@@ -141,7 +142,9 @@ def setup_gpu_optimization():
         torch.backends.cudnn.benchmark = True
         
         # 設置內存分配策略
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512,expandable_segments:True"
+        # 嘗試使用 expandable_segments:True 來減少碎片
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256,expandable_segments:True"
+        logger.info(f"PYTORCH_CUDA_ALLOC_CONF set to: {os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
         
         # 啟用混合精度訓練
         return True
