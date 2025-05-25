@@ -63,7 +63,8 @@ class UniversalCheckpointCallback(BaseCallback):
                  early_stopping_metric: str = "eval/mean_final_portfolio_value", # 用於早停的指標
                  early_stopping_min_evals: int = 10, # 減少最小評估次數以便更快觸發測試
                  log_transformer_norm_freq: int = 1000,
-                 verbose: int = 1):
+                 verbose: int = 1,
+                 streamlit_session_state=None):
         super().__init__(verbose)
         self.save_freq = save_freq
         self.save_path = Path(save_path)
@@ -96,6 +97,7 @@ class UniversalCheckpointCallback(BaseCallback):
         self.last_norm_log_ncalls = 0
 
         self.interrupted = False
+        self.streamlit_session_state = streamlit_session_state  # 用於更新Streamlit UI
         
         # 嘗試設置signal處理器，但在非主線程中會失敗
         try:
@@ -172,6 +174,22 @@ class UniversalCheckpointCallback(BaseCallback):
             self.logger.record("eval/mean_episode_length", np.mean(all_episode_lengths) if all_episode_lengths else 0)
             self.logger.record("eval/mean_final_portfolio_value", mean_portfolio_value)
             self.logger.dump(step=self.num_timesteps) # 確保寫入TensorBoard
+        
+        # 更新到Streamlit session state
+        if self.streamlit_session_state is not None and hasattr(self.streamlit_session_state, 'training_metrics'):
+            metrics = self.streamlit_session_state.training_metrics
+            # 確保有對應的步數記錄
+            if len(metrics['steps']) > 0 and metrics['steps'][-1] == self.num_timesteps:
+                # 更新最後一個記錄的獎勵和投資組合價值
+                if len(metrics['rewards']) == len(metrics['steps']):
+                    metrics['rewards'][-1] = mean_reward
+                else:
+                    metrics['rewards'].append(mean_reward)
+                
+                if len(metrics['portfolio_values']) == len(metrics['steps']):
+                    metrics['portfolio_values'][-1] = mean_portfolio_value
+                else:
+                    metrics['portfolio_values'].append(mean_portfolio_value)
 
         # 返回用於早停和最佳模型判斷的指標
         if self.early_stopping_metric == "eval/mean_reward":
@@ -181,10 +199,10 @@ class UniversalCheckpointCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.model is None or self.logger is None: logger.error("Callback model/logger未初始化"); return False
 
-        # 1. 定期保存 - 只保存一個中間模型，避免佔用太多空間
+        # 1. 定期保存 - 使用統一的命名策略，覆蓋同一個檢查點文件
         if self.n_calls > 0 and self.n_calls % self.save_freq == 0:
-            # 使用固定名稱的中間模型，每次覆蓋
-            intermediate_path = self.save_path / f"{self.name_prefix}_checkpoint.zip"
+            # 使用模型標識符作為檢查點名稱，每次覆蓋
+            intermediate_path = self.save_path / f"{self.name_prefix}.zip"
             self.model.save(intermediate_path)
             logger.info(f"定期保存模型到: {intermediate_path} (步數: {self.num_timesteps})")
 
@@ -193,12 +211,14 @@ class UniversalCheckpointCallback(BaseCallback):
             current_metric = self._run_evaluation()
             self.es_eval_count +=1
 
-            # 保存最佳模型
+            # 保存最佳模型 - 使用統一命名策略
             if current_metric > self.best_metric_val:
                 logger.info(f"新最佳評估指標: {current_metric:.3f} (舊: {self.best_metric_val:.3f})")
                 self.best_metric_val = current_metric
-                self.model.save(self.best_model_save_path / f"{self.name_prefix}_best.zip")
-                logger.info(f"最佳模型已更新並保存到: {self.best_model_save_path}")
+                # 最佳模型也使用相同的基礎名稱，只是保存在不同位置
+                best_model_path = self.best_model_save_path / f"{self.name_prefix}_best.zip"
+                self.model.save(best_model_path)
+                logger.info(f"最佳模型已更新並保存到: {best_model_path}")
             
             # 早停邏輯
             if self.es_eval_count >= self.early_stopping_min_evals:
@@ -228,6 +248,20 @@ class UniversalCheckpointCallback(BaseCallback):
                     l2_norm = sum(p.data.norm(2).item() ** 2 for p in transformer_params if p.requires_grad) ** 0.5
                     self.logger.record("train/transformer_l2_norm", l2_norm)
                     logger.debug(f"Transformer L2 Norm @{self.num_timesteps}: {l2_norm:.4f}")
+                    
+                    # 更新範數到Streamlit
+                    if self.streamlit_session_state is not None and hasattr(self.streamlit_session_state, 'training_metrics'):
+                        metrics = self.streamlit_session_state.training_metrics
+                        if 'norms' in metrics:
+                            # 找到對應的步數索引
+                            if len(metrics['steps']) > 0 and metrics['steps'][-1] >= self.num_timesteps - self.log_transformer_norm_freq:
+                                if len(metrics['norms']) < len(metrics['steps']):
+                                    metrics['norms'].append({'l2_norm': l2_norm})
+                                else:
+                                    # 更新最後一個記錄
+                                    if len(metrics['norms']) > 0:
+                                        metrics['norms'][-1]['l2_norm'] = l2_norm
+                                    
                 except Exception as e_norm: logger.warning(f"計算Transformer範數出錯: {e_norm}")
         
         if self.interrupted:
@@ -237,11 +271,11 @@ class UniversalCheckpointCallback(BaseCallback):
 
     def _on_training_end(self) -> None:
         logger.info(f"訓練結束 (UniversalCheckpointCallback)。總步數: {self.num_timesteps}, 總調用次數: {self.n_calls}")
-        # 只保存latest模型，避免產生太多文件
+        # 保存最終模型，覆蓋同一個文件
         if self.model is not None:
-            latest_path = self.save_path / f"{self.name_prefix}_latest.zip"
-            self.model.save(latest_path)
-            logger.info(f"最終模型已保存到: {latest_path}")
+            final_path = self.save_path / f"{self.name_prefix}.zip"
+            self.model.save(final_path)
+            logger.info(f"最終模型已保存到: {final_path}")
 
 
 if __name__ == "__main__":

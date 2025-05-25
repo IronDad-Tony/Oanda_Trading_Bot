@@ -270,7 +270,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             # 重新計算加權平均價
             total_value_at_old_avg = current_units * avg_entry_qc
             total_value_at_new_trade = units_to_trade * trade_price_qc
-            self.avg_entry_prices_qc[slot_idx] = (total_value_at_old_avg + total_value_at_new_trade) / new_units
+            
+            # 防止除零錯誤：檢查new_units是否為零
+            if abs(new_units) > Decimal('1e-9'):
+                self.avg_entry_prices_qc[slot_idx] = (total_value_at_old_avg + total_value_at_new_trade) / new_units
+            else:
+                # 如果new_units接近零，保持原有的平均入場價格
+                logger.warning(f"new_units接近零 ({new_units})，保持原有平均入場價格: {self.avg_entry_prices_qc[slot_idx]}")
         else: # 反向交易 (平倉或反向開倉)
             if abs(units_to_trade) >= abs(current_units): # 完全平倉或反向開倉
                 trade_type = "CLOSE_AND_REVERSE" if abs(units_to_trade) > abs(current_units) else "CLOSE"
@@ -858,6 +864,87 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             "active_positions": sum(1 for units in self.current_positions_units if abs(units) > Decimal('1e-9')),
             "trade_count": len(self.trade_log)
         }
+    
+    def get_current_info(self) -> Dict[str, Any]:
+        """
+        獲取當前環境的詳細信息，供訓練監控使用
+        
+        Returns:
+            包含當前狀態詳細信息的字典
+        """
+        info = {
+            'episode_reward': float(sum(self.reward_history)) if self.reward_history else 0.0,
+            'portfolio_value_ac': float(self.portfolio_value_ac),
+            'equity_ac': float(self.equity_ac),
+            'cash_ac': float(self.cash),
+            'total_margin_used_ac': float(self.total_margin_used_ac),
+            'episode_step': self.episode_step_count,
+            'max_drawdown': float(self.max_drawdown_episode),
+            'peak_portfolio_value': float(self.peak_portfolio_value_episode),
+            'active_positions': sum(1 for units in self.current_positions_units if abs(units) > Decimal('1e-9')),
+            'trade_count': len(self.trade_log),
+            'symbol_stats': {}
+        }
+        
+        # 計算每個symbol的統計信息
+        symbol_trades = {}
+        for trade in self.trade_log:
+            symbol = trade['symbol']
+            if symbol not in symbol_trades:
+                symbol_trades[symbol] = {
+                    'trades': [],
+                    'pnl': []
+                }
+            symbol_trades[symbol]['trades'].append(trade)
+            if trade['realized_pnl_ac'] != 0:
+                symbol_trades[symbol]['pnl'].append(trade['realized_pnl_ac'])
+        
+        # 計算統計指標
+        for symbol, data in symbol_trades.items():
+            trades = data['trades']
+            pnl_list = data['pnl']
+            
+            stats = {
+                'trades': len(trades),
+                'win_rate': 0,
+                'avg_return': 0,
+                'max_return': 0,
+                'max_loss': 0,
+                'sharpe_ratio': 0,
+                'returns': []
+            }
+            
+            if pnl_list:
+                wins = sum(1 for p in pnl_list if p > 0)
+                stats['win_rate'] = (wins / len(pnl_list)) * 100 if pnl_list else 0
+                
+                # 計算收益率
+                returns = []
+                for i, trade in enumerate(trades):
+                    if trade['trade_type'] in ['CLOSE', 'REDUCE', 'CLOSE_AND_REVERSE']:
+                        # 計算收益率
+                        if trade['avg_entry_price_qc'] > 0:
+                            if trade['position_direction'] == 'LONG':
+                                ret = ((trade['trade_price_qc'] - trade['avg_entry_price_qc']) / trade['avg_entry_price_qc']) * 100
+                            else:
+                                ret = ((trade['avg_entry_price_qc'] - trade['trade_price_qc']) / trade['avg_entry_price_qc']) * 100
+                            returns.append(ret)
+                
+                if returns:
+                    stats['returns'] = returns
+                    stats['avg_return'] = np.mean(returns)
+                    stats['max_return'] = max(returns)
+                    stats['max_loss'] = min(returns)
+                    
+                    # 簡化的夏普比率計算
+                    if len(returns) > 1:
+                        returns_std = np.std(returns)
+                        if returns_std > 0:
+                            stats['sharpe_ratio'] = stats['avg_return'] / returns_std
+            
+            info['symbol_stats'][symbol] = stats
+        
+        return info
 
 # --- if __name__ == "__main__": 測試塊 (與V4.8版本相同) ---
 if __name__ == "__main__":

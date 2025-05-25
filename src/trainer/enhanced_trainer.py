@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 import numpy as np
+import time
 
 # 導入邏輯與其他模組相同
 logger: logging.Logger = logging.getLogger("enhanced_trainer_module_init")
@@ -99,7 +100,7 @@ class EnhancedUniversalTrainer:
     4. 實時監控和回調 - 支持斷點續練
     """
     
-    def __init__(self, 
+    def __init__(self,
                  trading_symbols: List[str],
                  start_time: datetime,
                  end_time: datetime,
@@ -111,7 +112,8 @@ class EnhancedUniversalTrainer:
                  total_timesteps: int = 10000,
                  save_freq: int = 1000,
                  eval_freq: int = 2000,
-                 model_name_prefix: str = "sac_universal_trader"):
+                 model_name_prefix: str = "sac_universal_trader",
+                 streamlit_session_state=None):
         
         self.trading_symbols = sorted(list(set(trading_symbols)))
         self.start_time = start_time
@@ -125,6 +127,11 @@ class EnhancedUniversalTrainer:
         self.save_freq = save_freq
         self.eval_freq = eval_freq
         self.model_name_prefix = model_name_prefix
+        self.streamlit_session_state = streamlit_session_state  # 用於更新Streamlit UI
+        
+        # 生成基於參數的模型名稱
+        self.model_identifier = self._generate_model_identifier()
+        self.existing_model_path = self._find_existing_model()
         
         # 初始化組件
         self.currency_manager = CurrencyDependencyManager(account_currency)
@@ -135,11 +142,89 @@ class EnhancedUniversalTrainer:
         self.env = None
         self.agent = None
         self.callback = None
+        self._stop_training = False  # 停止訓練的標誌
+        
+        # 訓練數據收集
+        self.training_start_time = None
         
         logger.info(f"EnhancedUniversalTrainer 初始化完成")
         logger.info(f"交易symbols: {self.trading_symbols}")
         logger.info(f"時間範圍: {self.start_time} 到 {self.end_time}")
         logger.info(f"帳戶貨幣: {self.account_currency}")
+        logger.info(f"模型標識符: {self.model_identifier}")
+        if self.existing_model_path:
+            logger.info(f"發現既有模型: {self.existing_model_path}")
+        else:
+            logger.info("未發現既有模型，將創建新模型")
+    
+    def _generate_model_identifier(self) -> str:
+        """
+        基於關鍵參數生成模型標識符
+        
+        Returns:
+            模型標識符字符串
+        """
+        # 使用交易品種數量和時間步長作為主要參數
+        max_symbols = len(self.trading_symbols)
+        timestep = self.timesteps_history
+        
+        # 生成標識符：sac_model_symbols{數量}_timestep{步長}
+        identifier = f"sac_model_symbols{max_symbols}_timestep{timestep}"
+        return identifier
+    
+    def _find_existing_model(self) -> Optional[str]:
+        """
+        查找是否存在相同參數的模型
+        
+        Returns:
+            既有模型路徑，如果不存在則返回None
+        """
+        try:
+            # 檢查多個可能的位置
+            search_paths = [
+                Path("weights"),
+                Path("logs"),
+                Path(LOGS_DIR) if LOGS_DIR else None
+            ]
+            
+            for search_path in search_paths:
+                if search_path is None or not search_path.exists():
+                    continue
+                
+                # 查找匹配的模型文件
+                pattern = f"{self.model_identifier}*.zip"
+                matching_files = list(search_path.glob(pattern))
+                
+                if matching_files:
+                    # 返回最新的文件
+                    latest_file = max(matching_files, key=lambda x: x.stat().st_mtime)
+                    return str(latest_file)
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"查找既有模型時發生錯誤: {e}")
+            return None
+    
+    def get_model_save_path(self, suffix: str = "") -> Path:
+        """
+        獲取模型保存路徑
+        
+        Args:
+            suffix: 文件名後綴
+            
+        Returns:
+            模型保存路徑
+        """
+        if suffix:
+            filename = f"{self.model_identifier}_{suffix}.zip"
+        else:
+            filename = f"{self.model_identifier}.zip"
+        
+        save_dir = Path(LOGS_DIR) if LOGS_DIR else Path("logs")
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        return save_dir / filename
     
     def prepare_data(self) -> bool:
         """
@@ -270,7 +355,7 @@ class EnhancedUniversalTrainer:
         設置智能體
         
         Args:
-            load_model_path: 可選的模型加載路徑
+            load_model_path: 可選的模型加載路徑，如果為None則自動檢查既有模型
             
         Returns:
             是否成功設置智能體
@@ -298,10 +383,25 @@ class EnhancedUniversalTrainer:
                 tensorboard_log_path=self.tensorboard_log_path
             )
             
+            # 決定要載入的模型路徑
+            model_to_load = load_model_path or self.existing_model_path
+            
             # 如果有模型路徑，加載模型
-            if load_model_path:
-                logger.info(f"加載模型: {load_model_path}")
-                self.agent.load(load_model_path)
+            if model_to_load:
+                logger.info(f"載入既有模型: {model_to_load}")
+                self.agent.load(model_to_load)
+                
+                # 更新Streamlit狀態
+                if self.streamlit_session_state:
+                    self.streamlit_session_state.loaded_existing_model = True
+                    self.streamlit_session_state.loaded_model_path = model_to_load
+                    self.streamlit_session_state.loaded_model_info = self._get_model_info(model_to_load)
+            else:
+                logger.info("創建新的模型")
+                if self.streamlit_session_state:
+                    self.streamlit_session_state.loaded_existing_model = False
+                    self.streamlit_session_state.loaded_model_path = None
+                    self.streamlit_session_state.loaded_model_info = None
             
             logger.info("SAC智能體創建成功")
             # 注意：SACAgentWrapper 可能沒有 get_model_parameter_count 方法
@@ -319,6 +419,36 @@ class EnhancedUniversalTrainer:
             logger.error(f"智能體設置失敗: {e}", exc_info=True)
             return False
     
+    def _get_model_info(self, model_path: str) -> Dict[str, Any]:
+        """
+        獲取模型信息
+        
+        Args:
+            model_path: 模型文件路徑
+            
+        Returns:
+            模型信息字典
+        """
+        try:
+            model_file = Path(model_path)
+            if not model_file.exists():
+                return {}
+            
+            stat = model_file.stat()
+            return {
+                'name': model_file.name,
+                'path': str(model_file),
+                'size_mb': stat.st_size / (1024 * 1024),
+                'modified': datetime.fromtimestamp(stat.st_mtime),
+                'max_symbols': len(self.trading_symbols),
+                'timestep': self.timesteps_history,
+                'model_identifier': self.model_identifier
+            }
+            
+        except Exception as e:
+            logger.warning(f"獲取模型信息時發生錯誤: {e}")
+            return {}
+    
     def setup_callbacks(self) -> bool:
         """
         設置訓練回調
@@ -333,15 +463,20 @@ class EnhancedUniversalTrainer:
             
             logger.info("設置訓練回調...")
             
+            # 使用模型標識符作為保存路徑，確保相同參數的訓練使用相同的文件
+            save_dir = Path(LOGS_DIR) if LOGS_DIR else Path("logs")
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
             # 創建檢查點回調
             self.callback = UniversalCheckpointCallback(
                 save_freq=self.save_freq,
-                save_path=LOGS_DIR / f"{self.model_name_prefix}_{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                name_prefix=self.model_name_prefix,
+                save_path=save_dir,
+                name_prefix=self.model_identifier,  # 使用模型標識符而不是通用前綴
                 eval_freq=self.eval_freq,
                 n_eval_episodes=5,
                 deterministic_eval=True,
-                verbose=1
+                verbose=1,
+                streamlit_session_state=self.streamlit_session_state
             )
             
             logger.info("訓練回調設置成功")
@@ -367,18 +502,175 @@ class EnhancedUniversalTrainer:
             logger.info(f"保存頻率: 每 {self.save_freq} 步")
             logger.info(f"評估頻率: 每 {self.eval_freq} 步")
             
+            # 重置停止標誌
+            self._stop_training = False
+            self.training_start_time = datetime.now()
+            
+            # 創建一個自定義回調來檢查停止標誌和更新訓練數據
+            from stable_baselines3.common.callbacks import BaseCallback
+            
+            class TrainingMonitorCallback(BaseCallback):
+                def __init__(self, trainer, verbose=0):
+                    super().__init__(verbose)
+                    self.trainer = trainer
+                    self.last_update_time = time.time()
+                    self.update_interval = 1.0  # 每秒更新一次
+                
+                def _on_step(self) -> bool:
+                    # 檢查共享數據管理器的停止信號
+                    if hasattr(self.trainer, 'shared_data_manager') and self.trainer.shared_data_manager:
+                        if self.trainer.shared_data_manager.is_stop_requested():
+                            logger.info("檢測到共享數據管理器停止信號")
+                            return False
+                    
+                    # 如果設置了停止標誌，返回False來停止訓練
+                    if self.trainer._stop_training:
+                        logger.info("檢測到停止訓練信號")
+                        return False
+                    
+                    # 更新訓練進度到Streamlit和共享數據管理器
+                    current_time = time.time()
+                    if current_time - self.last_update_time >= self.update_interval:
+                        self._update_training_metrics()
+                        self.last_update_time = current_time
+                    
+                    return True
+                
+                def _update_training_metrics(self):
+                    """更新訓練指標到Streamlit session state和共享數據管理器"""
+                    try:
+                        # 更新訓練進度
+                        progress = (self.num_timesteps / self.trainer.total_timesteps) * 100
+                        
+                        # 更新共享數據管理器的進度
+                        if hasattr(self.trainer, 'shared_data_manager') and self.trainer.shared_data_manager:
+                            self.trainer.shared_data_manager.update_training_status('running', progress)
+                        
+                        # 更新Streamlit session state
+                        if self.trainer.streamlit_session_state is not None:
+                            self.trainer.streamlit_session_state.training_progress = progress
+                        
+                        # 收集當前訓練數據
+                        current_reward = 0.0
+                        current_portfolio_value = self.trainer.initial_capital
+                        actor_loss = 0.0
+                        critic_loss = 0.0
+                        l2_norm = 0.0
+                        grad_norm = 0.0
+                        
+                        # 從環境獲取當前狀態
+                        if hasattr(self.trainer.env, 'get_current_info'):
+                            env_info = self.trainer.env.get_current_info()
+                            
+                            if 'episode_reward' in env_info:
+                                current_reward = env_info['episode_reward']
+                            
+                            if 'portfolio_value_ac' in env_info:
+                                current_portfolio_value = env_info['portfolio_value_ac']
+                        
+                        # 從logger獲取損失和範數數據
+                        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
+                            for key, value in self.logger.name_to_value.items():
+                                if 'loss' in key.lower():
+                                    if 'actor' in key.lower():
+                                        actor_loss = value
+                                    elif 'critic' in key.lower():
+                                        critic_loss = value
+                                elif 'norm' in key.lower():
+                                    if 'l2' in key.lower():
+                                        l2_norm = value
+                                    elif 'grad' in key.lower():
+                                        grad_norm = value
+                        
+                        # 更新共享數據管理器
+                        if hasattr(self.trainer, 'shared_data_manager') and self.trainer.shared_data_manager:
+                            self.trainer.shared_data_manager.add_training_metric(
+                                step=self.num_timesteps,
+                                reward=current_reward,
+                                portfolio_value=current_portfolio_value,
+                                actor_loss=actor_loss,
+                                critic_loss=critic_loss,
+                                l2_norm=l2_norm,
+                                grad_norm=grad_norm
+                            )
+                        
+                        # 更新Streamlit session state（保持向後兼容）
+                        if self.trainer.streamlit_session_state is not None:
+                            # 初始化metrics如果不存在
+                            if 'training_metrics' not in self.trainer.streamlit_session_state:
+                                self.trainer.streamlit_session_state.training_metrics = {
+                                    'steps': [],
+                                    'rewards': [],
+                                    'portfolio_values': [],
+                                    'losses': [],
+                                    'norms': [],
+                                    'symbol_stats': {},
+                                    'timestamps': []
+                                }
+                            
+                            metrics = self.trainer.streamlit_session_state.training_metrics
+                            
+                            # 添加當前數據
+                            metrics['steps'].append(self.num_timesteps)
+                            metrics['rewards'].append(current_reward)
+                            metrics['portfolio_values'].append(current_portfolio_value)
+                            metrics['timestamps'].append(datetime.now())
+                            
+                            if actor_loss or critic_loss:
+                                metrics['losses'].append({
+                                    'actor_loss': actor_loss,
+                                    'critic_loss': critic_loss
+                                })
+                            
+                            if l2_norm or grad_norm:
+                                metrics['norms'].append({
+                                    'l2_norm': l2_norm,
+                                    'grad_norm': grad_norm
+                                })
+                            
+                            # 限制數據長度，避免內存問題
+                            max_data_points = 1000
+                            for key in ['steps', 'rewards', 'portfolio_values', 'timestamps']:
+                                if len(metrics[key]) > max_data_points:
+                                    metrics[key] = metrics[key][-max_data_points:]
+                            
+                            if len(metrics['losses']) > max_data_points:
+                                metrics['losses'] = metrics['losses'][-max_data_points:]
+                            
+                            if len(metrics['norms']) > max_data_points:
+                                metrics['norms'] = metrics['norms'][-max_data_points:]
+                        
+                    except Exception as e:
+                        logger.warning(f"更新訓練指標時發生錯誤: {e}")
+            
+            # 組合回調
+            from stable_baselines3.common.callbacks import CallbackList
+            monitor_callback = TrainingMonitorCallback(self)
+            combined_callback = CallbackList([self.callback, monitor_callback])
+            
             # 執行訓練
             self.agent.train(
                 total_timesteps=self.total_timesteps,
-                callback=self.callback,
+                callback=combined_callback,
                 log_interval=100
             )
             
+            # 檢查是否是因為停止信號而結束
+            if self._stop_training or (hasattr(self, 'shared_data_manager') and self.shared_data_manager and self.shared_data_manager.is_stop_requested()):
+                logger.info("訓練已被停止信號中斷")
+                # 更新共享數據管理器狀態
+                if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                    self.shared_data_manager.update_training_status('idle')
+                return False
+            
             logger.info("訓練完成！")
             
-            # 保存最終模型
-            from pathlib import Path
-            final_model_path = Path(LOGS_DIR) / f"{self.model_name_prefix}_final.zip"
+            # 更新共享數據管理器狀態
+            if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                self.shared_data_manager.update_training_status('completed', 100)
+            
+            # 保存最終模型，使用統一的命名策略
+            final_model_path = self.get_model_save_path("final")
             self.agent.save(final_model_path)
             logger.info(f"最終模型已保存: {final_model_path}")
             
@@ -388,14 +680,16 @@ class EnhancedUniversalTrainer:
             logger.info("訓練被用戶中斷")
             # 保存當前模型
             if self.agent:
-                from pathlib import Path
-                interrupted_model_path = Path(LOGS_DIR) / f"{self.model_name_prefix}_interrupted.zip"
+                interrupted_model_path = self.get_model_save_path("interrupted")
                 self.agent.save(interrupted_model_path)
                 logger.info(f"中斷時模型已保存: {interrupted_model_path}")
             return False
             
         except Exception as e:
             logger.error(f"訓練失敗: {e}", exc_info=True)
+            # 更新共享數據管理器錯誤狀態
+            if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                self.shared_data_manager.update_training_status('error', error=str(e))
             return False
     
     def run_full_training_pipeline(self, load_model_path: Optional[str] = None) -> bool:
@@ -412,42 +706,61 @@ class EnhancedUniversalTrainer:
         logger.info("開始完整的訓練流程")
         logger.info("=" * 60)
         
-        # 1. 準備數據
-        if not self.prepare_data():
-            logger.error("數據準備失敗，終止訓練")
-            return False
+        try:
+            # 初始化共享數據管理器狀態
+            if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                self.shared_data_manager.update_training_status('running', 0)
+            
+            # 1. 準備數據
+            if not self.prepare_data():
+                logger.error("數據準備失敗，終止訓練")
+                if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                    self.shared_data_manager.update_training_status('error', error="數據準備失敗")
+                return False
+            
+            # 2. 設置環境
+            if not self.setup_environment():
+                logger.error("環境設置失敗，終止訓練")
+                if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                    self.shared_data_manager.update_training_status('error', error="環境設置失敗")
+                return False
+            
+            # 3. 設置智能體
+            if not self.setup_agent(load_model_path):
+                logger.error("智能體設置失敗，終止訓練")
+                if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                    self.shared_data_manager.update_training_status('error', error="智能體設置失敗")
+                return False
+            
+            # 4. 設置回調
+            if not self.setup_callbacks():
+                logger.error("回調設置失敗，終止訓練")
+                if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                    self.shared_data_manager.update_training_status('error', error="回調設置失敗")
+                return False
+            
+            # 5. 執行訓練
+            success = self.train()
+            
+        except Exception as e:
+            logger.error(f"完整訓練流程發生錯誤: {e}", exc_info=True)
+            if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+                self.shared_data_manager.update_training_status('error', error=str(e))
+            success = False
         
-        # 2. 設置環境
-        if not self.setup_environment():
-            logger.error("環境設置失敗，終止訓練")
-            return False
-        
-        # 3. 設置智能體
-        if not self.setup_agent(load_model_path):
-            logger.error("智能體設置失敗，終止訓練")
-            return False
-        
-        # 4. 設置回調
-        if not self.setup_callbacks():
-            logger.error("回調設置失敗，終止訓練")
-            return False
-        
-        # 5. 執行訓練
-        success = self.train()
-        
-        # 6. 清理資源
-        self.cleanup()
-        
-        if success:
-            logger.info("=" * 60)
-            logger.info("完整訓練流程成功完成！")
-            logger.info("=" * 60)
-        else:
-            logger.warning("=" * 60)
-            logger.warning("訓練流程未完全成功")
-            logger.warning("=" * 60)
-        
-        return success
+            # 6. 清理資源
+            self.cleanup()
+            
+            if success:
+                logger.info("=" * 60)
+                logger.info("完整訓練流程成功完成！")
+                logger.info("=" * 60)
+            else:
+                logger.warning("=" * 60)
+                logger.warning("訓練流程未完全成功")
+                logger.warning("=" * 60)
+            
+            return success
     
     def cleanup(self):
         """清理資源"""
@@ -462,6 +775,46 @@ class EnhancedUniversalTrainer:
                 
         except Exception as e:
             logger.warning(f"清理資源時發生錯誤: {e}")
+    
+    def stop(self):
+        """
+        停止訓練
+        
+        設置停止標誌，訓練循環會在下一個步驟檢查到這個標誌並停止
+        """
+        logger.info("收到停止訓練請求")
+        self._stop_training = True
+        
+        # 同時通知共享數據管理器
+        if hasattr(self, 'shared_data_manager') and self.shared_data_manager:
+            self.shared_data_manager.request_stop()
+    
+    def save_current_model(self, suffix: str = "checkpoint") -> Optional[str]:
+        """
+        保存當前模型
+        
+        Args:
+            suffix: 模型文件名後綴
+            
+        Returns:
+            保存的模型路徑，如果保存失敗則返回None
+        """
+        try:
+            if self.agent is None:
+                logger.warning("沒有可保存的模型（agent未初始化）")
+                return None
+            
+            # 使用統一的命名策略
+            model_path = self.get_model_save_path(suffix)
+            
+            self.agent.save(model_path)
+            logger.info(f"模型已保存: {model_path}")
+            
+            return str(model_path)
+            
+        except Exception as e:
+            logger.error(f"保存模型時發生錯誤: {e}", exc_info=True)
+            return None
 
 
 def create_training_time_range(days_back: int = 30) -> tuple[datetime, datetime]:

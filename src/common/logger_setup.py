@@ -66,14 +66,63 @@ logger.addHandler(console_handler)
 # maxBytes: 每個日誌文件的最大大小 (這裡是 5MB)
 # backupCount: 保留的舊日誌文件數量
 try:
-    # 在多進程環境中，使用延遲創建文件的方式避免權限衝突
-    file_handler = RotatingFileHandler(
+    # 在多進程環境中，使用更安全的日誌配置
+    import os
+    import fcntl
+    from logging.handlers import TimedRotatingFileHandler
+    
+    # 確保日誌目錄存在
+    LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    
+    # 使用TimedRotatingFileHandler替代RotatingFileHandler以避免多進程衝突
+    # 按天輪轉，保留7天的日誌
+    file_handler = TimedRotatingFileHandler(
         LOG_FILE_PATH,
-        maxBytes=5*1024*1024, # 5 MB
-        backupCount=5,        # 保留5個備份文件
+        when='midnight',      # 每天午夜輪轉
+        interval=1,           # 每1天輪轉一次
+        backupCount=7,        # 保留7天的備份文件
         encoding='utf-8',     # 確保支持中文等字符
         delay=True            # 延遲創建文件，直到第一次寫入
     )
+    
+    # 設置文件鎖定以避免多進程寫入衝突
+    class SafeFileHandler(TimedRotatingFileHandler):
+        def emit(self, record):
+            try:
+                if self.stream:
+                    # 在寫入前獲取文件鎖
+                    fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX)
+                    try:
+                        super().emit(record)
+                    finally:
+                        # 釋放文件鎖
+                        fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
+                else:
+                    super().emit(record)
+            except (OSError, IOError):
+                # 如果文件鎖定失敗，回退到普通寫入
+                super().emit(record)
+    
+    # 在Windows系統上，fcntl不可用，使用原始的TimedRotatingFileHandler
+    if os.name == 'nt':  # Windows
+        file_handler = TimedRotatingFileHandler(
+            LOG_FILE_PATH,
+            when='midnight',
+            interval=1,
+            backupCount=7,
+            encoding='utf-8',
+            delay=True
+        )
+    else:  # Unix/Linux
+        file_handler = SafeFileHandler(
+            LOG_FILE_PATH,
+            when='midnight',
+            interval=1,
+            backupCount=7,
+            encoding='utf-8',
+            delay=True
+        )
+    
     file_handler.setLevel(logging.DEBUG) # 文件日誌記錄所有DEBUG及以上級別的信息
     file_formatter = logging.Formatter(
         "%(asctime)s - [%(levelname)s] - %(name)s - (%(module)s.%(funcName)s:%(lineno)d) - %(message)s",
