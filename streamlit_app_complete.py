@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OANDA AI Trading Model - Complete English Streamlit Application
+OANDA AI Trading Model - Complete Streamlit Application
 Enhanced real-time monitoring with proper data synchronization and GPU monitoring
 """
 
@@ -18,6 +18,7 @@ from typing import Dict, Any, Optional, List
 import sys
 import os
 import psutil
+import logging
 
 # Try to import GPU monitoring
 try:
@@ -41,7 +42,6 @@ try:
     logger.info("Successfully imported trainer and shared data manager")
 except ImportError as e:
     # Fallback configuration if import fails
-    import logging
     logger = logging.getLogger(__name__)
     ACCOUNT_CURRENCY = "USD"
     INITIAL_CAPITAL = 100000
@@ -101,7 +101,6 @@ except ImportError as e:
                 }
                 self.metrics_data.append(metric)
                 self.current_metrics = metric
-                # Keep only last 1000 metrics
                 if len(self.metrics_data) > 1000:
                     self.metrics_data = self.metrics_data[-1000:]
             
@@ -115,7 +114,6 @@ except ImportError as e:
                     'timestamp': kwargs.get('timestamp', datetime.now())
                 }
                 self.trades_data.append(trade)
-                # Keep only last 500 trades
                 if len(self.trades_data) > 500:
                     self.trades_data = self.trades_data[-500:]
             
@@ -150,10 +148,6 @@ except ImportError as e:
         start_time = end_time - timedelta(days=days_back)
         return start_time, end_time
 
-# Create global shared data manager instance
-if 'shared_data_manager' not in st.session_state:
-    st.session_state.shared_data_manager = get_shared_data_manager()
-
 # Set page configuration
 st.set_page_config(
     page_title="OANDA AI Trading Model",
@@ -170,9 +164,10 @@ AVAILABLE_SYMBOLS = [
     "XAU_USD", "XAG_USD", "SPX500_USD", "NAS100_USD", "US30_USD"
 ]
 
-# Initialize session state
 def init_session_state():
     """Initialize all session state variables"""
+    if 'shared_data_manager' not in st.session_state:
+        st.session_state.shared_data_manager = get_shared_data_manager()
     if 'training_status' not in st.session_state:
         st.session_state.training_status = 'idle'
     if 'training_thread' not in st.session_state:
@@ -182,8 +177,7 @@ def init_session_state():
     if 'auto_refresh' not in st.session_state:
         st.session_state.auto_refresh = False
     if 'refresh_interval' not in st.session_state:
-        st.session_state.refresh_interval = 5  # seconds
-
+        st.session_state.refresh_interval = 5
 def get_gpu_info():
     """Get GPU usage information with enhanced monitoring"""
     try:
@@ -217,18 +211,11 @@ def get_gpu_info():
 def get_system_info():
     """Get comprehensive system information including GPU monitoring"""
     try:
-        # CPU information
         cpu_percent = psutil.cpu_percent(interval=0.1)
         cpu_count = psutil.cpu_count()
         cpu_freq = psutil.cpu_freq()
-        
-        # Memory information
         memory = psutil.virtual_memory()
-        
-        # Disk information
         disk = psutil.disk_usage('/')
-        
-        # GPU information
         gpu_info = get_gpu_info()
         
         return {
@@ -240,15 +227,15 @@ def get_system_info():
             },
             'memory': {
                 'percent': memory.percent,
-                'used': memory.used / (1024**3),  # GB
-                'total': memory.total / (1024**3),  # GB
-                'available': memory.available / (1024**3),  # GB
+                'used': memory.used / (1024**3),
+                'total': memory.total / (1024**3),
+                'available': memory.available / (1024**3),
             },
             'disk': {
                 'percent': (disk.used / disk.total) * 100,
-                'used': disk.used / (1024**3),  # GB
-                'total': disk.total / (1024**3),  # GB
-                'free': disk.free / (1024**3)  # GB
+                'used': disk.used / (1024**3),
+                'total': disk.total / (1024**3),
+                'free': disk.free / (1024**3)
             },
             'gpu': gpu_info
         }
@@ -265,7 +252,6 @@ def display_system_monitoring():
         st.error("Unable to retrieve system information")
         return
     
-    # CPU and Memory in columns
     col1, col2 = st.columns(2)
     
     with col1:
@@ -286,7 +272,6 @@ def display_system_monitoring():
         )
         st.caption(f"Available: {system_info['memory']['available']:.1f}GB")
     
-    # GPU Information (if available)
     if system_info['gpu']:
         st.subheader("🎮 GPU Monitoring")
         
@@ -295,27 +280,15 @@ def display_system_monitoring():
                 gpu_col1, gpu_col2, gpu_col3 = st.columns(3)
                 
                 with gpu_col1:
-                    st.metric(
-                        "GPU Load", 
-                        f"{gpu['load']:.1f}%",
-                        help="GPU utilization percentage"
-                    )
+                    st.metric("GPU Load", f"{gpu['load']:.1f}%", help="GPU utilization percentage")
                 
                 with gpu_col2:
-                    st.metric(
-                        "VRAM Usage", 
-                        f"{gpu['memory_percent']:.1f}%",
-                        help=f"Used: {gpu['memory_used']:.0f}MB / {gpu['memory_total']:.0f}MB"
-                    )
+                    st.metric("VRAM Usage", f"{gpu['memory_percent']:.1f}%", 
+                             help=f"Used: {gpu['memory_used']:.0f}MB / {gpu['memory_total']:.0f}MB")
                 
                 with gpu_col3:
-                    st.metric(
-                        "Temperature", 
-                        f"{gpu['temperature']:.0f}°C",
-                        help="GPU temperature"
-                    )
+                    st.metric("Temperature", f"{gpu['temperature']:.0f}°C", help="GPU temperature")
                 
-                # VRAM usage bar
                 vram_progress = gpu['memory_percent'] / 100
                 st.progress(vram_progress)
                 st.caption(f"VRAM: {gpu['memory_used']:.0f}MB / {gpu['memory_total']:.0f}MB")
@@ -336,25 +309,19 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
         progress = (step + 1) / total_timesteps * 100
         shared_manager.update_training_status('running', progress)
         
-        # Generate realistic training metrics
-        # Reward improves over time with some noise
-        base_reward = -2.0 + (step / total_timesteps) * 3.0  # Improves from -2 to 1
+        base_reward = -2.0 + (step / total_timesteps) * 3.0
         reward = base_reward + np.random.normal(0, 0.5)
         
-        # Portfolio value based on cumulative rewards
-        portfolio_change = reward * 0.001  # Small changes
+        portfolio_change = reward * 0.001
         portfolio_value = INITIAL_CAPITAL * (1 + portfolio_change * (step + 1) / 100)
-        portfolio_value = max(portfolio_value, INITIAL_CAPITAL * 0.5)  # Prevent extreme losses
+        portfolio_value = max(portfolio_value, INITIAL_CAPITAL * 0.5)
         
-        # Losses decrease over time
         actor_loss = max(0.01, 0.5 * np.exp(-step/1000) + np.random.normal(0, 0.05))
         critic_loss = max(0.01, 0.8 * np.exp(-step/800) + np.random.normal(0, 0.08))
         
-        # Norms with realistic behavior
         l2_norm = 10 + 3 * np.sin(step/100) + np.random.normal(0, 0.5)
         grad_norm = max(0.01, 1.0 * np.exp(-step/1500) + np.random.normal(0, 0.1))
         
-        # Add metrics to shared manager
         shared_manager.add_training_metric(
             step=step,
             reward=reward,
@@ -363,10 +330,9 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
             critic_loss=critic_loss,
             l2_norm=l2_norm,
             grad_norm=grad_norm,
-            timestamp=datetime.now(timezone.utc)
+            
         )
         
-        # Simulate trading records occasionally
         if step % 25 == 0 and symbols:
             symbol = np.random.choice(symbols)
             profit_loss = np.random.normal(0.1, 1.5)
@@ -376,13 +342,13 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
                 price=np.random.uniform(1.0, 2.0),
                 quantity=np.random.uniform(1000, 10000),
                 profit_loss=profit_loss,
-                timestamp=datetime.now(timezone.utc)
+                
             )
         
         if step % 100 == 0:
             logger.debug(f"Simulation training progress: {progress:.1f}%")
             
-        time.sleep(0.002)  # Simulate processing time
+        time.sleep(0.002)
         
     shared_manager.update_training_status('completed', 100)
     logger.info("Simulation training completed.")
@@ -394,26 +360,19 @@ def training_worker(trainer, shared_manager, symbols, total_timesteps):
         logger.info("Starting training worker thread with shared data manager")
         
         if trainer and TRAINER_AVAILABLE:
-            # Real training
             logger.info("Starting real training process")
-            
-            # Attach shared data manager to trainer
             trainer.shared_data_manager = shared_manager
             
-            # Execute real training
             try:
                 success = trainer.run_full_training_pipeline()
             except Exception as e:
                 logger.error(f"Error in real training process: {e}")
-                # Fall back to simulation training if real training fails
                 logger.info("Falling back to simulation training")
                 success = simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps)
         else:
-            # Simulation training
             logger.info("Starting simulation training process")
             success = simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps)
         
-        # Update final status
         if shared_manager.is_stop_requested():
             shared_manager.update_training_status('idle')
             logger.info("Training stopped by user")
@@ -427,24 +386,20 @@ def training_worker(trainer, shared_manager, symbols, total_timesteps):
         logger.error(f"Error in training process: {e}", exc_info=True)
         shared_manager.update_training_status('error', error=str(e))
     finally:
-        # Ensure resources are released after training stops
         if trainer and hasattr(trainer, 'cleanup'):
             trainer.cleanup()
 
 def start_training(symbols, start_date, end_date, total_timesteps, save_freq, eval_freq):
     """Start training with enhanced error handling"""
     try:
-        # Reset shared data manager
         shared_manager = st.session_state.shared_data_manager
         shared_manager.clear_data()
         shared_manager.reset_stop_flag()
         
-        # Convert date format
         start_time = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
         end_time = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
         
         if TRAINER_AVAILABLE:
-            # Create real trainer
             trainer = EnhancedUniversalTrainer(
                 trading_symbols=symbols,
                 start_time=start_time,
@@ -458,13 +413,10 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
             )
             st.session_state.trainer = trainer
         else:
-            # Use simulation trainer
             st.session_state.trainer = None
         
-        # Update training status
         shared_manager.update_training_status('running', 0)
         
-        # Start training in background thread
         training_thread = threading.Thread(
             target=training_worker,
             args=(st.session_state.trainer, shared_manager, symbols, total_timesteps),
@@ -472,7 +424,6 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
         )
         training_thread.start()
         
-        # Save thread reference
         st.session_state.training_thread = training_thread
         
         return True
@@ -485,37 +436,43 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
 def stop_training():
     """Stop training with proper cleanup"""
     try:
-        # Send stop signal through shared data manager
         shared_manager = st.session_state.shared_data_manager
         shared_manager.request_stop()
         logger.info("Stop signal sent through shared data manager")
         
-        # If there's a trainer instance, try to stop it
         if st.session_state.trainer:
             if hasattr(st.session_state.trainer, 'stop'):
                 st.session_state.trainer.stop()
             
-            # Save current model
             if hasattr(st.session_state.trainer, 'save_current_model'):
+                st.session_state.trainer.save_current_model()
+                logger.info("Current training progress saved")
+        
+        if st.session_state.training_thread and st.session_state.training_thread.is_alive():
+            st.session_state.training_thread.join(timeout=5.0)
+        
+        st.session_state.training_status = 'idle'
+        st.session_state.training_thread = None
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error stopping training: {e}", exc_info=True)
+        return False
 def create_real_time_charts():
-    """Create real-time training monitoring charts with proper data synchronization"""
+    """Create real-time training monitoring charts"""
     shared_manager = st.session_state.shared_data_manager
-    
-    # Get latest metrics from shared data manager
-    latest_metrics = shared_manager.get_latest_metrics(200)  # Get last 200 data points
+    latest_metrics = shared_manager.get_latest_metrics(200)
     
     if not latest_metrics:
         st.info("No training data available. Start training to view real-time charts.")
         return
     
-    # Convert to DataFrame for easier manipulation
     df = pd.DataFrame(latest_metrics)
     
-    # Ensure timestamp is datetime
     if 'timestamp' in df.columns:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
     
-    # Create tabs for different chart categories
     chart_tab1, chart_tab2, chart_tab3, chart_tab4 = st.tabs([
         "📈 Performance", "🧠 Model Diagnostics", "💰 Portfolio", "📊 Trading Activity"
     ])
@@ -523,7 +480,6 @@ def create_real_time_charts():
     with chart_tab1:
         st.subheader("Training Performance")
         
-        # Reward progression
         fig_reward = go.Figure()
         fig_reward.add_trace(go.Scatter(
             x=df['step'],
@@ -542,7 +498,6 @@ def create_real_time_charts():
         )
         st.plotly_chart(fig_reward, use_container_width=True)
         
-        # Moving average of rewards
         if len(df) > 10:
             window_size = min(20, len(df) // 5)
             df['reward_ma'] = df['reward'].rolling(window=window_size, center=True).mean()
@@ -574,7 +529,6 @@ def create_real_time_charts():
     with chart_tab2:
         st.subheader("Model Diagnostics")
         
-        # Loss curves
         fig_loss = go.Figure()
         fig_loss.add_trace(go.Scatter(
             x=df['step'],
@@ -599,7 +553,6 @@ def create_real_time_charts():
         )
         st.plotly_chart(fig_loss, use_container_width=True)
         
-        # Gradient norms
         fig_norms = go.Figure()
         fig_norms.add_trace(go.Scatter(
             x=df['step'],
@@ -629,7 +582,6 @@ def create_real_time_charts():
     with chart_tab3:
         st.subheader("Portfolio Performance")
         
-        # Portfolio value progression
         fig_portfolio = go.Figure()
         fig_portfolio.add_trace(go.Scatter(
             x=df['step'],
@@ -641,7 +593,6 @@ def create_real_time_charts():
             fill='tonexty'
         ))
         
-        # Add initial capital line
         fig_portfolio.add_hline(
             y=INITIAL_CAPITAL,
             line_dash="dash",
@@ -658,7 +609,6 @@ def create_real_time_charts():
         )
         st.plotly_chart(fig_portfolio, use_container_width=True)
         
-        # Portfolio statistics
         if not df.empty:
             current_value = df['portfolio_value'].iloc[-1]
             total_return = ((current_value - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
@@ -678,14 +628,12 @@ def create_real_time_charts():
     with chart_tab4:
         st.subheader("Trading Activity")
         
-        # Get latest trades
         latest_trades = shared_manager.get_latest_trades(100)
         
         if latest_trades:
             trades_df = pd.DataFrame(latest_trades)
             trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
             
-            # Profit/Loss distribution
             fig_pnl = go.Figure()
             fig_pnl.add_trace(go.Histogram(
                 x=trades_df['profit_loss'],
@@ -701,7 +649,6 @@ def create_real_time_charts():
             )
             st.plotly_chart(fig_pnl, use_container_width=True)
             
-            # Trading activity by symbol
             if 'symbol' in trades_df.columns:
                 symbol_counts = trades_df['symbol'].value_counts()
                 
@@ -729,12 +676,10 @@ def display_training_status():
     error = status_info['error']
     current_metrics = status_info['current_metrics']
     
-    # Status indicator
     if status == 'running':
         st.success(f"🚀 Training in Progress - {progress:.1f}% Complete")
         st.progress(progress / 100)
         
-        # Current metrics display
         if current_metrics and current_metrics['step'] > 0:
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -759,28 +704,22 @@ def display_training_status():
     
     else:
         st.warning(f"Unknown Status: {status}")
-
 def main():
     """Main application function"""
     
-    # Initialize session state
     init_session_state()
     
-    # Main title
     st.title("🚀 OANDA AI Trading Model")
     st.markdown("**Enhanced Real-time Training Monitor with GPU Support**")
     
-    # Show import status
     if not TRAINER_AVAILABLE:
         st.warning("⚠️ Running in simulation mode - trainer modules not available")
     else:
         st.success("✅ All modules loaded successfully")
     
-    # Sidebar configuration
     with st.sidebar:
         st.header("⚙️ Training Configuration")
         
-        # Trading symbols selection
         st.subheader("Trading Symbols")
         selected_symbols = st.multiselect(
             "Select trading symbols:",
@@ -789,10 +728,8 @@ def main():
             help="Choose the currency pairs to train on"
         )
         
-        # Training parameters
         st.subheader("Training Parameters")
         
-        # Date range
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input(
@@ -807,7 +744,6 @@ def main():
                 help="Training data end date"
             )
         
-        # Training steps
         total_timesteps = st.number_input(
             "Total Training Steps",
             min_value=1000,
@@ -817,7 +753,6 @@ def main():
             help="Total number of training steps"
         )
         
-        # Save and evaluation frequency
         col1, col2 = st.columns(2)
         with col1:
             save_freq = st.number_input(
@@ -838,64 +773,48 @@ def main():
                 help="How often to evaluate the model"
             )
         
-        st.divider()
+        st.subheader("Training Controls")
         
-        # Training controls
-        st.subheader("🎮 Training Controls")
-        
-        # Get current training status
         shared_manager = st.session_state.shared_data_manager
-        current_status = shared_manager.get_current_status()
-        is_training = current_status['status'] == 'running'
+        current_status = shared_manager.get_current_status()['status']
         
-        # Start/Stop buttons
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button(
-                "🚀 Start Training",
-                disabled=is_training or len(selected_symbols) == 0,
-                help="Start the training process" if not is_training else "Training is already running",
-                use_container_width=True
-            ):
-                if start_training(selected_symbols, start_date, end_date, total_timesteps, save_freq, eval_freq):
-                    st.success("Training started successfully!")
-                    st.rerun()
-                else:
-                    st.error("Failed to start training")
+            if current_status != 'running':
+                if st.button("🚀 Start Training", type="primary", use_container_width=True):
+                    if not selected_symbols:
+                        st.error("Please select at least one trading symbol")
+                    elif start_date >= end_date:
+                        st.error("Start date must be before end date")
+                    else:
+                        success = start_training(
+                            selected_symbols, start_date, end_date, 
+                            total_timesteps, save_freq, eval_freq
+                        )
+                        if success:
+                            st.success("Training started successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to start training")
+            else:
+                st.button("🚀 Start Training", disabled=True, use_container_width=True)
         
         with col2:
-            if st.button(
-                "⏹️ Stop Training",
-                disabled=not is_training,
-                help="Stop the current training process",
-                use_container_width=True
-            ):
-                if stop_training():
-                    st.success("Training stopped successfully!")
-                    st.rerun()
-                else:
-                    st.error("Failed to stop training")
+            if current_status == 'running':
+                if st.button("⏹️ Stop Training", type="secondary", use_container_width=True):
+                    success = stop_training()
+                    if success:
+                        st.success("Training stopped successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to stop training")
+            else:
+                st.button("⏹️ Stop Training", disabled=True, use_container_width=True)
         
-        # Clear data button
-        if st.button(
-            "🗑️ Clear Data",
-            help="Clear all training data and reset",
-            use_container_width=True
-        ):
-            shared_manager.clear_data()
-            st.success("Training data cleared!")
-            st.rerun()
-        
-        st.divider()
-        
-        # Auto-refresh settings
-        st.subheader("🔄 Auto Refresh")
-        auto_refresh = st.checkbox(
-            "Enable Auto Refresh",
-            value=st.session_state.auto_refresh,
-            help="Automatically refresh the page to show latest data"
-        )
+        st.subheader("Auto Refresh")
+        auto_refresh = st.checkbox("Enable Auto Refresh", value=st.session_state.auto_refresh)
+        st.session_state.auto_refresh = auto_refresh
         
         if auto_refresh:
             refresh_interval = st.slider(
@@ -903,92 +822,61 @@ def main():
                 min_value=1,
                 max_value=30,
                 value=st.session_state.refresh_interval,
-                help="How often to refresh the page"
+                help="How often to refresh the data"
             )
             st.session_state.refresh_interval = refresh_interval
         
-        st.session_state.auto_refresh = auto_refresh
-        
-        # Manual refresh button
-        if st.button("🔄 Refresh Now", use_container_width=True):
+        if st.button("🔄 Manual Refresh", use_container_width=True):
             st.rerun()
     
     # Main content area
-    # Training status display
-    st.header("📊 Training Status")
     display_training_status()
     
     # Create tabs for different sections
-    tab1, tab2, tab3 = st.tabs(["📈 Real-time Charts", "💻 System Monitor", "📋 Training Logs"])
+    tab1, tab2, tab3 = st.tabs(["📊 Real-time Charts", "💻 System Monitor", "📋 Training Logs"])
     
     with tab1:
-        st.header("📈 Real-time Training Charts")
         create_real_time_charts()
     
     with tab2:
-        st.header("💻 System Resources Monitor")
         display_system_monitoring()
     
     with tab3:
-        st.header("📋 Training Information")
+        st.subheader("📋 Training Logs")
         
-        # Display current configuration
-        st.subheader("Current Configuration")
-        config_data = {
-            "Selected Symbols": selected_symbols,
-            "Training Period": f"{start_date} to {end_date}",
-            "Total Steps": f"{total_timesteps:,}",
-            "Save Frequency": f"{save_freq:,}",
-            "Eval Frequency": f"{eval_freq:,}",
-            "Account Currency": ACCOUNT_CURRENCY,
-            "Initial Capital": f"${INITIAL_CAPITAL:,}",
-            "Device": DEVICE,
-            "Mixed Precision": "Enabled" if USE_AMP else "Disabled"
-        }
+        shared_manager = st.session_state.shared_data_manager
+        latest_metrics = shared_manager.get_latest_metrics(50)
         
-        for key, value in config_data.items():
-            st.text(f"{key}: {value}")
-        
-        # Show recent training metrics in table format
-        st.subheader("Recent Training Metrics")
-        latest_metrics = shared_manager.get_latest_metrics(10)
         if latest_metrics:
-            metrics_df = pd.DataFrame(latest_metrics)
-            metrics_df['timestamp'] = pd.to_datetime(metrics_df['timestamp']).dt.strftime('%H:%M:%S')
-            st.dataframe(metrics_df, use_container_width=True)
+            df = pd.DataFrame(latest_metrics)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.sort_values('timestamp', ascending=False)
+            
+            st.dataframe(
+                df[['timestamp', 'step', 'reward', 'portfolio_value', 'actor_loss', 'critic_loss']],
+                use_container_width=True,
+                hide_index=True
+            )
         else:
-            st.info("No training metrics available")
+            st.info("No training logs available yet.")
         
-        # Show recent trades
-        st.subheader("Recent Trades")
-        latest_trades = shared_manager.get_latest_trades(10)
+        latest_trades = shared_manager.get_latest_trades(20)
         if latest_trades:
+            st.subheader("Recent Trades")
             trades_df = pd.DataFrame(latest_trades)
-            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp']).dt.strftime('%H:%M:%S')
-            st.dataframe(trades_df, use_container_width=True)
-        else:
-            st.info("No trading data available")
+            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
+            trades_df = trades_df.sort_values('timestamp', ascending=False)
+            
+            st.dataframe(
+                trades_df,
+                use_container_width=True,
+                hide_index=True
+            )
     
-    # Auto-refresh logic
-    if st.session_state.auto_refresh and is_training:
+    # Auto refresh functionality
+    if st.session_state.auto_refresh:
         time.sleep(st.session_state.refresh_interval)
         st.rerun()
 
 if __name__ == "__main__":
     main()
-                st.session_state.trainer.save_current_model()
-                logger.info("Current training progress saved")
-        
-        # Wait for training thread to end (max 5 seconds)
-        if st.session_state.training_thread and st.session_state.training_thread.is_alive():
-            st.session_state.training_thread.join(timeout=5.0)
-        
-        # Reset status
-        st.session_state.training_status = 'idle'
-        st.session_state.training_thread = None
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error stopping training: {e}", exc_info=True)
-        return False
