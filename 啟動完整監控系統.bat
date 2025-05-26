@@ -64,8 +64,7 @@ echo.
 REM 等待一下再啟動瀏覽器
 timeout /t 2 /nobreak >nul
 
-REM 在背景啟動瀏覽器
-start "" "http://localhost:8501"
+REM 在背景啟動瀏覽器（只開 TensorBoard，Streamlit 讓其自動開啟即可）
 start "" "http://localhost:6006"
 
 REM 啟動 Streamlit (前景執行，這樣可以看到日誌)

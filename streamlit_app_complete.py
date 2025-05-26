@@ -19,6 +19,8 @@ import sys
 import os
 import psutil
 import logging
+from collections import defaultdict
+from src.data_manager.oanda_downloader import manage_data_download_for_symbols
 
 # Try to import GPU monitoring
 try:
@@ -38,6 +40,7 @@ try:
     from src.common.logger_setup import logger
     from src.common.config import ACCOUNT_CURRENCY, INITIAL_CAPITAL, DEVICE, USE_AMP
     from src.common.shared_data_manager import get_shared_data_manager
+    from src.data_manager.instrument_info_manager import InstrumentInfoManager
     TRAINER_AVAILABLE = True
     logger.info("Successfully imported trainer and shared data manager")
 except ImportError as e:
@@ -156,13 +159,61 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Available trading symbols
-AVAILABLE_SYMBOLS = [
-    "EUR_USD", "USD_JPY", "GBP_USD", "AUD_USD", "USD_CAD", "USD_CHF", "NZD_USD",
-    "EUR_GBP", "EUR_JPY", "GBP_JPY", "AUD_JPY", "EUR_AUD", "GBP_AUD", "EUR_CAD",
-    "GBP_CAD", "AUD_CAD", "EUR_CHF", "GBP_CHF", "AUD_CHF", "CAD_CHF", "NZD_JPY",
-    "XAU_USD", "XAG_USD", "SPX500_USD", "NAS100_USD", "US30_USD"
-]
+def get_categorized_symbols_and_details():
+    """Fetch all OANDA symbols, categorize, and return dict: {category: [(symbol, display_name, type)]}"""
+    iim = InstrumentInfoManager(force_refresh=False)
+    all_symbols = iim.get_all_available_symbols()
+    categorized = {
+        'Major Pairs': [],
+        'Minor Pairs': [],
+        'Precious Metals': [],
+        'Indices': [],
+        'Energy': [],
+        'Commodities': [],
+        'Crypto': [],
+        'Others': []
+    }
+    # Major pairs list (OANDA standard)
+    major_pairs = {
+        'EUR_USD', 'USD_JPY', 'GBP_USD', 'AUD_USD', 'USD_CHF', 'USD_CAD', 'NZD_USD'
+    }
+    # Indices, Energy, Metals, Commodities keywords
+    index_keywords = ["SPX", "NAS", "US30", "UK100", "DE30", "JP225", "HK33", "AU200", "FRA40", "EU50", "CN50"]
+    energy_keywords = ["OIL", "WTICO", "BRENT", "NATGAS", "GAS"]
+    metal_keywords = ["XAU", "XAG", "GOLD", "SILVER", "PLAT", "PALL"]
+    commodity_keywords = ["CORN", "WHEAT", "SOYBN", "SUGAR", "COFFEE", "COCOA", "COTTON"]
+    crypto_keywords = ["BTC", "ETH", "LTC", "BCH", "XRP", "ADA", "DOGE", "CRYPTO"]
+
+    for sym in all_symbols:
+        details = iim.get_details(sym)
+        if details is None:
+            continue
+        symbol = details.symbol
+        display = details.display_name if hasattr(details, 'display_name') else sym
+        t = details.type.upper() if details.type else ''
+        # --- Classification logic ---
+        if symbol in major_pairs:
+            categorized['Major Pairs'].append((symbol, display, t))
+        elif t == 'CURRENCY' and '_' in symbol:
+            # Minor pairs: CURRENCY type, not in major_pairs, not precious metals
+            base, quote = symbol.split('_')
+            if not (base.startswith('XAU') or base.startswith('XAG')):
+                categorized['Minor Pairs'].append((symbol, display, t))
+        elif any(metal in symbol or metal in display.upper() for metal in metal_keywords):
+            categorized['Precious Metals'].append((symbol, display, t))
+        elif any(idx in symbol for idx in index_keywords):
+            categorized['Indices'].append((symbol, display, t))
+        elif any(energy in symbol for energy in energy_keywords):
+            categorized['Energy'].append((symbol, display, t))
+        elif any(comm in symbol for comm in commodity_keywords):
+            categorized['Commodities'].append((symbol, display, t))
+        elif t == 'CRYPTO' or any(crypto in symbol or crypto in display.upper() for crypto in crypto_keywords):
+            categorized['Crypto'].append((symbol, display, t))
+        else:
+            categorized['Others'].append((symbol, display, t))
+    # Remove empty categories, but always keep 'Others' if any uncategorized
+    categorized = {k: v for k, v in categorized.items() if v}
+    return categorized
 
 def init_session_state():
     """Initialize all session state variables"""
@@ -670,16 +721,35 @@ def display_training_status():
     """Display current training status with enhanced information"""
     shared_manager = st.session_state.shared_data_manager
     status_info = shared_manager.get_current_status()
-    
     status = status_info['status']
     progress = status_info['progress']
     error = status_info['error']
     current_metrics = status_info['current_metrics']
-    
+
+    # --- Training speed and ETA calculation ---
+    steps_per_sec = None
+    eta_text = None
+    if status == 'running' and current_metrics and current_metrics['step'] > 0:
+        metrics = shared_manager.get_latest_metrics(20)
+        if len(metrics) >= 2:
+            steps = [m['step'] for m in metrics]
+            times = [m['timestamp'] for m in metrics]
+            if isinstance(times[0], str):
+                times = [pd.to_datetime(t) for t in times]
+            dt = (times[-1] - times[0]).total_seconds()
+            dsteps = steps[-1] - steps[0]
+            if dt > 0 and dsteps > 0:
+                steps_per_sec = dsteps / dt
+                total_steps = st.session_state.get('total_timesteps', 0)
+                steps_left = total_steps - steps[-1] if total_steps > 0 else 0
+                if steps_per_sec > 0 and steps_left > 0:
+                    eta_sec = int(steps_left / steps_per_sec)
+                    h, m, s = eta_sec // 3600, (eta_sec % 3600) // 60, eta_sec % 60
+                    eta_text = f"ETA: {h:02d}:{m:02d}:{s:02d}"
+
     if status == 'running':
         st.success(f"🚀 Training in Progress - {progress:.1f}% Complete")
         st.progress(progress / 100)
-        
         if current_metrics and current_metrics['step'] > 0:
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -690,6 +760,10 @@ def display_training_status():
                 st.metric("Portfolio Value", f"${current_metrics['portfolio_value']:,.2f}")
             with col4:
                 st.metric("Actor Loss", f"{current_metrics['actor_loss']:.4f}")
+        if steps_per_sec:
+            st.info(f"Training Speed: {steps_per_sec:.2f} steps/sec")
+        if eta_text:
+            st.info(eta_text)
         
     elif status == 'completed':
         st.success("✅ Training Completed Successfully!")
@@ -704,13 +778,29 @@ def display_training_status():
     
     else:
         st.warning(f"Unknown Status: {status}")
+def download_data_with_progress(symbols, start_date, end_date, granularity="S5"):
+    """Download historical data with Streamlit progress bar and status text."""
+    st.info("Checking and downloading required historical data for selected symbols...")
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+    manage_data_download_for_symbols(
+        symbols,
+        start_date.isoformat() + "T00:00:00Z",
+        end_date.isoformat() + "T23:59:59Z",
+        granularity=granularity,
+        streamlit_progress_bar=progress_bar,
+        streamlit_status_text=status_text
+    )
+    progress_bar.progress(1.0)
+    status_text.success("Historical data download complete.")
+
 def main():
     """Main application function"""
     
     init_session_state()
     
     st.title("🚀 OANDA AI Trading Model")
-    st.markdown("**Enhanced Real-time Training Monitor with GPU Support**")
+    st.markdown("**Enhanced Real-time Trading Monitor with GPU Support**")
     
     if not TRAINER_AVAILABLE:
         st.warning("⚠️ Running in simulation mode - trainer modules not available")
@@ -721,15 +811,33 @@ def main():
         st.header("⚙️ Training Configuration")
         
         st.subheader("Trading Symbols")
-        selected_symbols = st.multiselect(
-            "Select trading symbols:",
-            AVAILABLE_SYMBOLS,
-            default=["EUR_USD", "USD_JPY", "GBP_USD"],
-            help="Choose the currency pairs to train on"
-        )
+        # --- Dynamic OANDA symbol selection UI ---
+        categorized = get_categorized_symbols_and_details()
+        selected_symbols = []
+        for cat, symbols in sorted(categorized.items()):
+            with st.expander(f"{cat} ({len(symbols)})", expanded=(cat=="CURRENCY")):
+                options = [f"{sym} - {display}" for sym, display, _ in symbols]
+                default = [options[0]] if cat=="CURRENCY" and options else []
+                selected = st.multiselect(
+                    f"Select {cat} symbols:",
+                    options,
+                    default=default,
+                    help=f"Select {cat} instruments."
+                )
+                # Map back to symbol codes
+                for sel in selected:
+                    code = sel.split(" - ")[0]
+                    selected_symbols.append(code)
+        # Limit to MAX_SYMBOLS_ALLOWED
+        from src.common.config import MAX_SYMBOLS_ALLOWED
+        if len(selected_symbols) > MAX_SYMBOLS_ALLOWED:
+            st.warning(f"You selected {len(selected_symbols)} symbols, but only {MAX_SYMBOLS_ALLOWED} are allowed. Truncating.")
+            selected_symbols = selected_symbols[:MAX_SYMBOLS_ALLOWED]
         
         st.subheader("Training Parameters")
-        
+        from src.common.config import (
+            INITIAL_CAPITAL, MAX_ACCOUNT_RISK_PERCENTAGE, ATR_STOP_LOSS_MULTIPLIER, MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY
+        )
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input(
@@ -743,7 +851,6 @@ def main():
                 value=datetime.now().date() - timedelta(days=1),
                 help="Training data end date"
             )
-        
         total_timesteps = st.number_input(
             "Total Training Steps",
             min_value=1000,
@@ -752,7 +859,45 @@ def main():
             step=1000,
             help="Total number of training steps"
         )
-        
+        # --- Custom training parameters ---
+        col1, col2 = st.columns(2)
+        with col1:
+            initial_capital = st.number_input(
+                "Initial Capital",
+                min_value=1000.0,
+                max_value=1e8,
+                value=float(INITIAL_CAPITAL),
+                step=1000.0,
+                help="Initial simulated account capital."
+            )
+            risk_pct = st.number_input(
+                "Max Risk % per Trade",
+                min_value=0.01,
+                max_value=1.0,
+                value=float(MAX_ACCOUNT_RISK_PERCENTAGE),
+                step=0.01,
+                format="%.2f",
+                help="Maximum risk per trade as a percentage of account equity."
+            )
+        with col2:
+            atr_mult = st.number_input(
+                "ATR Stop Multiplier",
+                min_value=0.5,
+                max_value=10.0,
+                value=float(ATR_STOP_LOSS_MULTIPLIER),
+                step=0.1,
+                help="ATR-based stop loss multiplier."
+            )
+            max_pos_pct = st.number_input(
+                "Max Position Size %",
+                min_value=0.01,
+                max_value=1.0,
+                value=float(MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY),
+                step=0.01,
+                format="%.2f",
+                help="Maximum nominal position size as a percentage of equity."
+            )
+        # --- Save/Eval frequency controls ---
         col1, col2 = st.columns(2)
         with col1:
             save_freq = st.number_input(
@@ -788,6 +933,8 @@ def main():
                     elif start_date >= end_date:
                         st.error("Start date must be before end date")
                     else:
+                        # --- Data download progress bar before training ---
+                        download_data_with_progress(selected_symbols, start_date, end_date)
                         success = start_training(
                             selected_symbols, start_date, end_date, 
                             total_timesteps, save_freq, eval_freq
@@ -843,35 +990,53 @@ def main():
     
     with tab3:
         st.subheader("📋 Training Logs")
-        
         shared_manager = st.session_state.shared_data_manager
         latest_metrics = shared_manager.get_latest_metrics(50)
-        
         if latest_metrics:
             df = pd.DataFrame(latest_metrics)
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            df = df.sort_values('timestamp', ascending=False)
-            
+            df = df.sort_values('step', ascending=False)
             st.dataframe(
-                df[['timestamp', 'step', 'reward', 'portfolio_value', 'actor_loss', 'critic_loss']],
+                df[['step', 'reward', 'portfolio_value', 'actor_loss', 'critic_loss']],
                 use_container_width=True,
                 hide_index=True
             )
         else:
             st.info("No training logs available yet.")
-        
         latest_trades = shared_manager.get_latest_trades(20)
         if latest_trades:
             st.subheader("Recent Trades")
             trades_df = pd.DataFrame(latest_trades)
-            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
-            trades_df = trades_df.sort_values('timestamp', ascending=False)
-            
+            # Compute total P&L only for reduce/close actions, color-code
+            def calc_total_pnl(row):
+                # Only show P&L for reduce/close, not open/add
+                action = row.get('action', '').lower()
+                if action in ['reduce', 'close', 'sell', 'buy']:
+                    # Assume profit_loss is per unit, total = profit_loss * quantity
+                    qty = row.get('quantity', 0)
+                    pl = row.get('profit_loss', 0)
+                    total = pl * qty
+                    return total
+                return None
+            trades_df['Total_PnL'] = trades_df.apply(calc_total_pnl, axis=1)
+            def color_pnl(val):
+                if pd.isna(val):
+                    return ''
+                color = 'green' if val > 0 else 'red' if val < 0 else 'black'
+                return f'color: {color}; font-weight: bold;'
+            # Show step if available, else fallback to index
+            if 'step' in trades_df.columns:
+                trades_df = trades_df.sort_values('step', ascending=False)
+                show_cols = ['step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
+            else:
+                trades_df = trades_df.reset_index()
+                show_cols = ['index', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
             st.dataframe(
-                trades_df,
+                trades_df[show_cols].style.applymap(color_pnl, subset=['Total_PnL']),
                 use_container_width=True,
                 hide_index=True
             )
+        else:
+            st.info("No recent trades data available yet.")
     
     # Auto refresh functionality
     if st.session_state.auto_refresh:
