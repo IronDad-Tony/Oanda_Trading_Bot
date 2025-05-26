@@ -30,9 +30,7 @@ try:
         OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY,
         WEIGHTS_DIR, LOGS_DIR, DEVICE, USE_AMP,
         TRAINER_SAVE_FREQ_STEPS, TRAINER_EVAL_FREQ_STEPS,
-        # 新增訓練參數的預設值
-        TRAINING_INITIAL_CAPITAL_DEFAULT, TRAINING_RISK_PERCENTAGE_DEFAULT,
-        TRAINING_ATR_MULTIPLIER_DEFAULT, TRAINING_MAX_POSITION_DEFAULT
+        # 不 import 不存在的 *_DEFAULT
     )
     logger.info("universal_trainer.py: Successfully imported common.config values.")
     
@@ -66,8 +64,7 @@ except ImportError as e_initial_import_ut:
             OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY,
             WEIGHTS_DIR, LOGS_DIR, DEVICE, USE_AMP,
             TRAINER_SAVE_FREQ_STEPS, TRAINER_EVAL_FREQ_STEPS,
-            TRAINING_INITIAL_CAPITAL_DEFAULT, TRAINING_RISK_PERCENTAGE_DEFAULT,
-            TRAINING_ATR_MULTIPLIER_DEFAULT, TRAINING_MAX_POSITION_DEFAULT
+            # 不 import 不存在的 *_DEFAULT
         )
         logger.info("universal_trainer.py: Successfully re-imported common.config after path adjustment.")
         
@@ -116,8 +113,7 @@ except ImportError as e_initial_import_ut:
         OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE = 0.5, 0.0001
         OANDA_API_KEY, WEIGHTS_DIR, LOGS_DIR, DEVICE, USE_AMP = None, Path("weights"), Path("logs"), "cpu", False
         TRAINER_SAVE_FREQ_STEPS, TRAINER_EVAL_FREQ_STEPS = 20000, 10000
-        TRAINING_INITIAL_CAPITAL_DEFAULT, TRAINING_RISK_PERCENTAGE_DEFAULT = 100000, 5.0
-        TRAINING_ATR_MULTIPLIER_DEFAULT, TRAINING_MAX_POSITION_DEFAULT = 2.0, 10.0
+        # fallback 也只用這些，不用 *_DEFAULT
 
 
 class UniversalTrainer:
@@ -145,9 +141,9 @@ class UniversalTrainer:
                  streamlit_status_text=None,
                  streamlit_session_state=None,
                  # 新增訓練參數配置
-                 risk_percentage: float = TRAINING_RISK_PERCENTAGE_DEFAULT / 100.0,
-                 atr_stop_loss_multiplier: float = TRAINING_ATR_MULTIPLIER_DEFAULT,
-                 max_position_percentage: float = TRAINING_MAX_POSITION_DEFAULT / 100.0,
+                 risk_percentage: float = 5.0,
+                 atr_stop_loss_multiplier: float = 2.0,
+                 max_position_percentage: float = 10.0,
                  custom_atr_period: int = 14): # ATR_PERIOD default to 14 if not provided via UI
         
         self.trading_symbols = sorted(list(set(trading_symbols)))
@@ -175,9 +171,9 @@ class UniversalTrainer:
         self.streamlit_session_state = None
         
         # 新增訓練參數配置存儲
-        self.risk_percentage = risk_percentage
+        self.risk_percentage = risk_percentage / 100.0
         self.atr_stop_loss_multiplier = atr_stop_loss_multiplier
-        self.max_position_percentage = max_position_percentage
+        self.max_position_percentage = max_position_percentage / 100.0
         self.custom_atr_period = custom_atr_period
         
         # 初始化共享數據管理器
@@ -188,7 +184,7 @@ class UniversalTrainer:
         self._setup_gpu_optimization()
         
         # 生成基於參數的模型識別符，包含 MAX_SYMBOLS_ALLOWED
-        self.model_identifier = self._generate_model_identifier(MAX_SYMBOLS_ALLOWED)
+        self.model_identifier = self._generate_model_identifier()
         self.existing_model_path = self._find_existing_model()
         
         # 初始化組件
@@ -260,70 +256,38 @@ class UniversalTrainer:
         except Exception as e:
             logger.warning(f"GPU優化設置過程中發生錯誤: {e}")
     
-    def _generate_model_identifier(self, max_symbols_allowed: int) -> str:
+    def _generate_model_identifier(self) -> str:
         """
-        根據關鍵參數生成模型識別符，包含 MAX_SYMBOLS_ALLOWED
-        
-        返回:
-            模型識別符字符串
+        只根據MAX_SYMBOLS_ALLOWED產生唯一模型識別符
         """
-        # 使用配置中的 MAX_SYMBOLS_ALLOWED 和時間步長作為主要參數
-        # 這確保了如果 MAX_SYMBOLS_ALLOWED 變更，即使實際選擇的交易對數量相同，也會訓練新模型。
-        effective_symbols_count = len(self.trading_symbols) # 實際選擇的交易對數量
-        timestep = self.timesteps_history
-        
-        # 識別符格式: sac_model_max_allowed{config_val}_actual{count}_timestep{steps}
-        identifier = f"sac_model_max_allowed{max_symbols_allowed}_actual{effective_symbols_count}_timestep{timestep}"
+        # 只用MAX_SYMBOLS_ALLOWED，不考慮實際選取的symbol數量
+        identifier = f"sac_model_symbols{MAX_SYMBOLS_ALLOWED}"
         return identifier
     
     def _find_existing_model(self) -> Optional[str]:
         """
-        查找是否存在具有相同參數的模型
-        
-        返回:
-            現有模型路徑，如果未找到則為 None
+        查找是否存在相同MAX_SYMBOLS_ALLOWED的模型
         """
         try:
-            # 優先從 WEIGHTS_DIR 查找模型
-            search_paths = [WEIGHTS_DIR]
-            
-            for search_path in search_paths:
-                if not search_path.exists():
-                    continue
-                
-                # 查找匹配的模型文件
-                pattern = f"{self.model_identifier}*.zip"
-                matching_files = list(search_path.glob(pattern))
-                
-                if matching_files:
-                    # 返回最新創建的文件
-                    latest_file = max(matching_files, key=lambda x: x.stat().st_mtime)
-                    return str(latest_file)
-            
+            search_path = WEIGHTS_DIR
+            if not search_path.exists():
+                return None
+            filename = f"sac_model_symbols{MAX_SYMBOLS_ALLOWED}.zip"
+            model_path = search_path / filename
+            if model_path.exists():
+                return str(model_path)
             return None
-            
         except Exception as e:
             logger.warning(f"查找現有模型時發生錯誤: {e}")
             return None
     
-    def get_model_save_path(self, suffix: str = "") -> Path:
+    def get_model_save_path(self) -> Path:
         """
-        獲取模型保存路徑
-        
-        Args:
-            suffix: 文件名後綴
-            
-        返回:
-            模型保存路徑
+        取得唯一模型儲存路徑（不加任何suffix/prefix）
         """
-        if suffix:
-            filename = f"{self.model_identifier}_{suffix}.zip"
-        else:
-            filename = f"{self.model_identifier}.zip"
-        
-        save_dir = WEIGHTS_DIR # 使用 config 中定義的 WEIGHTS_DIR
+        save_dir = WEIGHTS_DIR
         save_dir.mkdir(parents=True, exist_ok=True)
-        
+        filename = f"sac_model_symbols{MAX_SYMBOLS_ALLOWED}.zip"
         return save_dir / filename
     
     def prepare_data(self) -> bool:
@@ -364,7 +328,7 @@ class UniversalTrainer:
             
             if not success:
                 logger.error("未能確保交易所需貨幣數據完整性。終止訓練。")
-                self.shared_data_manager.update_training_status(status='error', error="數據依賴檢查失敗。請檢查日誌。", message="數據依賴檢查失敗")
+                self.shared_data_manager.update_training_status(status='error', error="數據依賴檢查失敗。請檢查日誌。")
                 return False
 
             # 創建數據集
@@ -379,7 +343,7 @@ class UniversalTrainer:
             
             if not self.dataset.is_valid():
                 logger.error("數據集創建失敗或無效。終止訓練。")
-                self.shared_data_manager.update_training_status(status='error', error="數據集創建失敗或無效。請檢查所選日期和品種。", message="數據集創建失敗")
+                self.shared_data_manager.update_training_status(status='error', error="數據集創建失敗或無效。請檢查所選日期和品種。")
                 return False
             
             logger.info(f"數據集創建成功，包含 {len(self.dataset)} 個樣本。")
@@ -388,7 +352,7 @@ class UniversalTrainer:
             
         except Exception as e:
             logger.error(f"數據準備失敗: {e}", exc_info=True)
-            self.shared_data_manager.update_training_status(status='error', error=f"數據準備失敗: {e}", message=f"數據準備失敗: {e}")
+            self.shared_data_manager.update_training_status(status='error', error=f"數據準備失敗: {e}")
             return False
     
     def setup_environment(self) -> bool:
@@ -426,13 +390,15 @@ class UniversalTrainer:
             
         except Exception as e:
             logger.error(f"環境設置失敗: {e}", exc_info=True)
-            self.shared_data_manager.update_training_status(status='error', error=f"環境設置失敗: {e}", message=f"環境設置失敗: {e}")
+            self.shared_data_manager.update_training_status(status='error', error=f"環境設置失敗: {e}")
             return False
     
     def setup_agent(self, load_model_path: Optional[str] = None) -> bool:
         """
         設置SAC代理
         
+        Args:
+            load_model_path:
         Args:
             load_model_path: 可選的模型加載路徑 (用於恢復檢查點)
             
@@ -473,7 +439,7 @@ class UniversalTrainer:
             
         except Exception as e:
             logger.error(f"代理設置失敗: {e}", exc_info=True)
-            self.shared_data_manager.update_training_status(status='error', error=f"代理設置失敗: {e}", message=f"代理設置失敗: {e}")
+            self.shared_data_manager.update_training_status(status='error', error=f"代理設置失敗: {e}")
             return False
     
     def setup_callbacks(self) -> bool:
@@ -510,7 +476,7 @@ class UniversalTrainer:
             
         except Exception as e:
             logger.error(f"回調設置失敗: {e}", exc_info=True)
-            self.shared_data_manager.update_training_status(status='error', error=f"回調設置失敗: {e}", message=f"回調設置失敗: {e}")
+            self.shared_data_manager.update_training_status(status='error', error=f"回調設置失敗: {e}")
             return False
     
     def train(self) -> bool:
@@ -559,9 +525,8 @@ class UniversalTrainer:
                 
                 # 訓練成功完成
                 self.shared_data_manager.update_training_status('completed', 100)
-                
-                # 保存最終模型
-                final_model_path = self.get_model_save_path("final")
+                # 保存最終模型（只覆蓋同一檔案）
+                final_model_path = self.get_model_save_path()
                 self.agent.save(str(final_model_path))
                 logger.info(f"最終模型已保存: {final_model_path}")
                 
@@ -578,19 +543,19 @@ class UniversalTrainer:
             except KeyboardInterrupt:
                 logger.info("訓練被用戶中斷。正在嘗試保存當前模型...")
                 self.save_current_model() # 中斷時保存模型
-                self.shared_data_manager.update_training_status('idle', message="訓練被用戶中斷。當前模型已保存。")
+                self.shared_data_manager.update_training_status('idle')
                 return False
                 
             except Exception as e:
                 logger.error(f"訓練過程中發生錯誤: {e}", exc_info=True)
                 self.save_current_model() # 錯誤時保存模型
-                self.shared_data_manager.update_training_status('error', error=str(e), message=f"訓練錯誤: {e}。當前模型已保存。")
+                self.shared_data_manager.update_training_status('error', error=str(e))
                 return False
             
         except Exception as e:
             logger.error(f"訓練設置錯誤: {e}", exc_info=True)
             self.save_current_model() # 設置錯誤時也嘗試保存
-            self.shared_data_manager.update_training_status('error', error=str(e), message=f"訓練設置錯誤: {e}。當前模型可能已保存。")
+            self.shared_data_manager.update_training_status('error', error=str(e))
             return False
     
     def stop(self):
@@ -600,12 +565,10 @@ class UniversalTrainer:
         logger.info("已請求停止訓練。")
     
     def save_current_model(self):
-        """保存當前訓練進度"""
+        """保存當前訓練進度（只覆蓋同一檔案）"""
         if self.agent:
             try:
-                # 創建一個帶有當前步數時間戳的檢查點文件名稱
-                current_step_str = str(self.shared_data_manager.current_metrics.get('step', '0'))
-                checkpoint_path = self.get_model_save_path(f"checkpoint_step_{current_step_str}")
+                checkpoint_path = self.get_model_save_path()
                 self.agent.save(str(checkpoint_path))
                 logger.info(f"當前模型已保存: {checkpoint_path}")
             except Exception as e:
@@ -658,13 +621,13 @@ class UniversalTrainer:
             self.shared_data_manager.update_training_status('running', 0)
             
             # 1. 準備數據 (包含下載進度)
-            self.shared_data_manager.update_training_status(status='running', progress=0, message="正在準備數據...")
+            self.shared_data_manager.update_training_status(status='running', progress=0)
             if not self.prepare_data():
                 logger.error("數據準備失敗，終止訓練管道。")
-                self.shared_data_manager.update_training_status('error', error="數據準備失敗", message="數據準備失敗")
+                self.shared_data_manager.update_training_status('error', error="數據準備失敗")
                 return False
             
-            self.shared_data_manager.update_training_status(status='running', progress=10, message="正在設置環境...")
+            self.shared_data_manager.update_training_status(status='running', progress=10)
 
             # 2. 設置環境
             if not self.setup_environment():
@@ -672,7 +635,7 @@ class UniversalTrainer:
                 self.shared_data_manager.update_training_status('error', error="環境設置失敗")
                 return False
             
-            self.shared_data_manager.update_training_status(status='running', progress=20, message="正在設置代理...")
+            self.shared_data_manager.update_training_status(status='running', progress=20)
 
             # 3. 設置代理
             if not self.setup_agent(load_model_path):
@@ -680,7 +643,7 @@ class UniversalTrainer:
                 self.shared_data_manager.update_training_status('error', error="代理設置失敗")
                 return False
             
-            self.shared_data_manager.update_training_status(status='running', progress=30, message="正在設置回調...")
+            self.shared_data_manager.update_training_status(status='running', progress=30)
 
             # 4. 設置回調
             if not self.setup_callbacks():
@@ -688,7 +651,7 @@ class UniversalTrainer:
                 self.shared_data_manager.update_training_status('error', error="回調設置失敗")
                 return False
             
-            self.shared_data_manager.update_training_status(status='running', progress=40, message="訓練即將開始...")
+            self.shared_data_manager.update_training_status(status='running', progress=40)
 
             # 5. 執行訓練
             success = self.train()
@@ -705,13 +668,13 @@ class UniversalTrainer:
                 logger.info("=" * 60)
                 logger.info("完整的訓練管道成功完成！")
                 logger.info("=" * 60)
-                self.shared_data_manager.update_training_status(status='completed', progress=100, message="訓練成功完成！")
+                self.shared_data_manager.update_training_status(status='completed', progress=100)
             else:
                 logger.warning("=" * 60)
                 logger.warning("訓練管道未能成功完成。")
                 logger.warning("=" * 60)
                 if self.shared_data_manager.training_status != 'error':
-                    self.shared_data_manager.update_training_status(status='warning', message="訓練管道未完成。請檢查日誌獲取詳細信息。")
+                    self.shared_data_manager.update_training_status(status='warning')
             
             return success
 

@@ -36,7 +36,7 @@ if str(project_root) not in sys.path:
 
 # Try to import trainer, use fallback if failed
 try:
-    from src.trainer.enhanced_trainer_complete import EnhancedUniversalTrainer, create_training_time_range
+    from src.trainer.universal_trainer import UniversalTrainer as EnhancedUniversalTrainer, create_training_time_range
     from src.common.logger_setup import logger
     from src.common.config import ACCOUNT_CURRENCY, INITIAL_CAPITAL, DEVICE, USE_AMP
     from src.common.shared_data_manager import get_shared_data_manager
@@ -830,11 +830,13 @@ def main():
                     selected_symbols.append(code)
         # Limit to MAX_SYMBOLS_ALLOWED
         from src.common.config import MAX_SYMBOLS_ALLOWED
+        # --- 新增：顯示選取狀態 ---
+        st.markdown(f"<span style='font-size:16px;'>最多可選取 <b style='color:#0072C6;'>{MAX_SYMBOLS_ALLOWED}</b> 個 symbols，目前已選取 <b style='color:{'red' if len(selected_symbols)>MAX_SYMBOLS_ALLOWED else '#009900'};'>{len(selected_symbols)}</b> 個。</span>", unsafe_allow_html=True)
         if len(selected_symbols) > MAX_SYMBOLS_ALLOWED:
             st.warning(f"You selected {len(selected_symbols)} symbols, but only {MAX_SYMBOLS_ALLOWED} are allowed. Truncating.")
             selected_symbols = selected_symbols[:MAX_SYMBOLS_ALLOWED]
         
-        st.subheader("Training Parameters")
+        st.subheader("Trading Parameters")
         from src.common.config import (
             INITIAL_CAPITAL, MAX_ACCOUNT_RISK_PERCENTAGE, ATR_STOP_LOSS_MULTIPLIER, MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY
         )

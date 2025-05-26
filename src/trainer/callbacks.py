@@ -114,6 +114,10 @@ class UniversalCheckpointCallback(BaseCallback):
         
         logger.info(f"UniversalCheckpointCallback initialized. Save path: {self.save_path}, Best model path: {self.best_model_save_path}")
 
+        # 強制所有儲存都只用唯一檔名，不產生best/checkpoint等多餘檔案
+        from common.config import MAX_SYMBOLS_ALLOWED
+        self.unique_model_filename = f"sac_model_symbols{MAX_SYMBOLS_ALLOWED}.zip"
+
     def _handle_interrupt(self, signum, frame):
         logger.warning("接收到中斷信號 (Ctrl+C)！將在當前步驟結束後嘗試安全保存並退出。")
         self.interrupted = True
@@ -200,14 +204,13 @@ class UniversalCheckpointCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.model is None or self.logger is None: logger.error("Callback model/logger未初始化"); return False
 
-        # 1. 定期保存 - 使用統一的命名策略，覆蓋同一個檢查點文件
+        # 1. 定期保存 - 只覆蓋唯一檔案
         if self.n_calls > 0 and self.n_calls % self.save_freq == 0:
-            # 使用模型標識符作為檢查點名稱，每次覆蓋
-            intermediate_path = self.save_path / f"{self.name_prefix}.zip"
+            intermediate_path = self.save_path / self.unique_model_filename
             self.model.save(intermediate_path)
             logger.info(f"定期保存模型到: {intermediate_path} (步數: {self.num_timesteps})")
 
-        # 2. 定期評估
+        # 2. 定期評估與early stopping不再產生best檔案，只記錄指標
         if self.eval_env is not None and self.n_calls > 0 and self.n_calls % self.eval_freq == 0:
             current_metric = self._run_evaluation()
             self.es_eval_count +=1
@@ -272,9 +275,9 @@ class UniversalCheckpointCallback(BaseCallback):
 
     def _on_training_end(self) -> None:
         logger.info(f"訓練結束 (UniversalCheckpointCallback)。總步數: {self.num_timesteps}, 總調用次數: {self.n_calls}")
-        # 保存最終模型，覆蓋同一個文件
+        # 訓練結束時只覆蓋唯一檔案
         if self.model is not None:
-            final_path = self.save_path / f"{self.name_prefix}.zip"
+            final_path = self.save_path / self.unique_model_filename
             self.model.save(final_path)
             logger.info(f"最終模型已保存到: {final_path}")
 
