@@ -342,7 +342,7 @@ class UniversalTrainer:
                 start_time_iso=overall_start_iso, # 更改參數名稱
                 end_time_iso=overall_end_iso,     # 更改參數名稱
                 granularity=self.granularity,
-                timesteps=self.timesteps_history
+                timesteps_history=self.timesteps_history # 更改參數名稱
             )
             
             if not self.dataset.is_valid():
