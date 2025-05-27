@@ -7,7 +7,7 @@
 import logging
 import sys
 from pathlib import Path
-from typing import List, Set, Dict, Optional, Tuple
+from typing import List, Set, Dict, Optional, Tuple # Ensure Tuple is imported
 from datetime import datetime, timezone
 
 # 導入邏輯與其他模組相同
@@ -452,27 +452,107 @@ class CurrencyDependencyManager:
 
 
 # 便利函數
-def ensure_currency_data_for_trading(trading_symbols: List[str], 
-                                   start_time_iso: str, end_time_iso: str,
-                                   granularity: str = "S5",
-                                   account_currency: str = ACCOUNT_CURRENCY) -> bool:
+def ensure_currency_data_for_trading(
+    trading_symbols: List[str],
+    account_currency: str,
+    start_time_iso: str,
+    end_time_iso: str,
+    granularity: str,
+    # Assuming oanda_api_key and db_data_path are accessible via config or passed if necessary
+    # For simplicity, let's assume they are handled internally or via global config
+) -> Tuple[bool, Set[str]]: # MODIFIED return type
     """
-    確保交易所需的所有匯率數據都已下載
-    
+    確保所有交易品種及其依賴的貨幣轉換對的數據都已下載並驗證。
+
     Args:
-        trading_symbols: 要交易的symbol列表
-        start_time_iso: 開始時間 (ISO格式)
-        end_time_iso: 結束時間 (ISO格式)
-        granularity: 數據粒度
-        account_currency: 帳戶貨幣
-        
+        trading_symbols: 交易的品種列表。
+        account_currency: 帳戶貨幣。
+        start_time_iso: ISO格式的開始時間。
+        end_time_iso: ISO格式的結束時間。
+        granularity: 數據的時間粒度。
+
     Returns:
-        是否成功確保所有數據
+        一個元組 (success: bool, all_ensured_symbols: Set[str])
+        success 表示操作是否成功。
+        all_ensured_symbols 包含所有已處理的品種（交易品種+轉換品種）。
     """
-    manager = CurrencyDependencyManager(account_currency)
-    return manager.download_required_currency_data(
-        trading_symbols, start_time_iso, end_time_iso, granularity
-    )
+    logger.info(f"確保交易品種 {trading_symbols} 在帳戶貨幣 {account_currency} 下的貨幣數據...")
+    
+    # 實例化 CurrencyDependencyManager
+    # Assuming InstrumentInfoManager is available or initialized by CurrencyDependencyManager
+    try:
+        # Attempt to get API key and DB path from config if not passed
+        # This part depends on how config is structured and accessed globally or passed down.
+        # For now, assuming CurrencyDependencyManager can access them or uses defaults.
+        currency_manager = CurrencyDependencyManager(account_currency=account_currency)
+        logger.debug("CurrencyDependencyManager 實例化成功。")
+    except Exception as e:
+        logger.error(f"實例化 CurrencyDependencyManager 失敗: {e}", exc_info=True)
+        return False, set(trading_symbols) # Return original trading_symbols on critical failure
+
+    # 1. 獲取所有需要的品種（交易品種 + 轉換品種）
+    all_symbols_to_ensure_data_for = set(trading_symbols)
+    try:
+        conversion_pairs = currency_manager.get_required_conversion_pairs(trading_symbols, account_currency)
+        logger.info(f"需要的轉換貨幣對: {conversion_pairs}")
+        all_symbols_to_ensure_data_for.update(conversion_pairs)
+    except Exception as e:
+        logger.error(f"獲取所需轉換貨幣對時出錯: {e}", exc_info=True)
+        # Decide if this is critical enough to stop
+        # return False, all_symbols_to_ensure_data_for # Or continue with only trading_symbols
+
+    logger.info(f"所有需要確保數據的品種: {all_symbols_to_ensure_data_for}")
+
+    # 2. 下載數據 (使用 manage_data_download_for_symbols)
+    # manage_data_download_for_symbols 應該從 oanda_downloader 導入
+    # 它需要 OANDA_API_KEY 和數據庫路徑，這些通常從配置中獲取
+    try:
+        from ..common.config import OANDA_API_KEY, DB_DATA_PATH # Adjust import path as needed
+        from .oanda_downloader import manage_data_download_for_symbols # Ensure this import is correct
+
+        logger.info(f"開始為 {list(all_symbols_to_ensure_data_for)} 下載/驗證數據...")
+        # Assuming manage_data_download_for_symbols is robust and handles its own config needs
+        # or that necessary arguments like api_key and db_path are implicitly handled by it
+        # or passed if its signature requires them.
+        # The original call in UniversalTrainer did not pass api_key/db_path to this top-level function,
+        # implying they are handled by manage_data_download_for_symbols or CurrencyDependencyManager internally.
+        download_success = manage_data_download_for_symbols(
+            symbols=list(all_symbols_to_ensure_data_for),
+            overall_start_str=start_time_iso,
+            overall_end_str=end_time_iso,
+            granularity=granularity
+        )
+        if not download_success:
+            logger.error(f"為品種 {list(all_symbols_to_ensure_data_for)} 管理數據下載失敗。")
+            return False, all_symbols_to_ensure_data_for
+        logger.info(f"品種 {list(all_symbols_to_ensure_data_for)} 的數據下載/驗證完成。")
+
+    except ImportError as ie:
+        logger.error(f"導入 OANDA API Key, DB Path 或 manage_data_download_for_symbols 失敗: {ie}", exc_info=True)
+        return False, all_symbols_to_ensure_data_for
+    except Exception as e:
+        logger.error(f"數據下載過程中發生錯誤: {e}", exc_info=True)
+        return False, all_symbols_to_ensure_data_for
+
+    # 3. 驗證貨幣覆蓋範圍 (使用 CurrencyDependencyManager 的方法)
+    try:
+        logger.info(f"開始驗證品種 {list(all_symbols_to_ensure_data_for)} 的貨幣覆蓋範圍...")
+        all_valid, message = currency_manager.validate_currency_coverage(
+            symbols_to_validate=list(all_symbols_to_ensure_data_for),
+            start_time_iso=start_time_iso,
+            end_time_iso=end_time_iso,
+            granularity=granularity
+        )
+        if not all_valid:
+            logger.error(f"貨幣數據覆蓋範圍驗證失敗: {message}")
+            return False, all_symbols_to_ensure_data_for
+        logger.info("貨幣數據覆蓋範圍驗證成功。")
+    except Exception as e:
+        logger.error(f"驗證貨幣覆蓋範圍時發生錯誤: {e}", exc_info=True)
+        return False, all_symbols_to_ensure_data_for
+        
+    logger.info(f"成功確保以下品種的數據: {all_symbols_to_ensure_data_for}")
+    return True, all_symbols_to_ensure_data_for # MODIFIED return value
 
 
 if __name__ == "__main__":

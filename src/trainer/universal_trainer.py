@@ -300,31 +300,31 @@ class UniversalTrainer:
         try:
             logger.info("開始數據準備...")
             
-            # 使用 oanda_downloader 中的 manage_data_download_for_symbols
-            # 並傳遞 Streamlit 的進度條和狀態文本組件
             overall_start_iso = format_datetime_for_oanda(self.start_time)
             overall_end_iso = format_datetime_for_oanda(self.end_time)
 
-            logger.info(f"將為以下品種管理數據下載: {self.trading_symbols}, 範圍: {overall_start_iso} 到 {overall_end_iso}")
-
+            # Initial download for explicitly selected trading symbols (optional, as ensure_currency_data_for_trading will cover them)
+            # However, this provides early feedback on primary symbols if desired.
+            # This call might be redundant if ensure_currency_data_for_trading robustly handles all downloads.
+            # For now, keeping it for potential separate progress reporting on primary symbols.
+            logger.info(f"將為主要交易品種管理數據下載: {self.trading_symbols}, 範圍: {overall_start_iso} 到 {overall_end_iso}")
             manage_data_download_for_symbols(
                 symbols=self.trading_symbols,
                 overall_start_str=overall_start_iso,
                 overall_end_str=overall_end_iso,
                 granularity=self.granularity,
-                streamlit_progress_bar=self.streamlit_progress_bar,
-                streamlit_status_text=self.streamlit_status_text
+                streamlit_progress_bar=self.streamlit_progress_bar, # These might be None if using shared_data_manager
+                streamlit_status_text=self.streamlit_status_text   # These might be None if using shared_data_manager
             )
             
-            # 確保貨幣依賴數據完整
-            logger.info("確保交易所需貨幣數據完整性...")
-            overall_start_iso = format_datetime_for_oanda(self.start_time) # Added
-            overall_end_iso = format_datetime_for_oanda(self.end_time)     # Added
-            success = ensure_currency_data_for_trading(
-                trading_symbols=self.trading_symbols, # Changed from currency_symbols
+            # 確保貨幣依賴數據完整 (this will also download if necessary)
+            logger.info("確保交易所需貨幣數據完整性 (包括轉換對)...")
+            # MODIFIED: Capture the full list of symbols from ensure_currency_data_for_trading
+            success, all_symbols_for_dataset = ensure_currency_data_for_trading(
+                trading_symbols=self.trading_symbols,
                 account_currency=self.account_currency,
-                start_time_iso=overall_start_iso,     # Changed from start_time
-                end_time_iso=overall_end_iso,         # Changed from end_time
+                start_time_iso=overall_start_iso,
+                end_time_iso=overall_end_iso,
                 granularity=self.granularity
             )
             
@@ -333,19 +333,20 @@ class UniversalTrainer:
                 self.shared_data_manager.update_training_status(status='error', error="數據依賴檢查失敗。請檢查日誌。")
                 return False
 
-            # 創建數據集
-            logger.info("創建記憶體映射數據集...")
-            overall_start_iso = format_datetime_for_oanda(self.start_time) # 確保使用ISO格式時間
-            overall_end_iso = format_datetime_for_oanda(self.end_time)     # 確保使用ISO格式時間
+            # 創建數據集 using ALL symbols for which data was ensured
+            logger.info(f"創建記憶體映射數據集 for symbols: {list(all_symbols_for_dataset)}")
             self.dataset = UniversalMemoryMappedDataset(
-                symbols=self.trading_symbols,
-                start_time_iso=overall_start_iso, # 更改參數名稱
+                symbols=list(all_symbols_for_dataset), # MODIFIED: Use the full list of symbols
+                start_time_iso=overall_start_iso, 
                 end_time_iso=overall_end_iso,     # 更改參數名稱
                 granularity=self.granularity,
                 timesteps_history=self.timesteps_history # 更改參數名稱
             )
             
-            logger.info(f"數據集創建成功，包含 {len(self.dataset)} 個樣本。")
+            # Removed self.dataset.is_valid() check as per previous fix.
+            # The UniversalMemoryMappedDataset constructor should handle validation or raise an error.
+            
+            logger.info(f"數據集創建成功。Dataset length: {len(self.dataset) if self.dataset else 'N/A'}") # Added length log
             logger.info("數據準備完成。")
             return True
             
@@ -510,15 +511,15 @@ class UniversalTrainer:
                 # 這需要在 UniversalCheckpointCallback 內部進行修改。
                 # 這裡假設回調已經被正確設置以更新共享數據管理器中的訓練步數。
 
-                self.agent.learn(
+                self.agent.train( # Changed from self.agent.learn
                     total_timesteps=self.total_timesteps,
                     callback=self.callback, # UniversalCheckpointCallback 將會處理進度更新
                     log_interval=100, # 假設每100步記錄一次
-                    eval_env=None, 
-                    eval_freq=self.eval_freq,
-                    n_eval_episodes=5,
-                    tb_log_name="sac_training",
-                    eval_log_path=None,
+                    # eval_env=None, # eval_env is not a parameter of SACAgentWrapper.train
+                    # eval_freq=self.eval_freq, # eval_freq is not a parameter of SACAgentWrapper.train
+                    # n_eval_episodes=5, # n_eval_episodes is not a parameter of SACAgentWrapper.train
+                    # tb_log_name="sac_training", # tb_log_name is not a parameter of SACAgentWrapper.train
+                    # eval_log_path=None, # eval_log_path is not a parameter of SACAgentWrapper.train
                     reset_num_timesteps=False
                 )
                 
