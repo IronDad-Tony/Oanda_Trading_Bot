@@ -335,10 +335,12 @@ class UniversalTrainer:
 
             # 創建數據集
             logger.info("創建記憶體映射數據集...")
+            overall_start_iso = format_datetime_for_oanda(self.start_time) # 確保使用ISO格式時間
+            overall_end_iso = format_datetime_for_oanda(self.end_time)     # 確保使用ISO格式時間
             self.dataset = UniversalMemoryMappedDataset(
                 symbols=self.trading_symbols,
-                start_time=self.start_time,
-                end_time=self.end_time,
+                start_time_iso=overall_start_iso, # 更改參數名稱
+                end_time_iso=overall_end_iso,     # 更改參數名稱
                 granularity=self.granularity,
                 timesteps=self.timesteps_history
             )
