@@ -253,7 +253,7 @@ class CurrencyDependencyManager:
             for pair_candidate in required_candidate_pairs:
                 # 檢查此貨幣對是否真實存在於OANDA
                 details = self.instrument_manager.get_details(pair_candidate)
-                if details and details.name == pair_candidate: # Ensure the name matches exactly
+                if details and details.symbol == pair_candidate: # Changed from details.name
                     valid_pairs_to_download.append(pair_candidate)
                     logger.debug(f"驗證匯率對 {pair_candidate}: 有效，將加入下載列表。")
                 else:
@@ -263,7 +263,7 @@ class CurrencyDependencyManager:
                         if len(parts) == 2:
                             reverse_candidate = f"{parts[1]}_{parts[0]}"
                             details_reverse = self.instrument_manager.get_details(reverse_candidate)
-                            if details_reverse and details_reverse.name == reverse_candidate:
+                            if details_reverse and details_reverse.symbol == reverse_candidate: # Changed from details_reverse.name
                                 valid_pairs_to_download.append(reverse_candidate)
                                 logger.debug(f"驗證匯率對 {pair_candidate} 的反向對 {reverse_candidate}: 有效，將加入下載列表。")
                             else:
@@ -334,11 +334,11 @@ class CurrencyDependencyManager:
                 # We only care about missing *valid* OANDA pairs.
                 is_valid_on_oanda = False
                 details_direct = self.instrument_manager.get_details(direct_match)
-                if details_direct and details_direct.name == direct_match:
+                if details_direct and details_direct.symbol == direct_match: # Changed from details_direct.name
                     is_valid_on_oanda = True
                 else:
                     details_reverse = self.instrument_manager.get_details(reverse_match)
-                    if details_reverse and details_reverse.name == reverse_match:
+                    if details_reverse and details_reverse.symbol == reverse_match: # Changed from details_reverse.name
                         is_valid_on_oanda = True
                 
                 if is_valid_on_oanda:

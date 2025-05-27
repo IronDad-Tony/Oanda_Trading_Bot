@@ -318,11 +318,13 @@ class UniversalTrainer:
             
             # 確保貨幣依賴數據完整
             logger.info("確保交易所需貨幣數據完整性...")
+            overall_start_iso = format_datetime_for_oanda(self.start_time) # Added
+            overall_end_iso = format_datetime_for_oanda(self.end_time)     # Added
             success = ensure_currency_data_for_trading(
-                currency_symbols=self.trading_symbols,
+                trading_symbols=self.trading_symbols, # Changed from currency_symbols
                 account_currency=self.account_currency,
-                start_time=self.start_time,
-                end_time=self.end_time,
+                start_time_iso=overall_start_iso,     # Changed from start_time
+                end_time_iso=overall_end_iso,         # Changed from end_time
                 granularity=self.granularity
             )
             
