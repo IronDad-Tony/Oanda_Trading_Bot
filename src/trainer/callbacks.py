@@ -17,36 +17,35 @@ import sys
 import logging
 import shutil # 用於 __main__ 中的清理
 from gymnasium import spaces # 用於 __main__ 測試
+from datetime import datetime, timezone # Added for timestamp
 
 # --- Logger 和 Config 導入 ---
-# (與之前 V4.8 版本類似的導入邏輯，確保 logger 和必要config可用)
 _logger_cb_v5: logging.Logger
 _config_cb_v5: Dict[str, Any] = {}
 try:
     from common.logger_setup import logger as common_logger_cb_v5; _logger_cb_v5 = common_logger_cb_v5; logger = _logger_cb_v5
     logger.debug("callbacks.py (V5): Successfully imported logger from common.logger_setup.")
-    from common.config import LOGS_DIR as _LOGS_DIR, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY
-    _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY}
+    from common.config import LOGS_DIR as _LOGS_DIR, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _INITIAL_CAPITAL # Added INITIAL_CAPITAL
+    _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY, "INITIAL_CAPITAL": _INITIAL_CAPITAL} # Added INITIAL_CAPITAL
     logger.info("callbacks.py (V5): Successfully imported common.config.")
 except ImportError:
     logger_temp_cb_v5 = logging.getLogger("callbacks_v5_fallback_initial"); logger_temp_cb_v5.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_cb_v5.setLevel(logging.DEBUG)
     _logger_cb_v5 = logger_temp_cb_v5; logger = _logger_cb_v5
     logger.warning(f"callbacks.py (V5): Initial import failed. Assuming PYTHONPATH is set correctly or this is a critical issue.")
-    # project_root_cb_v5 = Path(__file__).resolve().parent.parent.parent # 移除
-    # if str(project_root_cb_v5) not in sys.path: sys.path.insert(0, str(project_root_cb_v5)); logger.info(f"callbacks.py (V5): Added project root to sys.path: {project_root_cb_v5}") # 移除
     try:
-        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.logger_setup import logger as common_logger_retry_cb_v5; logger = common_logger_retry_cb_v5
         logger.info("callbacks.py (V5): Successfully re-imported common_logger.")
-        from src.common.config import LOGS_DIR as _LOGS_DIR_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R
-        _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R}
+        from src.common.config import LOGS_DIR as _LOGS_DIR_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R, INITIAL_CAPITAL as _INITIAL_CAPITAL_R # Added INITIAL_CAPITAL
+        _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R, "INITIAL_CAPITAL": _INITIAL_CAPITAL_R} # Added INITIAL_CAPITAL
         logger.info("callbacks.py (V5): Successfully re-imported common.config after path adjustment.")
     except ImportError as e_retry_cb_v5_critical:
         logger.error(f"callbacks.py (V5): Critical import error after path adjustment: {e_retry_cb_v5_critical}", exc_info=True)
         logger.warning("callbacks.py (V5): Using fallback values for config.")
-        _config_cb_v5 = {"LOGS_DIR": Path("./logs"), "ACCOUNT_CURRENCY": "AUD"}
+        _config_cb_v5 = {"LOGS_DIR": Path("./logs"), "ACCOUNT_CURRENCY": "AUD", "INITIAL_CAPITAL": 100000.0} # Added INITIAL_CAPITAL
+
 LOGS_DIR = _config_cb_v5.get("LOGS_DIR", Path("./logs"))
 ACCOUNT_CURRENCY = _config_cb_v5.get("ACCOUNT_CURRENCY", "AUD")
+INITIAL_CAPITAL = _config_cb_v5.get("INITIAL_CAPITAL", 100000.0) # Added INITIAL_CAPITAL
 
 
 class UniversalCheckpointCallback(BaseCallback):
@@ -56,16 +55,17 @@ class UniversalCheckpointCallback(BaseCallback):
                  name_prefix: str = "sac_model",
                  eval_env: Optional[VecEnv] = None,
                  eval_freq: int = 10000,
-                 n_eval_episodes: int = 3, # 增加默認評估episodes
+                 n_eval_episodes: int = 3,
                  deterministic_eval: bool = True,
                  best_model_save_path: Optional[Union[str, Path]] = None,
                  early_stopping_patience: int = 10,
-                 early_stopping_min_delta_abs: float = 100.0, # 絕對值改善，例如淨值至少增加100 AUD
-                 early_stopping_metric: str = "eval/mean_final_portfolio_value", # 用於早停的指標
-                 early_stopping_min_evals: int = 10, # 減少最小評估次數以便更快觸發測試
+                 early_stopping_min_delta_abs: float = 100.0,
+                 early_stopping_metric: str = "eval/mean_final_portfolio_value",
+                 early_stopping_min_evals: int = 10,
                  log_transformer_norm_freq: int = 1000,
                  verbose: int = 1,
-                 streamlit_session_state=None):
+                 streamlit_session_state=None,
+                 shared_data_manager=None): # Added shared_data_manager
         super().__init__(verbose)
         self.save_freq = save_freq
         self.save_path = Path(save_path)
@@ -82,15 +82,14 @@ class UniversalCheckpointCallback(BaseCallback):
             self.best_model_save_path = Path(best_model_save_path)
         self.best_model_save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.best_metric_val = -np.inf # 用於最佳模型保存
-        self.last_eval_trigger_step = 0 # 用於控制評估頻率的n_calls
+        self.best_metric_val = -np.inf
+        self.last_eval_trigger_step = 0
 
-        # 早停相關
         self.early_stopping_patience = early_stopping_patience
-        self.early_stopping_min_delta_abs = early_stopping_min_delta_abs # 使用絕對值
+        self.early_stopping_min_delta_abs = early_stopping_min_delta_abs
         self.early_stopping_metric = early_stopping_metric
         self.early_stopping_min_evals = early_stopping_min_evals
-        self.es_eval_count = 0 # 早停的評估計數器
+        self.es_eval_count = 0
         self.es_no_improvement_count = 0
         self.es_best_metric_val = -np.inf
 
@@ -98,9 +97,9 @@ class UniversalCheckpointCallback(BaseCallback):
         self.last_norm_log_ncalls = 0
 
         self.interrupted = False
-        self.streamlit_session_state = streamlit_session_state  # 用於更新Streamlit UI
+        self.streamlit_session_state = streamlit_session_state
+        self.shared_data_manager = shared_data_manager # Store shared_data_manager
         
-        # 嘗試設置signal處理器，但在非主線程中會失敗
         try:
             import signal
             import threading
@@ -114,24 +113,17 @@ class UniversalCheckpointCallback(BaseCallback):
         
         logger.info(f"UniversalCheckpointCallback initialized. Save path: {self.save_path}, Best model path: {self.best_model_save_path}")
 
-        # 強制所有儲存都只用唯一檔名，不產生best/checkpoint等多餘檔案
-        from common.config import MAX_SYMBOLS_ALLOWED
-        self.unique_model_filename = f"sac_model_symbols{MAX_SYMBOLS_ALLOWED}.zip"
-
     def _handle_interrupt(self, signum, frame):
         logger.warning("接收到中斷信號 (Ctrl+C)！將在當前步驟結束後嘗試安全保存並退出。")
         self.interrupted = True
 
     def _on_training_start(self) -> None:
         logger.info("訓練開始 (UniversalCheckpointCallback)。")
-        # 可以在這裡加載已有的最佳指標值，如果需要斷點續比較的話
-        # 例如，從一個文件中讀取 self.best_metric_val 和 self.es_best_metric_val
 
     def _run_evaluation(self) -> float:
-        """在評估環境中運行評估並返回主要的評估指標。"""
         if self.eval_env is None:
             logger.warning("未提供評估環境，跳過評估。")
-            return -np.inf # 或其他合適的默認值
+            return -np.inf
 
         logger.info(f"開始評估 (n_calls={self.n_calls}, num_timesteps={self.num_timesteps})...")
         all_episode_rewards: List[float] = []
@@ -140,27 +132,26 @@ class UniversalCheckpointCallback(BaseCallback):
 
         for _ in range(self.n_eval_episodes):
             obs = self.eval_env.reset()
-            dones = np.array([False] * self.eval_env.num_envs) # 支持 VecEnv
+            dones = np.array([False] * self.eval_env.num_envs)
             episode_reward_sum = np.zeros(self.eval_env.num_envs)
             episode_length = 0
             
-            max_steps = getattr(self.eval_env.envs[0], "max_episode_steps", 1000) # 從環境獲取或默認
+            max_steps = getattr(self.eval_env.envs[0], "max_episode_steps", 1000)
 
             for step in range(max_steps):
                 action, _ = self.model.predict(obs, deterministic=self.deterministic_eval)
                 obs, rewards, dones, infos = self.eval_env.step(action)
                 episode_reward_sum += rewards
                 episode_length += 1
-                if np.any(dones): # 如果VecEnv中的任何一個環境結束了
+                if np.any(dones):
                     for i_env in range(self.eval_env.num_envs):
-                        if dones[i_env]: # 記錄結束的環境信息
+                        if dones[i_env]:
                             all_episode_rewards.append(episode_reward_sum[i_env])
-                            all_episode_lengths.append(episode_length) # 這裡的長度是第一個done的，如果多env可以分別記
+                            all_episode_lengths.append(episode_length)
                             if infos[i_env] and "portfolio_value_ac" in infos[i_env]:
                                 all_final_portfolio_values_ac.append(infos[i_env]["portfolio_value_ac"])
-                    # 為了簡化，如果任何一個env done，我們就結束這個eval episode
                     break 
-            else: # for循環正常結束 (沒有break，即沒達到done)
+            else: 
                  all_episode_infos_from_eval_no_done = infos # type: ignore
                  for i_env in range(self.eval_env.num_envs):
                      all_episode_rewards.append(episode_reward_sum[i_env])
@@ -168,175 +159,166 @@ class UniversalCheckpointCallback(BaseCallback):
                      if all_episode_infos_from_eval_no_done[i_env] and "portfolio_value_ac" in all_episode_infos_from_eval_no_done[i_env]:
                          all_final_portfolio_values_ac.append(all_episode_infos_from_eval_no_done[i_env]["portfolio_value_ac"])
 
-
         mean_reward = np.mean(all_episode_rewards) if all_episode_rewards else -np.inf
         mean_portfolio_value = np.mean(all_final_portfolio_values_ac) if all_final_portfolio_values_ac else -np.inf
         
         logger.info(f"評估完成: 平均獎勵={mean_reward:.3f}, 平均最終淨值={mean_portfolio_value:.2f} {ACCOUNT_CURRENCY}")
         
-        if self.logger is not None: # SB3 logger
+        if self.logger is not None:
             self.logger.record("eval/mean_reward", mean_reward)
             self.logger.record("eval/mean_episode_length", np.mean(all_episode_lengths) if all_episode_lengths else 0)
             self.logger.record("eval/mean_final_portfolio_value", mean_portfolio_value)
-            self.logger.dump(step=self.num_timesteps) # 確保寫入TensorBoard
+            self.logger.dump(step=self.num_timesteps)
         
-        # 更新到Streamlit session state
         if self.streamlit_session_state is not None and hasattr(self.streamlit_session_state, 'training_metrics'):
             metrics = self.streamlit_session_state.training_metrics
-            # 確保有對應的步數記錄
             if len(metrics['steps']) > 0 and metrics['steps'][-1] == self.num_timesteps:
-                # 更新最後一個記錄的獎勵和投資組合價值
                 if len(metrics['rewards']) == len(metrics['steps']):
                     metrics['rewards'][-1] = mean_reward
                 else:
                     metrics['rewards'].append(mean_reward)
-                
                 if len(metrics['portfolio_values']) == len(metrics['steps']):
                     metrics['portfolio_values'][-1] = mean_portfolio_value
                 else:
                     metrics['portfolio_values'].append(mean_portfolio_value)
 
-        # 返回用於早停和最佳模型判斷的指標
         if self.early_stopping_metric == "eval/mean_reward":
             return float(mean_reward)
-        return float(mean_portfolio_value) # 默認使用淨值
+        return float(mean_portfolio_value)
 
     def _on_step(self) -> bool:
-        if self.model is None or self.logger is None: logger.error("Callback model/logger未初始化"); return False
+        if self.verbose > 0 and self.n_calls % 50 == 0: # Log every 50 calls
+            print(f"Callback Checkpoint: n_calls={self.n_calls}, num_timesteps={self.num_timesteps}, save_freq={self.save_freq}")
 
-        # 1. 定期保存 - 只覆蓋唯一檔案
-        if self.n_calls > 0 and self.n_calls % self.save_freq == 0:
-            intermediate_path = self.save_path / self.unique_model_filename
+        # Check for stop request
+        if self.shared_data_manager and self.shared_data_manager.is_stop_requested():
+            if self.verbose > 0:
+                print(f"Stop requested at step {self.num_timesteps}. Stopping training and saving final model.")
+            # Save the model before stopping
+            final_model_path = os.path.join(self.save_path, f"{self.name_prefix}_final_step_{self.num_timesteps}.zip")
+            self.model.save(final_model_path)
+            if self.verbose > 0:
+                print(f"Saved final model to {final_model_path}")
+            self.shared_data_manager.update_training_status("Training stopped by user. Final model saved.")
+            self.shared_data_manager.reset_stop_request() # Reset the stop request
+            self.interrupted = True # Mark as interrupted
+            return False # Stop training
+
+        current_time = datetime.now(timezone.utc)
+        # Update shared data manager with current training metrics
+        if self.shared_data_manager is not None:
+            step_count = self.num_timesteps
+
+            # Safely get metrics from SB3 logger; provide defaults if not found
+            actor_loss = self.model.logger.name_to_value.get('train/actor_loss', 0.0)
+            critic_loss = self.model.logger.name_to_value.get('train/critic_loss', 0.0)
+            current_step_reward = 0.0
+            # self.locals often contains 'rewards' for the last step
+            if 'rewards' in self.locals and isinstance(self.locals['rewards'], np.ndarray) and self.locals['rewards'].size > 0:
+                current_step_reward = self.locals['rewards'][0] 
+
+            portfolio_value = INITIAL_CAPITAL # Default to initial capital
+            # self.locals 'infos' is a list of dicts, one per env
+            if 'infos' in self.locals and isinstance(self.locals['infos'], list) and len(self.locals['infos']) > 0:
+                info_dict = self.locals['infos'][0] # Assuming single env or primary env's info
+                portfolio_value = info_dict.get('portfolio_value', info_dict.get('portfolio_value_ac', INITIAL_CAPITAL))
+            
+            l2_norm_val = self.model.logger.name_to_value.get('train/transformer_l2_norm', 0.0) # Will be updated later if transformer exists
+            grad_norm_val = self.model.logger.name_to_value.get('train/gradient_norm', self.model.logger.name_to_value.get('actor_grad_norm', 0.0))
+
+            self.shared_data_manager.add_training_metric(
+                step=step_count,
+                reward=current_step_reward,
+                portfolio_value=portfolio_value,
+                actor_loss=actor_loss,
+                critic_loss=critic_loss,
+                l2_norm=l2_norm_val, 
+                grad_norm=grad_norm_val
+            )
+            
+            # Update training progress for UI
+            # self.model._total_timesteps is the total_timesteps passed to learn()
+            if hasattr(self.model, '_total_timesteps') and self.model._total_timesteps > 0:
+                progress = (step_count / self.model._total_timesteps) * 100
+                self.shared_data_manager.update_training_status('running', progress)
+
+        # 1. 定期保存 - Use self.num_timesteps for the check
+        if self.num_timesteps > 0 and self.num_timesteps % self.save_freq == 0:
+            intermediate_path = self.save_path / f"{self.name_prefix}.zip"
             self.model.save(intermediate_path)
             logger.info(f"定期保存模型到: {intermediate_path} (步數: {self.num_timesteps})")
 
-        # 2. 定期評估與early stopping不再產生best檔案，只記錄指標
+        # 2. 定期評估
         if self.eval_env is not None and self.n_calls > 0 and self.n_calls % self.eval_freq == 0:
             current_metric = self._run_evaluation()
             self.es_eval_count +=1
 
-            # 保存最佳模型 - 使用統一命名策略
             if current_metric > self.best_metric_val:
                 logger.info(f"新最佳評估指標: {current_metric:.3f} (舊: {self.best_metric_val:.3f})")
                 self.best_metric_val = current_metric
-                # 最佳模型也使用相同的基礎名稱，只是保存在不同位置
                 best_model_path = self.best_model_save_path / f"{self.name_prefix}_best.zip"
                 self.model.save(best_model_path)
                 logger.info(f"最佳模型已更新並保存到: {best_model_path}")
             
-            # 早停邏輯
             if self.es_eval_count >= self.early_stopping_min_evals:
                 if current_metric < self.es_best_metric_val + self.early_stopping_min_delta_abs:
                     self.es_no_improvement_count += 1
                     logger.info(f"早停檢查: 指標 ({current_metric:.3f}) 未比最佳 ({self.es_best_metric_val:.3f}) 改善至少 {self.early_stopping_min_delta_abs}. 連續未改善: {self.es_no_improvement_count}/{self.early_stopping_patience}")
                 else:
                     logger.info(f"早停檢查: 指標改善 ({current_metric:.3f}). 重置未改善計數。")
-                    self.es_best_metric_val = current_metric # 更新早停比較的最佳值
+                    self.es_best_metric_val = current_metric
                     self.es_no_improvement_count = 0
                 
                 if self.es_no_improvement_count >= self.early_stopping_patience:
                     logger.warning("早停觸發！訓練將停止。")
-                    self.interrupted = True # 觸發中斷保存邏輯
-                    return False # 停止訓練
-            elif current_metric > self.es_best_metric_val : # 即使未達到最小評估次數，也更新最佳指標
+                    self.interrupted = True
+                    return False 
+            elif current_metric > self.es_best_metric_val :
                  self.es_best_metric_val = current_metric
-
 
         # 3. 記錄Transformer範數
         if self.n_calls > 0 and self.n_calls % self.log_transformer_norm_freq == 0:
+            # Corrected line continuation and attribute access
             if hasattr(self.model.policy, 'features_extractor') and \
                self.model.policy.features_extractor is not None and \
                hasattr(self.model.policy.features_extractor, 'transformer'):
                 try:
-                    transformer_params = self.model.policy.features_extractor.transformer.parameters() # type: ignore
-                    l2_norm = sum(p.data.norm(2).item() ** 2 for p in transformer_params if p.requires_grad) ** 0.5
-                    self.logger.record("train/transformer_l2_norm", l2_norm)
-                    logger.debug(f"Transformer L2 Norm @{self.num_timesteps}: {l2_norm:.4f}")
-                    
-                    # 更新範數到Streamlit
-                    if self.streamlit_session_state is not None and hasattr(self.streamlit_session_state, 'training_metrics'):
-                        metrics = self.streamlit_session_state.training_metrics
-                        if 'norms' in metrics:
-                            # 找到對應的步數索引
-                            if len(metrics['steps']) > 0 and metrics['steps'][-1] >= self.num_timesteps - self.log_transformer_norm_freq:
-                                if len(metrics['norms']) < len(metrics['steps']):
-                                    metrics['norms'].append({'l2_norm': l2_norm})
-                                else:
-                                    # 更新最後一個記錄
-                                    if len(metrics['norms']) > 0:
-                                        metrics['norms'][-1]['l2_norm'] = l2_norm
+                    transformer_module = getattr(self.model.policy.features_extractor, 'transformer', None)
+                    if transformer_module is not None:
+                        transformer_params = transformer_module.parameters()
+                        l2_norm = sum(p.data.norm(2).item() ** 2 for p in transformer_params if p.requires_grad) ** 0.5
+                        self.logger.record("train/transformer_l2_norm", l2_norm) # Log to SB3 logger
+                        logger.debug(f"Transformer L2 Norm @{self.num_timesteps}: {l2_norm:.4f}")
+                        
+                        # If shared_data_manager is available and has metrics_data, update the l2_norm of the last entry
+                        if self.shared_data_manager and self.shared_data_manager.metrics_data:
+                            # This is a simplified update; ideally, metrics are structured to accommodate this.
+                            # For now, we assume the main add_training_metric has a placeholder or this is logged separately for UI.
+                            # To directly update the last metric:
+                            # self.shared_data_manager.metrics_data[-1]['l2_norm'] = l2_norm
+                            pass # Placeholder for more sophisticated update if needed
                                     
-                except Exception as e_norm: logger.warning(f"計算Transformer範數出錯: {e_norm}")
+                except Exception as e_norm: 
+                    logger.warning(f"計算Transformer範數出錯: {e_norm}")
         
+        # Check for stop request from shared_data_manager (e.g., Streamlit button)
+        if self.shared_data_manager is not None and self.shared_data_manager.is_stop_requested():
+            logger.info("Stop requested via shared data manager, stopping training...")
+            self.interrupted = True 
+
         if self.interrupted:
             logger.info("檢測到中斷請求，準備停止訓練...")
-            return False # 告訴SB3停止訓練
+            return False 
         return True
 
     def _on_training_end(self) -> None:
         logger.info(f"訓練結束 (UniversalCheckpointCallback)。總步數: {self.num_timesteps}, 總調用次數: {self.n_calls}")
-        # 訓練結束時只覆蓋唯一檔案
         if self.model is not None:
-            final_path = self.save_path / self.unique_model_filename
+            final_path = self.save_path / f"{self.name_prefix}.zip" # Standard final save
             self.model.save(final_path)
             logger.info(f"最終模型已保存到: {final_path}")
 
-
-if __name__ == "__main__":
-    logger.info("正在直接運行 callbacks.py 進行測試...")
-    
-    class MockAlgo(BaseAlgorithm): # 需要實現抽象方法
-        def __init__(self, policy, env, learning_rate=0.0003, verbose=0):
-            super().__init__(policy=policy, env=env, learning_rate=learning_rate, verbose=verbose)
-            self.num_timesteps = 0; self.logger = None; self.policy = policy # policy可以是字符串或類
-            if env: self.observation_space = env.observation_space; self.action_space = env.action_space
-        def _setup_model(self): pass
-        def learn(self, total_timesteps, callback=None, **kwargs):
-            if callback: callback.on_training_start(locals(), globals())
-            for i in range(1, total_timesteps + 1):
-                self.num_timesteps = self.num_timesteps + 1 # SB3內部會這樣做
-                if callback:
-                    callback.n_calls = self.num_timesteps # 確保n_calls被更新
-                    if not callback.on_step(): break
-            if callback: callback.on_training_end()
-        def predict(self, observation, state=None, episode_start=None, deterministic=False): return self.action_space.sample(), None
-        def save(self, path, exclude=None, include=None): logger.info(f"MockAlgo: save() to {path}")
-        @classmethod
-        def load(cls, path, env=None, device='auto', **kwargs): return cls(policy="MlpPolicy", env=env, learning_rate=0.0003) # type: ignore
-
-    class MockSingleEnv(gym.Env[np.ndarray, np.ndarray]):
-        def __init__(self, obs_s, act_s, max_steps=50):
-            super().__init__(); self.observation_space = obs_s; self.action_space = act_s
-            self.current_step = 0; self.max_episode_steps = max_steps
-        def reset(self, seed=None, options=None): super().reset(seed=seed); self.current_step=0; return self.observation_space.sample().astype(np.float32), {}
-        def step(self, action):
-            self.current_step += 1; obs = self.observation_space.sample().astype(np.float32)
-            reward = float(np.random.rand()); terminated = self.current_step >= self.max_episode_steps
-            info = {"portfolio_value_ac": 10000 + self.current_step * 10}; return obs, reward, terminated, False, info
-        def render(self): pass;
-        def close(self): pass
-
-    from stable_baselines3.common.vec_env import DummyVecEnv
-    obs_sp = spaces.Box(-1, 1, (10,), np.float32); act_sp = spaces.Box(-1, 1, (2,), np.float32)
-    eval_env_main = DummyVecEnv([lambda: MockSingleEnv(obs_sp, act_sp)])
-    
-    # 創建一個假的logger給MockAlgo
-    from stable_baselines3.common.logger import Logger, HumanOutputFormat
-    import tempfile
-    temp_log_folder = tempfile.mkdtemp()
-    mock_sb3_logger = Logger(folder=temp_log_folder, output_formats=[HumanOutputFormat(sys.stdout)])
-
-    model_to_train = MockAlgo(policy="MlpPolicy", env=eval_env_main, learning_rate=lambda x: 0.001)
-    model_to_train.logger = mock_sb3_logger # 賦值logger
-
-    cb = UniversalCheckpointCallback(save_freq=20, save_path="./cb_test_saves", eval_env=eval_env_main, eval_freq=15, n_eval_episodes=1, early_stopping_min_evals=1, early_stopping_patience=2, log_transformer_norm_freq=10)
-    
-    logger.info("開始模擬訓練循環以測試回調...")
-    try:
-        model_to_train.learn(total_timesteps=100, callback=cb)
-    except Exception as e_learn:
-        logger.error(f"模擬訓練 learn() 出錯: {e_learn}", exc_info=True)
-
-    logger.info("callbacks.py 測試執行完畢。")
-    if Path("./cb_test_saves").exists(): shutil.rmtree("./cb_test_saves"); logger.info("已清理測試保存目錄。")
-    if Path(temp_log_folder).exists(): shutil.rmtree(temp_log_folder); logger.info("已清理臨時日誌目錄。")
+            # If training was interrupted, also consider saving a specific "interrupted" model
+            # or ensure the current `trainer.save_current_model()` in streamlit_app_complete.py handles this.
+            # The current logic in streamlit_app_complete.py calls trainer.save_current_model() which saves a "_checkpoint.zip"
+            # This _on_training_end save will be the "final" state, even if interrupted.
