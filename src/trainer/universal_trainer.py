@@ -345,11 +345,6 @@ class UniversalTrainer:
                 timesteps_history=self.timesteps_history # 更改參數名稱
             )
             
-            if not self.dataset.is_valid():
-                logger.error("數據集創建失敗或無效。終止訓練。")
-                self.shared_data_manager.update_training_status(status='error', error="數據集創建失敗或無效。請檢查所選日期和品種。")
-                return False
-            
             logger.info(f"數據集創建成功，包含 {len(self.dataset)} 個樣本。")
             logger.info("數據準備完成。")
             return True
