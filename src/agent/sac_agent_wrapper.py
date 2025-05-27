@@ -99,7 +99,17 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         self.device = self._setup_device(device)
         logger.info(f"SAC Agent Wrapper: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
         
-        num_active_symbols = getattr(self.env.envs[0], 'num_active_symbols_in_slots', 1)
+        # num_active_symbols = getattr(self.env.envs[0], 'num_active_symbols_in_slots', 1) # Removed this line
+        # Check if env is a list of environments (VecEnv) or a single environment
+        if hasattr(self.env, 'envs') and isinstance(self.env.envs, list) and len(self.env.envs) > 0:
+            # This is a VecEnv, access the first environment
+            first_env = self.env.envs[0]
+        else:
+            # This is a single environment
+            first_env = self.env
+        
+        num_active_symbols = getattr(first_env, 'num_active_symbols_in_slots', 1)
+
         calculated_buffer_size = num_active_symbols * TIMESTEPS * buffer_size_factor
         self.buffer_size = min(max(calculated_buffer_size, batch_size * 200, 50000),200000)
         calculated_learning_starts = num_active_symbols * batch_size * learning_starts_factor
