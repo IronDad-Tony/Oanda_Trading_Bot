@@ -54,7 +54,7 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
                  ffn_dim: int = TRANSFORMER_FFN_DIM, dropout_rate: float = TRANSFORMER_DROPOUT_RATE,
                  use_fourier_block: bool = True, fourier_num_modes: int = 32,
                  use_wavelet_block: bool = True, wavelet_levels: int = 3, wavelet_name: str = 'db4',
-                 use_amp: bool = False): # 從 common.config 導入 USE_AMP 作為預設值會更好
+                 use_amp: bool = False): # 控制是否對Transformer啟用AMP
         transformer_input_shape = observation_space.spaces["features_from_dataset"].shape
         num_input_features_for_transformer = transformer_input_shape[2]
         num_pos_ratio_features = observation_space.spaces["current_positions_nominal_ratio_ac"].shape[0]
@@ -71,7 +71,7 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
 
         logger.info(f"AdvancedTransformerFeatureExtractor initialized. Input feature dim for Transformer: {num_input_features_for_transformer}")
         logger.info(f"Total flattened output features_dim for SAC: {_features_dim}")
-        logger.info(f"AMP (autocast) enabled for feature extractor: {self.use_amp and torch.cuda.is_available()}")
+        logger.info(f"AMP (autocast) will be enabled for Transformer forward pass if CUDA is available: {self.use_amp}")
 
         if UniversalTradingTransformer is None: raise RuntimeError("UniversalTradingTransformer未能正確導入。")
         self.transformer = UniversalTradingTransformer(
@@ -90,34 +90,37 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         unrealized_pnl_ratio = observations["unrealized_pnl_ratio_ac"]
         margin_level = observations["margin_level"]
 
-        # 僅在啟用AMP且CUDA可用時使用autocast
-        amp_enabled_for_forward = self.use_amp and torch.cuda.is_available()
+        # 確定是否為此特定前向傳播啟用AMP
+        # 只有當 use_amp 為 True 且 CUDA 可用時才啟用
+        amp_enabled_for_this_forward = self.use_amp and torch.cuda.is_available()
         
-        with torch.cuda.amp.autocast(enabled=amp_enabled_for_forward):
-            transformer_output = self.transformer(transformer_input_data, symbol_padding_mask)
+        # 使用 autocast 上下文僅包裹 Transformer 的調用
+        with torch.cuda.amp.autocast(enabled=amp_enabled_for_this_forward):
+            # 確保輸入給 Transformer 的數據是 float32，autocast 會處理後續轉換
+            transformer_output_internal = self.transformer(transformer_input_data.to(torch.float32), symbol_padding_mask)
+            # transformer_output_internal 的 dtype 可能是 float16 (如果 amp_enabled) 或 float32
+
+        # 將 Transformer 的輸出明確轉換為 float32，以便與其他 float32 特徵拼接
+        # 並且確保後續網絡接收的是 float32
+        transformer_output_float32 = transformer_output_internal.to(torch.float32)
         
-        # 後續操作通常在 autocast 上下文之外進行，除非它們也受益於混合精度
-        # 或者如果它們對精度非常敏感，則應在 autocast 之外。
-        # 這裡的 reshape 和 cat 操作通常不需要在 autocast 內。
-        batch_size = transformer_output.size(0)
-        flattened_transformer_output = transformer_output.reshape(batch_size, -1)
+        if amp_enabled_for_this_forward and transformer_output_internal.dtype == torch.float16:
+            logger.debug(f"Transformer output was float16 (due to AMP), converted to float32 before concatenation.")
+
+        batch_size = transformer_output_float32.size(0)
+        flattened_transformer_output = transformer_output_float32.reshape(batch_size, -1)
         
-        # 確保拼接的張量類型一致，autocast 可能會改變 transformer_output 的 dtype
-        # 如果其他張量是 float32，而 transformer_output 變成了 float16，cat 可能會出錯或執行隱式轉換
-        # 為了安全，可以將所有張量轉換為目標 dtype (例如，transformer_output.dtype 或 torch.float32)
-        # 但通常情況下，如果後續網路期望 float32，這裡的拼接應該還好。
-        # 如果 transformer_output 是 float16，其他是 float32，torch.cat 會將它們提升到 float32
-        
+        # 拼接其他特徵，它們預期是 float32
+        # 確保所有參與拼接的張量都是 float32
         final_features = torch.cat([flattened_transformer_output,
-                                    current_positions_ratio.to(flattened_transformer_output.dtype), # 確保類型匹配
-                                    unrealized_pnl_ratio.to(flattened_transformer_output.dtype),    # 確保類型匹配
-                                    margin_level.to(flattened_transformer_output.dtype)], dim=1)   # 確保類型匹配
+                                    current_positions_ratio.to(torch.float32),
+                                    unrealized_pnl_ratio.to(torch.float32),
+                                    margin_level.to(torch.float32)], dim=1)
         
-        # 在將特徵傳遞給 SAC 策略之前，確保其為 float32
-        # 即使在 autocast 上下文中，我們也希望輸出是 float32 以匹配策略網絡的期望類型
-        if amp_enabled_for_forward and final_features.dtype != torch.float32:
+        # 最終再次確認輸出是 float32 (儘管上述步驟已確保)
+        if final_features.dtype != torch.float32:
+            logger.warning(f"Final features dtype was {final_features.dtype}, forcing to float32. This should not happen if inputs are handled correctly.")
             final_features = final_features.to(torch.float32)
-            logger.debug(f"Feature extractor output converted to float32. Original dtype: {flattened_transformer_output.dtype}")
             
         return final_features
 

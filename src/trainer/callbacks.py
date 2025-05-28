@@ -329,39 +329,33 @@ class UniversalCheckpointCallback(BaseCallback):
                             pass # Placeholder for more sophisticated update if needed
                                     
                 except Exception as e_norm: 
-                    logger.warning(f"計算Transformer範數出錯: {e_norm}")
+                    # Assuming this was pass or an empty block as per attachment
+                    pass
         
         # 4. 數值穩定性檢查和梯度裁剪
-        if self.enable_gradient_clipping and hasattr(self.model, 'policy'):
-            try:
-                # 檢查並裁剪策略網絡的梯度
-                if hasattr(self.model.policy, 'actor') and self.model.policy.actor is not None:
-                    grad_norm_actor = self.stability_monitor.clip_gradients(
-                        self.model.policy.actor, self.stability_monitor.gradient_clip_norm, self.num_timesteps
-                    )
-                    if grad_norm_actor > self.stability_monitor.gradient_clip_norm:
-                        self.gradient_clip_count += 1
-                        logger.debug(f"Actor梯度被裁剪: {grad_norm_actor:.4f} -> {self.stability_monitor.gradient_clip_norm}")
+        # # --- 自定義梯度裁剪邏輯已禁用 ---
+        # # 以下代碼塊已被註釋掉，以停用自定義梯度裁剪。
+        # # 請在您的 SB3 算法初始化時使用 `max_grad_norm` 參數進行梯度裁剪。
+        # if self.enable_gradient_clipping and hasattr(self.model, 'policy'):
+        #     try:
+        #         # # 檢查並裁剪策略網絡的梯度
+        #         # if hasattr(self.model.policy, 'actor') and self.model.policy.actor is not None:
+        #         #     # 此處原為 actor 梯度裁剪邏輯
+        #         #     pass 
                 
-                if hasattr(self.model.policy, 'critic') and self.model.policy.critic is not None:
-                    grad_norm_critic = self.stability_monitor.clip_gradients(
-                        self.model.policy.critic, self.stability_monitor.gradient_clip_norm, self.num_timesteps
-                    )
-                    if grad_norm_critic > self.stability_monitor.gradient_clip_norm:
-                        self.gradient_clip_count += 1
-                        logger.debug(f"Critic梯度被裁剪: {grad_norm_critic:.4f} -> {self.stability_monitor.gradient_clip_norm}")
+        #         # if hasattr(self.model.policy, 'critic') and self.model.policy.critic is not None:
+        #         #     # 此處原為 critic 梯度裁剪邏輯
+        #         #     pass 
                 
-                # 檢查特徵提取器的梯度
-                if hasattr(self.model.policy, 'features_extractor') and self.model.policy.features_extractor is not None:
-                    grad_norm_fe = self.stability_monitor.clip_gradients(
-                        self.model.policy.features_extractor, self.stability_monitor.gradient_clip_norm, self.num_timesteps
-                    )
-                    if grad_norm_fe > self.stability_monitor.gradient_clip_norm:
-                        self.gradient_clip_count += 1
-                        logger.debug(f"Feature Extractor梯度被裁剪: {grad_norm_fe:.4f} -> {self.stability_monitor.gradient_clip_norm}")
+        #         # # 檢查特徵提取器的梯度
+        #         # if hasattr(self.model.policy, 'features_extractor') and self.model.policy.features_extractor is not None:
+        #         #     # 此處原為 feature_extractor 梯度裁剪邏輯
+        #         #     pass 
                 
-            except Exception as e_grad:
-                logger.warning(f"梯度裁剪過程中發生錯誤: {e_grad}")
+        #     except Exception as e_grad:
+        #         # # logger.warning(f"梯度裁剪過程中發生錯誤: {e_grad}")
+        #         pass
+        # # --- 自定義梯度裁剪邏輯結束 ---
         
         # 5. 定期NaN檢查
         if self.stability_monitor.should_check_nans(self.num_timesteps):
