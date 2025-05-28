@@ -13,6 +13,19 @@ from typing import List, Dict, Optional, Any, Tuple, Union, Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, ROUND_CEILING, ROUND_FLOOR
 import sys
+import os
+
+# Correctly adjust sys.path when the script is run directly
+# This ensures that imports like 'from src.common import ...' work.
+if __name__ == "__main__": # Only run this when script is executed directly
+    # Get the directory of the current script (e.g., Oanda_Trading_Bot/src/environment)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Navigate up two levels to get the project root (e.g., Oanda_Trading_Bot)
+    project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
+    # Add the project root to sys.path
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
 from pathlib import Path
 import logging
 import time # <--- 導入 time 模組
@@ -483,15 +496,32 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         reward = self._calculate_reward(prev_portfolio_value_ac, total_commission_this_step_ac)
         logger.debug(f"Step {self.episode_step_count}: _calculate_reward took {time.perf_counter() - _t_calc_reward:.6f}s")
         
+        # Get the next observation FIRST
+        _t_get_obs_early = time.perf_counter()
+        next_observation = self._get_observation()
+        logger.debug(f"Step {self.episode_step_count}: Early _get_observation took {time.perf_counter() - _t_get_obs_early:.6f}s")
+
+        # Corrected check for NaN/Inf in observation components.
+        for key, obs_component_value in next_observation.items():
+            if isinstance(obs_component_value, np.ndarray) and np.issubdtype(obs_component_value.dtype, np.floating):
+                if np.any(np.isnan(obs_component_value)) or np.any(np.isinf(obs_component_value)):
+                    logger.error(f"NaN or Inf detected in floating-point observation component '{key}' within step method. Data sample (first 100 chars): {str(obs_component_value)[:100]}")
+                    # Optional: Implement imputation here if desired
+            # No explicit check for non-float/non-bool numpy arrays with np.isnan/isinf, as these functions
+            # would typically raise an error or return False for integer arrays.
+            # Boolean arrays don't carry NaN/Inf in the same way.
+
+        # Check for termination or truncation
         self.current_step_in_dataset += 1
         
         _t_check_term = time.perf_counter()
         terminated, truncated = self._check_termination_truncation()
         logger.debug(f"Step {self.episode_step_count}: _check_termination_truncation took {time.perf_counter() - _t_check_term:.6f}s")
         
-        _t_get_obs = time.perf_counter()
-        next_observation = self._get_observation()
-        logger.debug(f"Step {self.episode_step_count}: _get_observation took {time.perf_counter() - _t_get_obs:.6f}s")
+        # next_observation was already fetched, no need to call _get_observation() again here
+        # _t_get_obs = time.perf_counter()
+        # next_observation = self._get_observation() # THIS LINE IS REMOVED / COMMENTED OUT
+        # logger.debug(f"Step {self.episode_step_count}: _get_observation took {time.perf_counter() - _t_get_obs:.6f}s")
         
         info = self._get_info(); info["reward_this_step"] = reward
         logger.debug(f"--- Step {self.episode_step_count} End. Total time: {time.perf_counter() - _step_time_start:.6f}s ---")

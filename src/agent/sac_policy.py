@@ -13,53 +13,31 @@ from pathlib import Path
 import numpy as np
 import logging # 確保 logging 導入
 
-# --- 全局 logger 的後備定義 (與之前文件類似) ---
-_logger_initialized_by_common_policy = False
+# --- Simplified Import Block ---
 try:
-    from common.logger_setup import logger
-    _logger_initialized_by_common_policy = True
-    logger.debug("sac_policy.py: Successfully imported logger from common.logger_setup.")
+    from src.common.logger_setup import logger
+    logger.debug("sac_policy.py: Successfully imported logger from src.common.logger_setup.")
 except ImportError:
-    logger = logging.getLogger("sac_policy_fallback_initial")
+    logger = logging.getLogger("sac_policy_fallback") # type: ignore
     logger.setLevel(logging.DEBUG)
     _ch_policy_fallback = logging.StreamHandler(sys.stdout)
     _ch_policy_fallback.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     if not logger.handlers: logger.addHandler(_ch_policy_fallback)
-    logger.warning("sac_policy.py: Failed to import logger from common.logger_setup. Using initial fallback logger.")
+    logger.warning("sac_policy.py: Failed to import logger from src.common.logger_setup. Using fallback logger.")
 
 try:
-    from agent.feature_extractors import AdvancedTransformerFeatureExtractor
-    # 從config導入必要的常量，主要用於 __main__ 測試塊
-    from common.config import (
+    from src.agent.feature_extractors import AdvancedTransformerFeatureExtractor
+    from src.common.config import (
         MAX_SYMBOLS_ALLOWED, TIMESTEPS, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
     )
-    if not _logger_initialized_by_common_policy: logger.info("Successfully imported common.config (logger was fallback).")
-    else: logger.info("Successfully imported common.config.")
-
-except ImportError:
-    logger.warning("sac_policy.py: Initial import of common.config or agent.feature_extractors failed. Assuming PYTHONPATH is set correctly or this is a critical issue.")
-    # project_root_policy = Path(__file__).resolve().parent.parent.parent # 移除
-    # if str(project_root_policy) not in sys.path: # 移除
-    #     sys.path.insert(0, str(project_root_policy)) # 移除
-    #     logger.info(f"sac_policy.py: Added project root to sys.path: {project_root_policy}") # 移除
-    try:
-        # 假設 PYTHONPATH 已設定，這些導入應該能工作
-        from src.agent.feature_extractors import AdvancedTransformerFeatureExtractor
-        from src.common.config import (
-             MAX_SYMBOLS_ALLOWED, TIMESTEPS, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
-        )
-        if not _logger_initialized_by_common_policy:
-            try:
-                from src.common.logger_setup import logger as common_logger_retry_policy
-                logger = common_logger_retry_policy; _logger_initialized_by_common_policy = True
-                logger.info("sac_policy.py: Direct run: Successfully re-imported common_logger after path adj.")
-            except ImportError: logger.warning("sac_policy.py: Direct run: Failed to re-import common_logger after path adj.")
-        logger.info("sac_policy.py: Direct run: Successfully re-imported common modules after path adjustment.")
-    except ImportError as e_retry_policy:
-        logger.error(f"sac_policy.py: Direct run: Critical import error after path adjustment: {e_retry_policy}", exc_info=True)
-        logger.warning("sac_policy.py: Using fallback values for config (critical error during import).")
-        AdvancedTransformerFeatureExtractor = None # type: ignore
-        MAX_SYMBOLS_ALLOWED = 20; TIMESTEPS = 128; TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
+    logger.info("sac_policy.py: Successfully imported AdvancedTransformerFeatureExtractor and common.config.")
+except ImportError as e:
+    logger.error(f"sac_policy.py: Failed to import AdvancedTransformerFeatureExtractor or common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
+    AdvancedTransformerFeatureExtractor = None # type: ignore
+    MAX_SYMBOLS_ALLOWED = 20
+    TIMESTEPS = 128
+    TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
+    logger.warning("sac_policy.py: Using fallback values for config due to import error.") # type: ignore
 
 
 class CustomSACPolicy(SACPolicy):

@@ -19,29 +19,27 @@ import shutil # 用於 __main__ 中的清理
 from gymnasium import spaces # 用於 __main__ 測試
 from datetime import datetime, timezone # Added for timestamp
 
-# --- Logger 和 Config 導入 ---
-_logger_cb_v5: logging.Logger
+# --- Simplified Import Block ---
+try:
+    from src.common.logger_setup import logger
+    logger.debug("callbacks.py (V5): Successfully imported logger from src.common.logger_setup.")
+except ImportError:
+    logger = logging.getLogger("callbacks_v5_fallback") # type: ignore
+    logger.setLevel(logging.DEBUG)
+    _ch_fallback_cb = logging.StreamHandler(sys.stdout)
+    _ch_fallback_cb.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    if not logger.handlers: logger.addHandler(_ch_fallback_cb)
+    logger.warning("callbacks.py (V5): Failed to import logger from src.common.logger_setup. Using fallback logger.")
+
 _config_cb_v5: Dict[str, Any] = {}
 try:
-    from common.logger_setup import logger as common_logger_cb_v5; _logger_cb_v5 = common_logger_cb_v5; logger = _logger_cb_v5
-    logger.debug("callbacks.py (V5): Successfully imported logger from common.logger_setup.")
-    from common.config import LOGS_DIR as _LOGS_DIR, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _INITIAL_CAPITAL # Added INITIAL_CAPITAL
-    _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY, "INITIAL_CAPITAL": _INITIAL_CAPITAL} # Added INITIAL_CAPITAL
-    logger.info("callbacks.py (V5): Successfully imported common.config.")
-except ImportError:
-    logger_temp_cb_v5 = logging.getLogger("callbacks_v5_fallback_initial"); logger_temp_cb_v5.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_cb_v5.setLevel(logging.DEBUG)
-    _logger_cb_v5 = logger_temp_cb_v5; logger = _logger_cb_v5
-    logger.warning(f"callbacks.py (V5): Initial import failed. Assuming PYTHONPATH is set correctly or this is a critical issue.")
-    try:
-        from src.common.logger_setup import logger as common_logger_retry_cb_v5; logger = common_logger_retry_cb_v5
-        logger.info("callbacks.py (V5): Successfully re-imported common_logger.")
-        from src.common.config import LOGS_DIR as _LOGS_DIR_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R, INITIAL_CAPITAL as _INITIAL_CAPITAL_R # Added INITIAL_CAPITAL
-        _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R, "INITIAL_CAPITAL": _INITIAL_CAPITAL_R} # Added INITIAL_CAPITAL
-        logger.info("callbacks.py (V5): Successfully re-imported common.config after path adjustment.")
-    except ImportError as e_retry_cb_v5_critical:
-        logger.error(f"callbacks.py (V5): Critical import error after path adjustment: {e_retry_cb_v5_critical}", exc_info=True)
-        logger.warning("callbacks.py (V5): Using fallback values for config.")
-        _config_cb_v5 = {"LOGS_DIR": Path("./logs"), "ACCOUNT_CURRENCY": "AUD", "INITIAL_CAPITAL": 100000.0} # Added INITIAL_CAPITAL
+    from src.common.config import LOGS_DIR as _LOGS_DIR, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _INITIAL_CAPITAL
+    _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY, "INITIAL_CAPITAL": _INITIAL_CAPITAL}
+    logger.info("callbacks.py (V5): Successfully imported common.config.") # type: ignore
+except ImportError as e:
+    logger.error(f"callbacks.py (V5): Failed to import common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
+    _config_cb_v5 = {"LOGS_DIR": Path("./logs"), "ACCOUNT_CURRENCY": "AUD", "INITIAL_CAPITAL": 100000.0}
+    logger.warning("callbacks.py (V5): Using fallback values for config due to import error.") # type: ignore
 
 LOGS_DIR = _config_cb_v5.get("LOGS_DIR", Path("./logs"))
 ACCOUNT_CURRENCY = _config_cb_v5.get("ACCOUNT_CURRENCY", "AUD")

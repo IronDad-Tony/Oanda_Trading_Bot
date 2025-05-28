@@ -24,69 +24,35 @@ warnings.filterwarnings(
     module="torch.nn.modules.transformer" # 限定來源模組
 )
 
-
-# --- 全局 logger 的後備定義 ---
-_logger_initialized_by_common = False
+# --- Simplified Import Block ---
 try:
-    # 優先嘗試從 common.logger_setup 導入，它應該已經配置好了
-    from common.logger_setup import logger
-    _logger_initialized_by_common = True
-    logger.debug("transformer_model.py: Successfully imported logger from common.logger_setup.")
+    from src.common.logger_setup import logger
+    logger.debug("transformer_model.py: Successfully imported logger from src.common.logger_setup.")
 except ImportError:
-    # 如果 common.logger_setup 導入失敗（例如路徑問題），則創建一個本地後備logger
-    logger = logging.getLogger("transformer_model_fallback_initial")
-    logger.setLevel(logging.DEBUG) # 後備logger也開DEBUG，方便排查導入問題
+    logger = logging.getLogger("transformer_model_fallback") # type: ignore
+    logger.setLevel(logging.DEBUG)
     _ch_fallback = logging.StreamHandler(sys.stdout)
     _ch_fallback.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    if not logger.handlers:
-        logger.addHandler(_ch_fallback)
-    logger.warning("transformer_model.py: Failed to import logger from common.logger_setup. Using initial fallback logger.")
+    if not logger.handlers: logger.addHandler(_ch_fallback)
+    logger.warning("transformer_model.py: Failed to import logger from src.common.logger_setup. Using fallback logger.")
 
 try:
-    from common.config import (
+    from src.common.config import (
         TIMESTEPS, MAX_SYMBOLS_ALLOWED,
         TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS, TRANSFORMER_NUM_HEADS,
         TRANSFORMER_FFN_DIM, TRANSFORMER_DROPOUT_RATE, TRANSFORMER_LAYER_NORM_EPS,
         TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL,
         DEVICE
     )
-    if not _logger_initialized_by_common: # 如果之前沒成功從common導入logger，現在補一個info
-        logger.info("Successfully imported common.config (logger was fallback).")
-    else:
-        logger.info("Successfully imported common.config.")
-
-except ImportError:
-    logger.warning("Initial import of common.config failed. Assuming PYTHONPATH is set correctly or this is a critical issue.")
-    # project_root_model = Path(__file__).resolve().parent.parent.parent # 移除
-    # if str(project_root_model) not in sys.path: # 移除
-    #     sys.path.insert(0, str(project_root_model)) # 移除
-    #     logger.info(f"Added project root to sys.path: {project_root_model}") # 移除
-    try:
-        # 假設 PYTHONPATH 已設定，這些導入應該能工作
-        from src.common.config import (
-            TIMESTEPS, MAX_SYMBOLS_ALLOWED,
-            TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS, TRANSFORMER_NUM_HEADS,
-            TRANSFORMER_FFN_DIM, TRANSFORMER_DROPOUT_RATE, TRANSFORMER_LAYER_NORM_EPS,
-            TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL,
-            DEVICE
-        )
-        if not _logger_initialized_by_common:
-            try: # 再次嘗試導入配置好的logger
-                from src.common.logger_setup import logger as common_logger_retry
-                logger = common_logger_retry
-                _logger_initialized_by_common = True
-                logger.info("Direct run TransformerModel: Successfully re-imported common_logger after path adj.")
-            except ImportError:
-                 logger.warning("Direct run TransformerModel: Failed to re-import common_logger after path adj.")
-        logger.info("Direct run TransformerModel: Successfully re-imported common.config after path adjustment.")
-    except ImportError as e_retry_model:
-        logger.error(f"Direct run TransformerModel: Critical import error for config after path adjustment: {e_retry_model}", exc_info=True)
-        logger.warning("Using fallback values for Transformer model config (critical error during import).")
-        TIMESTEPS=128; MAX_SYMBOLS_ALLOWED=20; TRANSFORMER_MODEL_DIM=128;
-        TRANSFORMER_NUM_LAYERS=2; TRANSFORMER_NUM_HEADS=2; TRANSFORMER_FFN_DIM=256;
-        TRANSFORMER_DROPOUT_RATE=0.1; TRANSFORMER_LAYER_NORM_EPS=1e-5;
-        TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING=5000; TRANSFORMER_OUTPUT_DIM_PER_SYMBOL=32;
-        DEVICE=torch.device("cpu")
+    logger.info("transformer_model.py: Successfully imported common.config.") # type: ignore
+except ImportError as e:
+    logger.error(f"transformer_model.py: Failed to import common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
+    TIMESTEPS=128; MAX_SYMBOLS_ALLOWED=20; TRANSFORMER_MODEL_DIM=128;
+    TRANSFORMER_NUM_LAYERS=2; TRANSFORMER_NUM_HEADS=2; TRANSFORMER_FFN_DIM=256;
+    TRANSFORMER_DROPOUT_RATE=0.1; TRANSFORMER_LAYER_NORM_EPS=1e-5;
+    TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING=5000; TRANSFORMER_OUTPUT_DIM_PER_SYMBOL=32;
+    DEVICE=torch.device("cpu")
+    logger.warning("transformer_model.py: Using fallback values for config due to import error.") # type: ignore
 
 
 # --- 位置編碼 (Positional Encoding) ---
