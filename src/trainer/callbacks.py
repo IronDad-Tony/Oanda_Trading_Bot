@@ -337,7 +337,7 @@ class UniversalCheckpointCallback(BaseCallback):
                 # 檢查並裁剪策略網絡的梯度
                 if hasattr(self.model.policy, 'actor') and self.model.policy.actor is not None:
                     grad_norm_actor = self.stability_monitor.clip_gradients(
-                        self.model.policy.actor, self.stability_monitor.gradient_clip_norm
+                        self.model.policy.actor, self.stability_monitor.gradient_clip_norm, self.num_timesteps
                     )
                     if grad_norm_actor > self.stability_monitor.gradient_clip_norm:
                         self.gradient_clip_count += 1
@@ -345,7 +345,7 @@ class UniversalCheckpointCallback(BaseCallback):
                 
                 if hasattr(self.model.policy, 'critic') and self.model.policy.critic is not None:
                     grad_norm_critic = self.stability_monitor.clip_gradients(
-                        self.model.policy.critic, self.stability_monitor.gradient_clip_norm
+                        self.model.policy.critic, self.stability_monitor.gradient_clip_norm, self.num_timesteps
                     )
                     if grad_norm_critic > self.stability_monitor.gradient_clip_norm:
                         self.gradient_clip_count += 1
@@ -354,7 +354,7 @@ class UniversalCheckpointCallback(BaseCallback):
                 # 檢查特徵提取器的梯度
                 if hasattr(self.model.policy, 'features_extractor') and self.model.policy.features_extractor is not None:
                     grad_norm_fe = self.stability_monitor.clip_gradients(
-                        self.model.policy.features_extractor, self.stability_monitor.gradient_clip_norm
+                        self.model.policy.features_extractor, self.stability_monitor.gradient_clip_norm, self.num_timesteps
                     )
                     if grad_norm_fe > self.stability_monitor.gradient_clip_norm:
                         self.gradient_clip_count += 1
@@ -364,7 +364,7 @@ class UniversalCheckpointCallback(BaseCallback):
                 logger.warning(f"梯度裁剪過程中發生錯誤: {e_grad}")
         
         # 5. 定期NaN檢查
-        if self.stability_monitor.should_check_nans():
+        if self.stability_monitor.should_check_nans(self.num_timesteps):
             try:
                 nan_detected = False
                 

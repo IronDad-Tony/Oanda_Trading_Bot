@@ -59,51 +59,59 @@ class NumericalStabilityMonitor:
         logger.info(f"  NaN check frequency: {self.nan_check_frequency}")
         logger.info(f"  Gradient clipping enabled: {self.enable_gradient_clipping}")
     
-    def apply_gradient_clipping(self, model: nn.Module, step: int) -> Dict[str, Any]:
+    def clip_gradients(self, model: nn.Module, gradient_clip_norm_value: float, step: Optional[int] = None) -> float:
         """
-        Apply gradient clipping to the model parameters.
+        Apply gradient clipping to the model parameters and return the total norm before clipping.
         
         Args:
             model: The neural network model
-            step: Current training step
+            gradient_clip_norm_value: Maximum gradient norm for clipping
+            step: Current training step (optional, for logging/tracking if needed later)
             
         Returns:
-            Dictionary with clipping information
+            Total norm of the gradients before clipping as a float.
         """
         if not self.enable_gradient_clipping:
-            return {"clipping_applied": False, "step": step}
-        
-        # Compute gradient norm before clipping
-        total_norm = 0.0
-        param_count = 0
-        
-        for param in model.parameters():
-            if param.grad is not None:
-                param_norm = param.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-                param_count += 1
-        
-        total_norm = total_norm ** 0.5
-        
-        # Apply clipping
-        clipped_norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), 
-            self.gradient_clip_norm
+            # Calculate norm without clipping if clipping is disabled
+            total_norm_val = 0.0
+            params_with_grads_no_clip = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
+            if not params_with_grads_no_clip:
+                return 0.0
+            for param in params_with_grads_no_clip:
+                if param.grad is not None: # Should always be true due to filter
+                    param_norm = param.grad.data.norm(2)
+                    total_norm_val += param_norm.item() ** 2
+            total_norm_val = total_norm_val ** 0.5
+            return float(total_norm_val)
+
+        params_with_grads = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
+        if not params_with_grads:
+            logger.warning("clip_gradients called on a model with no parameters requiring gradients or no gradients.")
+            return 0.0
+
+        total_norm_before_clipping = torch.nn.utils.clip_grad_norm_(
+            params_with_grads,
+            gradient_clip_norm_value
         )
         
-        clipping_applied = clipped_norm > self.gradient_clip_norm
-        if clipping_applied:
+        if total_norm_before_clipping.item() > gradient_clip_norm_value:
             self.gradient_explosion_count += 1
+            # Logging of actual clipping event can be done by the caller if needed
         
-        return {
-            "clipping_applied": clipping_applied,
-            "original_norm": total_norm,
-            "clipped_norm": float(clipped_norm),
-            "param_count": param_count,
-            "step": step,
-            "health_check_passed": not torch.isnan(torch.tensor(clipped_norm))
-        }
+        return float(total_norm_before_clipping.item())
     
+    def should_check_nans(self, step: int) -> bool:
+        """
+        Determine if NaN/Infinity check should be performed at the current step.
+
+        Args:
+            step: Current training step.
+
+        Returns:
+            True if NaN check should be performed, False otherwise.
+        """
+        return step % self.nan_check_frequency == 0
+
     def check_for_nans(self, model: nn.Module, step: int) -> bool:
         """
         Check for NaN or Infinity values in model parameters and gradients.

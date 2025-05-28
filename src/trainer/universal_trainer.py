@@ -458,8 +458,7 @@ class UniversalTrainer:
             
             save_dir = WEIGHTS_DIR # 使用 config 中定義的 WEIGHTS_DIR
             save_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 創建 checkpoint 回調
+              # 創建 checkpoint 回調，包含數值穩定性配置
             self.callback = UniversalCheckpointCallback(
                 save_freq=self.save_freq,
                 save_path=save_dir,
@@ -468,7 +467,11 @@ class UniversalTrainer:
                 n_eval_episodes=5,
                 deterministic_eval=True,
                 verbose=1,
-                streamlit_session_state=self.streamlit_session_state # 傳遞給回調，以便更新UI
+                streamlit_session_state=self.streamlit_session_state, # 傳遞給回調，以便更新UI
+                shared_data_manager=self.shared_data_manager, # 傳遞共享數據管理器
+                enable_gradient_clipping=True, # 啟用梯度裁剪
+                gradient_clip_norm=1.0, # 梯度裁剪範數
+                nan_check_frequency=500 # NaN檢查頻率
             )
             
             logger.info("訓練回調設置成功。")
