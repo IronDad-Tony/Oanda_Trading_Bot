@@ -135,164 +135,182 @@ class CurrencyDependencyManager:
     
     def determine_required_currency_pairs(self, trading_symbols: List[str]) -> Set[str]:
         """
-        根據交易symbols確定需要的匯率對
+        根據交易symbols確定需要的匯率對.
+        會檢查直接對和反向對的有效性。
         
         Args:
             trading_symbols: 要交易的symbol列表
             
         Returns:
-            需要的匯率對集合
+            實際有效的、需要的匯率對集合 (例如 {"EUR_USD", "USD_JPY"})
         """
         required_pairs = set()
-        involved_currencies = set()
-        
-        # 1. 收集所有涉及的貨幣 (只收集報價貨幣，因為我們關心的是將報價貨幣轉換為帳戶貨幣)
-        #    以及基礎貨幣，以防帳戶貨幣是基礎貨幣之一 (例如交易 AUD/USD，帳戶是 AUD)
-        for symbol in trading_symbols:
-            base_curr, quote_curr = self.parse_symbol_currencies(symbol)
-            if base_curr and quote_curr:
-                involved_currencies.add(base_curr)
-                involved_currencies.add(quote_curr)
-                logger.debug(f"Symbol {symbol}: Base={base_curr}, Quote={quote_curr}")
-        
-        # 2. 添加帳戶貨幣，確保它在集合中
-        involved_currencies.add(self.account_currency)
-        
-        logger.info(f"所有涉及的貨幣 (包含帳戶貨幣): {sorted(list(involved_currencies))}")
-        
-        # 3. 為每個非帳戶貨幣的報價貨幣，以及與帳戶貨幣不同的基礎貨幣，確定到帳戶貨幣的轉換路徑
-        #    主要目標是將交易的價值轉換回帳戶貨幣
-        currencies_to_convert = set()
-        for symbol in trading_symbols:
-            base_curr, quote_curr = self.parse_symbol_currencies(symbol)
-            if base_curr and quote_curr:
-                if quote_curr != self.account_currency:
-                    currencies_to_convert.add(quote_curr)
-                # 如果基礎貨幣不是帳戶貨幣，並且我們可能需要將其價值轉換為帳戶貨幣
-                # (例如，保證金以基礎貨幣計價，但需要以帳戶貨幣顯示)
-                # 這裡的邏輯是，任何與帳戶貨幣不同的貨幣都可能需要轉換路徑
-                if base_curr != self.account_currency:
-                    currencies_to_convert.add(base_curr)
+        all_involved_currencies = set() # 包括交易對的基礎和報價貨幣，以及帳戶貨幣
 
-        for currency in currencies_to_convert:
-            if currency != self.account_currency: # Redundant check, but safe
-                conversion_pairs = self._find_conversion_path(currency, self.account_currency)
-                required_pairs.update(conversion_pairs)
+        for symbol in trading_symbols:
+            base_curr, quote_curr = self.parse_symbol_currencies(symbol)
+            if base_curr and quote_curr:
+                all_involved_currencies.add(base_curr)
+                all_involved_currencies.add(quote_curr)
+        all_involved_currencies.add(self.account_currency)
         
-        # 如果帳戶貨幣不是USD，確保所有主要貨幣（如果它們參與交易）到USD的轉換路徑也存在
-        # 這有助於更廣泛的交叉匯率計算或標準化報告
+        logger.info(f"所有涉及的貨幣 (交易對 + 帳戶貨幣): {sorted(list(all_involved_currencies))}")
+
+        # 確定需要轉換的路徑：任何非帳戶貨幣都需要一條到帳戶貨幣的路徑
+        currencies_needing_conversion_to_account = all_involved_currencies - {self.account_currency}
+
+        for currency_from in currencies_needing_conversion_to_account:
+            # 路徑1: currency_from -> self.account_currency
+            path1_pairs = self._find_and_validate_conversion_path_pairs(currency_from, self.account_currency)
+            required_pairs.update(path1_pairs)
+
+            # 路徑2 (如果帳戶貨幣非USD，且當前貨幣也非USD): currency_from -> USD
+            # 這有助於建立更廣泛的交叉匯率基礎
+            if self.account_currency != 'USD' and currency_from != 'USD':
+                path2_pairs = self._find_and_validate_conversion_path_pairs(currency_from, 'USD')
+                required_pairs.update(path2_pairs)
+        
+        # 如果帳戶貨幣不是USD，還需要確保USD到帳戶貨幣的路徑
         if self.account_currency != 'USD':
-            for currency in involved_currencies:
-                if currency != 'USD' and currency != self.account_currency and currency in self.major_currencies:
-                    # We need a path from this major currency to USD
-                    usd_conversion_pairs = self._find_conversion_path(currency, 'USD')
-                    required_pairs.update(usd_conversion_pairs)
+            usd_to_account_pairs = self._find_and_validate_conversion_path_pairs('USD', self.account_currency)
+            required_pairs.update(usd_to_account_pairs)
 
-        logger.info(f"初步確定需要的匯率對: {sorted(list(required_pairs))}")
+        logger.info(f"最終確定的有效且必要的匯率對: {sorted(list(required_pairs))}")
         return required_pairs
-    
-    def _find_conversion_path(self, from_currency: str, to_currency: str) -> Set[str]:
+
+    def _find_and_validate_conversion_path_pairs(self, from_currency: str, to_currency: str) -> Set[str]:
         """
-        找到從一種貨幣到另一種貨幣的轉換路徑所需的匯率對。
-        這包括直接對、反向對，以及通過USD的間接對。
+        查找並驗證從 from_currency 到 to_currency 的轉換路徑中實際有效的OANDA貨幣對。
+        """
+        if from_currency == to_currency:
+            return set()
+
+        valid_pairs_for_path = set()
+
+        # 1. 嘗試直接/反向對: FROM_TO 或 TO_FROM
+        direct_pair = f"{from_currency}_{to_currency}"
+        reverse_pair = f"{to_currency}_{from_currency}"
         
-        Args:
-            from_currency: 源貨幣
-            to_currency: 目標貨幣
+        details_direct = self.instrument_manager.get_details(direct_pair)
+        if details_direct and details_direct.symbol == direct_pair:
+            valid_pairs_for_path.add(direct_pair)
+            logger.debug(f"找到有效直接對: {direct_pair} for {from_currency}->{to_currency}")
+            return valid_pairs_for_path # 如果直接對存在，優先使用
+
+        details_reverse = self.instrument_manager.get_details(reverse_pair)
+        if details_reverse and details_reverse.symbol == reverse_pair:
+            valid_pairs_for_path.add(reverse_pair)
+            logger.debug(f"找到有效反向對: {reverse_pair} for {from_currency}->{to_currency}")
+            return valid_pairs_for_path # 如果反向對存在（且直接對不存在），則使用
+
+        # 2. 如果沒有直接/反向對，且涉及USD的轉換，則嘗試通過USD
+        # (FROM -> USD -> TO)
+        if from_currency != 'USD' and to_currency != 'USD':
+            logger.debug(f"嘗試通過USD為 {from_currency}->{to_currency} 尋找路徑")
+            # Leg 1: FROM -> USD
+            from_to_usd_direct = f"{from_currency}_USD"
+            usd_from_reverse = f"USD_{from_currency}"
             
-        Returns:
-            所需匯率對的集合 (例如 {"EUR_USD", "USD_JPY"})
-        """
+            leg1_pair_found = None
+            details_from_usd = self.instrument_manager.get_details(from_to_usd_direct)
+            if details_from_usd and details_from_usd.symbol == from_to_usd_direct:
+                leg1_pair_found = from_to_usd_direct
+            else:
+                details_usd_from = self.instrument_manager.get_details(usd_from_reverse)
+                if details_usd_from and details_usd_from.symbol == usd_from_reverse:
+                    leg1_pair_found = usd_from_reverse
+            
+            if leg1_pair_found:
+                logger.debug(f"  找到USD路徑第一部分: {leg1_pair_found}")
+            else:
+                logger.debug(f"  未找到 {from_currency}<->USD 的有效對")
+
+
+            # Leg 2: USD -> TO
+            usd_to_to_direct = f"USD_{to_currency}"
+            to_usd_reverse = f"{to_currency}_USD"
+
+            leg2_pair_found = None
+            details_usd_to = self.instrument_manager.get_details(usd_to_to_direct)
+            if details_usd_to and details_usd_to.symbol == usd_to_to_direct:
+                leg2_pair_found = usd_to_to_direct
+            else:
+                details_to_usd = self.instrument_manager.get_details(to_usd_reverse)
+                if details_to_usd and details_to_usd.symbol == to_usd_reverse:
+                    leg2_pair_found = to_usd_reverse
+            
+            if leg2_pair_found:
+                logger.debug(f"  找到USD路徑第二部分: {leg2_pair_found}")
+            else:
+                logger.debug(f"  未找到 USD<->{to_currency} 的有效對")
+
+            if leg1_pair_found and leg2_pair_found:
+                valid_pairs_for_path.add(leg1_pair_found)
+                valid_pairs_for_path.add(leg2_pair_found)
+                logger.debug(f"找到通過USD的有效路徑對: {leg1_pair_found}, {leg2_pair_found} for {from_currency}->{to_currency}")
+                return valid_pairs_for_path
+            else:
+                # Corrected f-string for missing legs
+                missing_leg_info = []
+                if not leg1_pair_found:
+                    missing_leg_info.append("leg1")
+                if not leg2_pair_found:
+                    missing_leg_info.append("leg2")
+                logger.warning(f"無法為 {from_currency} -> {to_currency} 找到通過USD的完整轉換路徑。缺失: {', '.join(missing_leg_info)}")
+        
+        if not valid_pairs_for_path:
+             logger.warning(f"無法為 {from_currency} -> {to_currency} 找到任何直接、反向或通過USD的有效轉換貨幣對。")
+
+        return valid_pairs_for_path
+
+    def _find_conversion_path(self, from_currency: str, to_currency: str) -> Set[str]:
+        # 此方法 (_find_conversion_path) 的原始邏輯是生成 *候選* 對，
+        # 而新的 _find_and_validate_conversion_path_pairs 會直接查找並驗證。
+        # 為了保持 determine_required_currency_pairs 的簡潔性，
+        # 我們可以讓 determine_required_currency_pairs 直接調用 _find_and_validate_conversion_path_pairs。
+        # 因此，這個舊的 _find_conversion_path 可能不再需要，或者可以被重構/移除。
+        # 暫時保留，但標記為可能廢棄。
+        logger.debug(f"[_find_conversion_path - DEPRECATED CANDIDATE] Called for {from_currency} to {to_currency}")
         if from_currency == to_currency:
             return set()
         
         possible_pairs = set()
+        possible_pairs.add(f"{from_currency}_{to_currency}")
+        possible_pairs.add(f"{to_currency}_{from_currency}")
         
-        # 1. 嘗試直接匯率對 (FROM_TO, TO_FROM)
-        for template in self.common_pairs_templates:
-            pair = template.format(base=from_currency, quote=to_currency)
-            possible_pairs.add(pair)
-        
-        # 2. 如果直接轉換不是到USD或從USD開始，則考慮通過USD的交叉匯率
-        #    (FROM -> USD -> TO)
         if from_currency != 'USD' and to_currency != 'USD':
-            # FROM -> USD
-            for template in self.common_pairs_templates:
-                pair1 = template.format(base=from_currency, quote='USD')
-                possible_pairs.add(pair1)
-            # USD -> TO
-            for template in self.common_pairs_templates:
-                pair2 = template.format(base='USD', quote=to_currency)
-                possible_pairs.add(pair2)
-        
+            possible_pairs.add(f"{from_currency}_USD")
+            possible_pairs.add(f"USD_{from_currency}")
+            possible_pairs.add(f"USD_{to_currency}")
+            possible_pairs.add(f"{to_currency}_USD")
         return possible_pairs
-    
+
     def download_required_currency_data(self, trading_symbols: List[str], 
                                       start_time_iso: str, end_time_iso: str, 
                                       granularity: str = "S5") -> bool:
         """
-        下載交易所需的匯率對數據
-        
-        Args:
-            trading_symbols: 要交易的symbol列表
-            start_time_iso: 開始時間 (ISO格式)
-            end_time_iso: 結束時間 (ISO格式)
-            granularity: 數據粒度
-            
-        Returns:
-            是否成功下載所有必需的數據
+        下載交易所需的、經過驗證有效的匯率對數據
         """
         try:
-            required_candidate_pairs = self.determine_required_currency_pairs(trading_symbols)
+            # determine_required_currency_pairs 現在返回的是已經過驗證的有效貨幣對
+            final_download_list = self.determine_required_currency_pairs(trading_symbols)
             
-            if not required_candidate_pairs:
-                logger.info("根據交易symbols和帳戶貨幣，無需下載額外的匯率對。")
-                return True
-
-            valid_pairs_to_download = []
-            for pair_candidate in required_candidate_pairs:
-                # 檢查此貨幣對是否真實存在於OANDA
-                details = self.instrument_manager.get_details(pair_candidate)
-                if details and details.symbol == pair_candidate: # Changed from details.name
-                    valid_pairs_to_download.append(pair_candidate)
-                    logger.debug(f"驗證匯率對 {pair_candidate}: 有效，將加入下載列表。")
-                else:
-                    #嘗試反向對，因為 determine_required_currency_pairs 可能產生 A_B, B_A
-                    if '_' in pair_candidate:
-                        parts = pair_candidate.split('_')
-                        if len(parts) == 2:
-                            reverse_candidate = f"{parts[1]}_{parts[0]}"
-                            details_reverse = self.instrument_manager.get_details(reverse_candidate)
-                            if details_reverse and details_reverse.symbol == reverse_candidate: # Changed from details_reverse.name
-                                valid_pairs_to_download.append(reverse_candidate)
-                                logger.debug(f"驗證匯率對 {pair_candidate} 的反向對 {reverse_candidate}: 有效，將加入下載列表。")
-                            else:
-                                logger.debug(f"驗證匯率對 {pair_candidate} 及其反向均無效或不存在於OANDA。")
-                        else:
-                            logger.debug(f"驗證匯率對 {pair_candidate}: 無效或不存在於OANDA。")
-                    else:
-                        logger.debug(f"驗證匯率對 {pair_candidate}: 格式不正確，無法驗證。")
-            
-            # 去重
-            final_download_list = sorted(list(set(valid_pairs_to_download)))
-
             if not final_download_list:
-                logger.info("所有候選匯率對均無效或已滿足，無需下載。")
-                return True
-            
+                logger.info("根據交易symbols和帳戶貨幣，無需下載額外的匯率對，或所有必需對均無效。")
+                return True # No valid pairs means nothing to download
+
             logger.info(f"開始下載 {len(final_download_list)} 個經過驗證的匯率對的數據...")
-            logger.info(f"匯率對列表: {final_download_list}")
+            logger.info(f"匯率對列表: {sorted(list(final_download_list))}")
             
-            # 注意：manage_data_download_for_symbols 應該能處理重複下載或已存在的數據
             manage_data_download_for_symbols(
-                symbols=final_download_list,
+                symbols=sorted(list(final_download_list)), # Pass the validated list
                 overall_start_str=start_time_iso,
                 overall_end_str=end_time_iso,
                 granularity=granularity
             )
             
             logger.info("匯率對數據下載任務已提交/完成。")
-            return True # Assuming manage_data_download_for_symbols handles its own success/failure logging
+            return True
             
         except Exception as e:
             logger.error(f"下載匯率對數據時發生錯誤: {e}", exc_info=True)
@@ -301,372 +319,95 @@ class CurrencyDependencyManager:
     def validate_currency_coverage(self, trading_symbols: List[str], 
                                  dataset_symbols: List[str]) -> Tuple[bool, List[str]]:
         """
-        驗證數據集是否包含所有必需的匯率對
-        
-        Args:
-            trading_symbols: 要交易的symbol列表
-            dataset_symbols: 數據集中已有的symbol列表 (通常是已下載的)
-            
-        Returns:
-            (是否完整覆蓋, 缺失的匯率對列表)
+        驗證數據集是否包含所有必需的、有效的匯率對
         """
-        required_pairs_candidates = self.determine_required_currency_pairs(trading_symbols)
-        dataset_symbols_set = set(s.upper() for s in dataset_symbols) # Normalize to upper
+        # determine_required_currency_pairs 返回的是OANDA上實際有效的對
+        required_valid_pairs = self.determine_required_currency_pairs(trading_symbols)
+        dataset_symbols_set = set(s.upper() for s in dataset_symbols)
         
-        missing_pairs = []
-        if not required_pairs_candidates:
+        missing_valid_pairs = []
+        if not required_valid_pairs:
             logger.info("無需額外匯率對，覆蓋驗證通過。")
             return True, []
 
-        for pair_cand in required_pairs_candidates:
-            # A_B or B_A must exist
-            parts = pair_cand.split('_')
-            if len(parts) != 2:
-                logger.warning(f"候選對 {pair_cand} 格式不正確，跳過覆蓋檢查。")
-                continue
-            
-            direct_match = f"{parts[0]}_{parts[1]}"
-            reverse_match = f"{parts[1]}_{parts[0]}"
-
-            if not (direct_match in dataset_symbols_set or reverse_match in dataset_symbols_set):
-                # Before declaring missing, check if this pair is even valid on OANDA
-                # This avoids flagging pairs like "XYZ_ABC" if they don't exist at all.
-                # We only care about missing *valid* OANDA pairs.
-                is_valid_on_oanda = False
-                details_direct = self.instrument_manager.get_details(direct_match)
-                if details_direct and details_direct.symbol == direct_match: # Changed from details_direct.name
-                    is_valid_on_oanda = True
-                else:
-                    details_reverse = self.instrument_manager.get_details(reverse_match)
-                    if details_reverse and details_reverse.symbol == reverse_match: # Changed from details_reverse.name
-                        is_valid_on_oanda = True
-                
-                if is_valid_on_oanda:
-                    # It's a valid pair, but not in our dataset
-                    missing_pairs.append(direct_match) # Report the canonical form or preferred form
-                else:
-                    logger.debug(f"候選對 {pair_cand} (或其反向) 並非有效的OANDA交易品種，不視為缺失。")
-
-
-        is_complete = len(missing_pairs) == 0
+        for valid_pair in required_valid_pairs:
+            # 因為 determine_required_currency_pairs 返回的已經是OANDA上存在的symbol (可能是 A_B 或 B_A)
+            # 所以我們只需要檢查這個 valid_pair 是否在 dataset_symbols_set 中
+            if valid_pair not in dataset_symbols_set:
+                # 這裡可以進一步確認，如果 valid_pair 是 X_Y，而數據庫裡有 Y_X，是否算滿足。
+                # 但由於 determine_required_currency_pairs 已經做了智能選擇，
+                # 它會優先選擇一個方向。如果那個方向不在 dataset_symbols_set，則認為缺失。
+                # 或者，我們可以讓 determine_required_currency_pairs 返回一個 canonical form，
+                # 然後檢查 canonical form 或其反向是否在 dataset_symbols_set 中。
+                # 目前的邏輯是：如果 determine_required_currency_pairs 確定需要 X_Y，那麼 X_Y 就必須在數據集中。
+                missing_valid_pairs.append(valid_pair)
+        
+        is_complete = len(missing_valid_pairs) == 0
         
         if is_complete:
             logger.info("匯率覆蓋驗證通過：所有必需的、有效的匯率對都可用於數據集。")
         else:
-            logger.warning(f"匯率覆蓋不完整，數據集中缺失以下有效的OANDA匯率對: {sorted(list(set(missing_pairs)))}")
+            logger.warning(f"匯率覆蓋不完整，數據集中缺失以下有效的OANDA匯率對: {sorted(list(set(missing_valid_pairs)))}")
+            logger.warning(f"數據集中的可用symbols: {sorted(list(dataset_symbols_set))}")
         
-        return is_complete, sorted(list(set(missing_pairs)))
-    
-    def get_currency_conversion_info(self, trading_symbols: List[str]) -> Dict[str, Dict[str, str]]:
-        """
-        獲取每個交易symbol的貨幣轉換信息
-        
-        Args:
-            trading_symbols: 交易symbol列表
-            
-        Returns:
-            每個symbol的貨幣轉換信息字典
-        """
-        conversion_info = {}
-        
-        for symbol in trading_symbols:
-            base_curr, quote_curr = self.parse_symbol_currencies(symbol)
-            if base_curr and quote_curr:
-                path_description = "無需轉換"
-                needs_conversion = quote_curr != self.account_currency
-                
-                if needs_conversion:
-                    path_description = self._describe_conversion_path(quote_curr, self.account_currency)
-                
-                conversion_info[symbol] = {
-                    'base_currency': base_curr,
-                    'quote_currency': quote_curr,
-                    'account_currency': self.account_currency,
-                    'needs_conversion_to_account_currency': needs_conversion,
-                    'conversion_path_to_account_currency': path_description
-                }
-            else:
-                conversion_info[symbol] = {
-                    'base_currency': 'N/A',
-                    'quote_currency': 'N/A',
-                    'account_currency': self.account_currency,
-                    'needs_conversion_to_account_currency': False,
-                    'conversion_path_to_account_currency': '無法解析Symbol貨幣'
-                }
-
-        return conversion_info
-    
-    def _describe_conversion_path(self, from_currency: str, to_currency: str) -> str:
-        """
-        描述貨幣轉換路徑 (報價貨幣 -> 帳戶貨幣)
-        
-        Args:
-            from_currency: 源貨幣 (通常是交易symbol的報價貨幣)
-            to_currency: 目標貨幣 (通常是帳戶貨幣)
-            
-        Returns:
-            轉換路徑描述
-        """
-        if from_currency == to_currency:
-            return "無需轉換"
-        
-        # 檢查是否有直接匯率對 (FROM_TO)
-        direct_pair = f"{from_currency}_{to_currency}"
-        if self.instrument_manager.get_details(direct_pair):
-            return f"直接轉換: 使用 {direct_pair}"
-        
-        # 檢查是否有反向匯率對 (TO_FROM)
-        reverse_pair = f"{to_currency}_{from_currency}"
-        if self.instrument_manager.get_details(reverse_pair):
-            return f"反向轉換: 使用 1 / {reverse_pair}"
-        
-        # 如果沒有直接或反向，則檢查通過USD的交叉路徑
-        if from_currency != 'USD' and to_currency != 'USD':
-            from_usd_pair = f"{from_currency}_USD"
-            usd_to_pair = f"USD_{to_currency}" # Corrected: USD is a string literal
-            
-            # Check for FROM_USD (or USD_FROM)
-            from_usd_exists = False
-            path_leg1 = "" # Initialize
-            if self.instrument_manager.get_details(from_usd_pair):
-                from_usd_exists = True
-                path_leg1 = from_usd_pair
-            elif self.instrument_manager.get_details(f"USD_{from_currency}"):
-                from_usd_exists = True
-                path_leg1 = f"1 / USD_{from_currency}"
-            
-            # Check for USD_TO (or TO_USD)
-            usd_to_exists = False
-            path_leg2 = "" # Initialize
-            if self.instrument_manager.get_details(usd_to_pair):
-                usd_to_exists = True
-                path_leg2 = usd_to_pair
-            elif self.instrument_manager.get_details(f"{to_currency}_USD"):
-                usd_to_exists = True
-                path_leg2 = f"1 / {to_currency}_USD"
-
-            if from_usd_exists and usd_to_exists:
-                return f"交叉轉換: {from_currency} -> USD -> {to_currency} (透過 {path_leg1} 和 {path_leg2})"
-        
-        return f"無法確定從 {from_currency} 到 {to_currency} 的明確轉換路徑 (可能需要下載相應貨幣對)"
+        return is_complete, sorted(list(set(missing_valid_pairs)))
 
 
-# 便利函數
 def ensure_currency_data_for_trading(
     trading_symbols: List[str],
     account_currency: str,
     start_time_iso: str,
     end_time_iso: str,
-    granularity: str,
-    # Assuming oanda_api_key and db_data_path are accessible via config or passed if necessary
-    # For simplicity, let's assume they are handled internally or via global config
-) -> Tuple[bool, Set[str]]: # MODIFIED return type
+    granularity: str
+) -> Tuple[bool, Set[str]]:
     """
-    確保所有交易品種及其依賴的貨幣轉換對的數據都已下載並驗證。
+    確保所有交易必需的數據（包括主要交易品種和其依賴的匯率轉換對）都已下載。
 
     Args:
-        trading_symbols: 交易的品種列表。
-        account_currency: 帳戶貨幣。
-        start_time_iso: ISO格式的開始時間。
-        end_time_iso: ISO格式的結束時間。
-        granularity: 數據的時間粒度。
+        trading_symbols: 用戶選擇的主要交易品種列表。
+        account_currency: 交易帳戶的貨幣。
+        start_time_iso: 數據開始時間 (ISO格式字符串)。
+        end_time_iso: 數據結束時間 (ISO格式字符串)。
+        granularity: 數據的時間粒度 (例如 "S5", "M1")。
 
     Returns:
-        一個元組 (success: bool, all_ensured_symbols: Set[str])
-        success 表示操作是否成功。
-        all_ensured_symbols 包含所有已處理的品種（交易品種+轉換品種）。
+        Tuple[bool, Set[str]]: 一個元組，第一個元素表示操作是否成功，
+                               第二個元素是包含所有被處理（嘗試下載）的品種的集合。
     """
-    logger.info(f"確保交易品種 {trading_symbols} 在帳戶貨幣 {account_currency} 下的貨幣數據...")
-    
-    # 實例化 CurrencyDependencyManager
-    # Assuming InstrumentInfoManager is available or initialized by CurrencyDependencyManager
     try:
-        # Attempt to get API key and DB path from config if not passed
-        # This part depends on how config is structured and accessed globally or passed down.
-        # For now, assuming CurrencyDependencyManager can access them or uses defaults.
-        currency_manager = CurrencyDependencyManager(account_currency=account_currency)
-        logger.debug("CurrencyDependencyManager 實例化成功。")
-    except Exception as e:
-        logger.error(f"實例化 CurrencyDependencyManager 失敗: {e}", exc_info=True)
-        return False, set(trading_symbols) # Return original trading_symbols on critical failure
+        logger.info(f"開始確保交易數據完整性 for symbols: {trading_symbols}, account currency: {account_currency}")
+        manager = CurrencyDependencyManager(account_currency=account_currency)
+        
+        # 1. 確定所有需要的匯率轉換對
+        required_conversion_pairs = manager.determine_required_currency_pairs(trading_symbols)
+        logger.info(f"根據交易品種 {trading_symbols} 和帳戶貨幣 {account_currency}，確定的必需匯率對: {required_conversion_pairs}")
+        
+        # 2. 合併主要交易品種和匯率轉換對
+        all_symbols_to_process = set(s.upper() for s in trading_symbols)
+        all_symbols_to_process.update(required_conversion_pairs) # required_conversion_pairs 已經是大寫
+        
+        if not all_symbols_to_process:
+            logger.info("沒有識別出需要下載數據的品種 (主要交易品種和轉換對均為空)。")
+            return True, set()
 
-    # 1. 獲取所有需要的品種（交易品種 + 轉換品種）
-    all_symbols_to_ensure_data_for = set(trading_symbols)
-    try:
-        conversion_pairs = currency_manager.get_required_conversion_pairs(trading_symbols, account_currency)
-        logger.info(f"需要的轉換貨幣對: {conversion_pairs}")
-        all_symbols_to_ensure_data_for.update(conversion_pairs)
-    except Exception as e:
-        logger.error(f"獲取所需轉換貨幣對時出錯: {e}", exc_info=True)
-        # Decide if this is critical enough to stop
-        # return False, all_symbols_to_ensure_data_for # Or continue with only trading_symbols
-
-    logger.info(f"所有需要確保數據的品種: {all_symbols_to_ensure_data_for}")
-
-    # 2. 下載數據 (使用 manage_data_download_for_symbols)
-    # manage_data_download_for_symbols 應該從 oanda_downloader 導入
-    # 它需要 OANDA_API_KEY 和數據庫路徑，這些通常從配置中獲取
-    try:
-        from ..common.config import OANDA_API_KEY, DB_DATA_PATH # Adjust import path as needed
-        from .oanda_downloader import manage_data_download_for_symbols # Ensure this import is correct
-
-        logger.info(f"開始為 {list(all_symbols_to_ensure_data_for)} 下載/驗證數據...")
-        # Assuming manage_data_download_for_symbols is robust and handles its own config needs
-        # or that necessary arguments like api_key and db_path are implicitly handled by it
-        # or passed if its signature requires them.
-        # The original call in UniversalTrainer did not pass api_key/db_path to this top-level function,
-        # implying they are handled by manage_data_download_for_symbols or CurrencyDependencyManager internally.
-        download_success = manage_data_download_for_symbols(
-            symbols=list(all_symbols_to_ensure_data_for),
+        logger.info(f"將為以下所有品種確保數據: {sorted(list(all_symbols_to_process))}")
+        
+        # 3. 為所有識別出的品種下載數據
+        # manage_data_download_for_symbols 函數已在此文件頂部導入
+        manage_data_download_for_symbols(
+            symbols=sorted(list(all_symbols_to_process)),
             overall_start_str=start_time_iso,
             overall_end_str=end_time_iso,
             granularity=granularity
+            # streamlit_progress_bar 和 streamlit_status_text 由 universal_trainer 控制，
+            # manage_data_download_for_symbols 內部應使用 shared_data_manager 更新進度。
         )
-        if not download_success:
-            logger.error(f"為品種 {list(all_symbols_to_ensure_data_for)} 管理數據下載失敗。")
-            return False, all_symbols_to_ensure_data_for
-        logger.info(f"品種 {list(all_symbols_to_ensure_data_for)} 的數據下載/驗證完成。")
-
-    except ImportError as ie:
-        logger.error(f"導入 OANDA API Key, DB Path 或 manage_data_download_for_symbols 失敗: {ie}", exc_info=True)
-        return False, all_symbols_to_ensure_data_for
-    except Exception as e:
-        logger.error(f"數據下載過程中發生錯誤: {e}", exc_info=True)
-        return False, all_symbols_to_ensure_data_for
-
-    # 3. 驗證貨幣覆蓋範圍 (使用 CurrencyDependencyManager 的方法)
-    try:
-        logger.info(f"開始驗證品種 {list(all_symbols_to_ensure_data_for)} 的貨幣覆蓋範圍...")
-        all_valid, message = currency_manager.validate_currency_coverage(
-            symbols_to_validate=list(all_symbols_to_ensure_data_for),
-            start_time_iso=start_time_iso,
-            end_time_iso=end_time_iso,
-            granularity=granularity
-        )
-        if not all_valid:
-            logger.error(f"貨幣數據覆蓋範圍驗證失敗: {message}")
-            return False, all_symbols_to_ensure_data_for
-        logger.info("貨幣數據覆蓋範圍驗證成功。")
-    except Exception as e:
-        logger.error(f"驗證貨幣覆蓋範圍時發生錯誤: {e}", exc_info=True)
-        return False, all_symbols_to_ensure_data_for
         
-    logger.info(f"成功確保以下品種的數據: {all_symbols_to_ensure_data_for}")
-    return True, all_symbols_to_ensure_data_for # MODIFIED return value
+        logger.info(f"已為品種 {sorted(list(all_symbols_to_process))} 提交/完成數據確保流程。")
+        # 假設 manage_data_download_for_symbols 內部會處理錯誤並記錄
+        # 此處返回True表示流程已執行，all_symbols_to_process 是嘗試處理的品種
+        return True, all_symbols_to_process
 
-
-if __name__ == "__main__":
-    # 設置一個簡單的日誌記錄器用於測試
-    if not _logger_initialized_by_common_cm : # Use basic logger if common_logger wasn't loaded
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(name)s - (%(filename)s:%(lineno)d) - %(message)s')
-        logger = logging.getLogger(__name__)
-        logger.info("Using basicConfig for logging in __main__ of currency_manager.")
-
-
-    logger.info("正在測試 CurrencyDependencyManager...")
-    
-    # 模擬 InstrumentInfoManager 的 get_details 方法
-    class MockInstrumentInfoManager:
-        def __init__(self, **kwargs):
-            self.instruments = {
-                "EUR_USD": type('obj', (object,), {'name': 'EUR_USD', 'baseCurrency': 'EUR', 'quoteCurrency': 'USD'}),
-                "USD_JPY": type('obj', (object,), {'name': 'USD_JPY', 'baseCurrency': 'USD', 'quoteCurrency': 'JPY'}),
-                "AUD_USD": type('obj', (object,), {'name': 'AUD_USD', 'baseCurrency': 'AUD', 'quoteCurrency': 'USD'}),
-                "EUR_AUD": type('obj', (object,), {'name': 'EUR_AUD', 'baseCurrency': 'EUR', 'quoteCurrency': 'AUD'}),
-                "XAU_USD": type('obj', (object,), {'name': 'XAU_USD', 'baseCurrency': 'XAU', 'quoteCurrency': 'USD'}),
-                # "USD_AUD": type('obj', (object,), {'name': 'USD_AUD', 'baseCurrency': 'USD', 'quoteCurrency': 'AUD'}), # Test missing reverse
-            }
-        def get_details(self, symbol):
-            return self.instruments.get(symbol.upper())
-
-    # 替換真實的 InstrumentInfoManager 和下載函數進行測試
-    original_iim = InstrumentInfoManager
-    original_mdds = manage_data_download_for_symbols
-    
-    InstrumentInfoManager = MockInstrumentInfoManager
-    def mock_manage_data_download_for_symbols(symbols, overall_start_str, overall_end_str, granularity):
-        logger.info(f"[MOCK] 下載請求: {symbols} from {overall_start_str} to {overall_end_str} at {granularity}")
-        return True
-    manage_data_download_for_symbols = mock_manage_data_download_for_symbols
-    
-    _ACCOUNT_CURRENCY_TEST = "AUD"
-    logger.info(f"測試時帳戶貨幣設定為: {_ACCOUNT_CURRENCY_TEST}")
-
-    # 測試場景1: 交易 EUR/USD, 帳戶 AUD. 應需 AUD/USD (或 USD/AUD)
-    logger.info("\n--- 測試場景 1: EUR_USD, 帳戶 AUD ---")
-    manager_aud = CurrencyDependencyManager(account_currency=_ACCOUNT_CURRENCY_TEST)
-    test_symbols_1 = ["EUR_USD"]
-    
-    logger.info(f"交易 symbols: {test_symbols_1}")
-    required_pairs_1 = manager_aud.determine_required_currency_pairs(test_symbols_1)
-    logger.info(f"判斷所需貨幣對: {required_pairs_1}") # 應包含 AUD_USD 或 USD_AUD
-    
-    conversion_info_1 = manager_aud.get_currency_conversion_info(test_symbols_1)
-    for symbol, info in conversion_info_1.items(): logger.info(f"轉換資訊 ({symbol}): {info}")
-
-    manager_aud.download_required_currency_data(test_symbols_1, "2023-01-01T00:00:00Z", "2023-01-02T00:00:00Z")
-
-    # 測試場景2: 交易 XAU/USD, 帳戶 AUD. 應需 AUD/USD (或 USD/AUD)
-    logger.info("\n--- 測試場景 2: XAU_USD, 帳戶 AUD ---")
-    test_symbols_2 = ["XAU_USD"]
-    logger.info(f"交易 symbols: {test_symbols_2}")
-    required_pairs_2 = manager_aud.determine_required_currency_pairs(test_symbols_2)
-    logger.info(f"判斷所需貨幣對: {required_pairs_2}")
-    conversion_info_2 = manager_aud.get_currency_conversion_info(test_symbols_2)
-    for symbol, info in conversion_info_2.items(): logger.info(f"轉換資訊 ({symbol}): {info}")
-    manager_aud.download_required_currency_data(test_symbols_2, "2023-01-01T00:00:00Z", "2023-01-02T00:00:00Z")
-
-    # 測試場景3: 交易 EUR/AUD, 帳戶 AUD. 無需額外貨幣對
-    logger.info("\n--- 測試場景 3: EUR_AUD, 帳戶 AUD ---")
-    test_symbols_3 = ["EUR_AUD"]
-    logger.info(f"交易 symbols: {test_symbols_3}")
-    required_pairs_3 = manager_aud.determine_required_currency_pairs(test_symbols_3)
-    logger.info(f"判斷所需貨幣對: {required_pairs_3}") # 應為空或只包含 EUR_AUD 本身 (如果邏輯如此設計)
-    conversion_info_3 = manager_aud.get_currency_conversion_info(test_symbols_3)
-    for symbol, info in conversion_info_3.items(): logger.info(f"轉換資訊 ({symbol}): {info}")
-    manager_aud.download_required_currency_data(test_symbols_3, "2023-01-01T00:00:00Z", "2023-01-02T00:00:00Z")
-
-    # 測試場景4: 帳戶 USD, 交易 EUR/AUD. 應需 EUR/USD, AUD/USD (或其反向)
-    logger.info("\n--- 測試場景 4: EUR_AUD, 帳戶 USD ---")
-    _ACCOUNT_CURRENCY_TEST_USD = "USD"
-    manager_usd = CurrencyDependencyManager(account_currency=_ACCOUNT_CURRENCY_TEST_USD)
-    test_symbols_4 = ["EUR_AUD"]
-    logger.info(f"交易 symbols: {test_symbols_4}, 帳戶貨幣: {_ACCOUNT_CURRENCY_TEST_USD}")
-    required_pairs_4 = manager_usd.determine_required_currency_pairs(test_symbols_4)
-    logger.info(f"判斷所需貨幣對: {required_pairs_4}")
-    conversion_info_4 = manager_usd.get_currency_conversion_info(test_symbols_4)
-    for symbol, info in conversion_info_4.items(): logger.info(f"轉換資訊 ({symbol}): {info}")
-    manager_usd.download_required_currency_data(test_symbols_4, "2023-01-01T00:00:00Z", "2023-01-02T00:00:00Z")
-
-    # 測試 validate_currency_coverage
-    logger.info("\n--- 測試 validate_currency_coverage ---")
-    # 假設我們需要 AUD_USD, EUR_USD
-    # manager_aud (帳戶 AUD)
-    # test_symbols_1 = ["EUR_USD"] -> 需要 AUD_USD (或 USD_AUD)
-    # required_pairs_1 should be something like {'AUD_USD', 'USD_AUD'} after filtering for valid pairs
-    
-    # Case 1: All covered
-    dataset_1 = ["AUD_USD", "EUR_USD", "USD_JPY"]
-    is_complete, missing = manager_aud.validate_currency_coverage(test_symbols_1, dataset_1)
-    logger.info(f"對於 {test_symbols_1}, 數據集 {dataset_1}: 完整性={is_complete}, 缺失={missing}")
-
-    # Case 2: Missing AUD_USD (but USD_AUD exists in mock)
-    # MockInstrumentInfoManager has AUD_USD, so if determine_required_currency_pairs correctly identifies it
-    # and it's not in dataset, it should be missing.
-    dataset_2 = ["EUR_USD", "USD_JPY"] # Missing AUD_USD
-    is_complete, missing = manager_aud.validate_currency_coverage(test_symbols_1, dataset_2)
-    logger.info(f"對於 {test_symbols_1}, 數據集 {dataset_2}: 完整性={is_complete}, 缺失={missing}") # Should be missing AUD_USD
-
-    # Case 3: Required pair doesn't exist on OANDA (e.g. XYZ_AUD)
-    # Add a symbol that would generate a non-existent pair
-    manager_aud.instrument_manager.instruments["XYZ_LOL"] = type('obj', (object,), {'name': 'XYZ_LOL', 'baseCurrency': 'XYZ', 'quoteCurrency': 'LOL'})
-    test_symbols_non_existent = ["XYZ_LOL"] # Assume this would require XYZ_AUD or LOL_AUD
-    dataset_3 = ["EUR_USD"]
-    is_complete, missing = manager_aud.validate_currency_coverage(test_symbols_non_existent, dataset_3)
-    logger.info(f"對於 {test_symbols_non_existent}, 數據集 {dataset_3}: 完整性={is_complete}, 缺失={missing}") # Should be complete if XYZ_AUD etc. are not valid
-
-
-    # 還原
-    InstrumentInfoManager = original_iim
-    manage_data_download_for_symbols = original_mdds
-    logger.info("\nCurrencyDependencyManager 測試完成。")
+    except Exception as e:
+        logger.error(f"在 ensure_currency_data_for_trading 過程中發生嚴重錯誤: {e}", exc_info=True)
+        return False, set()

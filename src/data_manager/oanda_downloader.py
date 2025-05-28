@@ -74,12 +74,13 @@ def format_datetime_for_oanda(dt_obj: datetime) -> str:
 
 def fetch_candles_batch(symbol: str, granularity: str,
                         start_time_iso: str, end_time_iso: str,
+                        price_type: str, # ADDED: 'B' for Bid, 'A' for Ask, 'M' for Mid
                         count: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
     if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
         logger.error("API金鑰或賬戶ID未配置，無法獲取蠟燭圖數據。")
         return None
     endpoint = f"{OANDA_BASE_URL}/instruments/{symbol}/candles"
-    params: Dict[str, Any] = {"granularity": granularity, "price": "BA"}
+    params: Dict[str, Any] = {"granularity": granularity, "price": price_type} # MODIFIED: Use price_type
     if count is not None:
         params["count"] = min(count, OANDA_MAX_BATCH_CANDLES)
         params["from"] = start_time_iso
@@ -130,6 +131,10 @@ def fetch_candles_batch(symbol: str, granularity: str,
 def parse_candles_to_dataframe(candles_data: List[Dict[str, Any]], symbol: str) -> pd.DataFrame:
     if not candles_data: return pd.DataFrame()
     records = []
+    # This function expects candles_data to have 'bid' and 'ask' keys if it's from a 'BA' request.
+    # For the new approach, this function will NOT be directly used by download_historical_data_for_period.
+    # It's kept for potential other uses or if 'BA' requests are ever fixed/used elsewhere.
+    # The new logic in download_historical_data_for_period will construct records directly.
     for candle in candles_data:
         if not candle.get("complete", True):
             logger.debug(f"跳過不完整的蠟燭圖數據: {candle.get('time')} for {symbol}")
@@ -158,41 +163,119 @@ def download_historical_data_for_period(symbol: str, granularity: str,
                                         progress_callback: Optional[callable] = None,
                                         total_segments_for_progress: int = 1,
                                         current_segment_for_progress: int = 1):
-    logger.info(f"開始為 {symbol} ({granularity}) 下載數據，時段: {format_datetime_for_oanda(period_start_dt)} 至 {format_datetime_for_oanda(period_end_dt)}")
+    logger.info(f"開始為 {symbol} ({granularity}) 下載 Bid/Ask 數據，時段: {format_datetime_for_oanda(period_start_dt)} 至 {format_datetime_for_oanda(period_end_dt)}")
     all_candles_df = pd.DataFrame()
     current_fetch_start_dt = period_start_dt
-    granularity_delta_seconds = get_granularity_seconds(granularity) # get_granularity_seconds 應從config導入
+    granularity_delta_seconds = get_granularity_seconds(granularity)
     api_request_failed_mid_period = False
     while current_fetch_start_dt < period_end_dt:
         batch_start_iso = format_datetime_for_oanda(current_fetch_start_dt)
-        max_duration_for_batch = timedelta(seconds=(OANDA_MAX_BATCH_CANDLES -1) * granularity_delta_seconds) # OANDA_MAX_BATCH_CANDLES 應從config導入
+        max_duration_for_batch = timedelta(seconds=(OANDA_MAX_BATCH_CANDLES - 1) * granularity_delta_seconds)
         batch_end_dt_theoretical = current_fetch_start_dt + max_duration_for_batch
         batch_end_dt_actual = min(batch_end_dt_theoretical, period_end_dt)
         batch_end_iso = format_datetime_for_oanda(batch_end_dt_actual)
-        if batch_start_iso >= batch_end_iso and granularity_delta_seconds > 0 :
-             logger.debug(f"計算出的批次開始({batch_start_iso})已在結束({batch_end_iso})之後，停止批次下載。")
-             break
-        logger.debug(f"準備獲取批次: {symbol} from {batch_start_iso} to {batch_end_iso}")
-        candles_data = fetch_candles_batch(symbol, granularity, batch_start_iso, batch_end_iso)
-        time.sleep(OANDA_REQUEST_INTERVAL) # OANDA_REQUEST_INTERVAL 應從config導入
-        if candles_data is None:
-            logger.error(f"獲取批次 for {symbol} from {batch_start_iso} to {batch_end_iso} 失敗。停止此大時間段的下載。")
+
+        if batch_start_iso >= batch_end_iso and granularity_delta_seconds > 0:
+            logger.debug(f"計算出的批次開始({batch_start_iso})已在結束({batch_end_iso})之後，停止批次下載。")
+            break
+
+        logger.debug(f"準備獲取批次 (Bid): {symbol} from {batch_start_iso} to {batch_end_iso}")
+        bid_candles_data = fetch_candles_batch(symbol, granularity, batch_start_iso, batch_end_iso, price_type='B')
+        time.sleep(OANDA_REQUEST_INTERVAL)
+        
+        logger.debug(f"準備獲取批次 (Ask): {symbol} from {batch_start_iso} to {batch_end_iso}")
+        ask_candles_data = fetch_candles_batch(symbol, granularity, batch_start_iso, batch_end_iso, price_type='A')
+        time.sleep(OANDA_REQUEST_INTERVAL)
+
+        if bid_candles_data is None or ask_candles_data is None:
+            logger.error(f"獲取 Bid 或 Ask 批次 for {symbol} from {batch_start_iso} to {batch_end_iso} 失敗。停止此大時間段的下載。")
             api_request_failed_mid_period = True
             break
-        elif not candles_data:
-            logger.info(f"批次 for {symbol} from {batch_start_iso} to {batch_end_iso} 未返回任何蠟燭數據。推進時間窗口...")
-            current_fetch_start_dt = batch_end_dt_actual + timedelta(seconds=granularity_delta_seconds)
-        else:
-            df_batch = parse_candles_to_dataframe(candles_data, symbol)
-            if not df_batch.empty:
-                all_candles_df = pd.concat([all_candles_df, df_batch], ignore_index=True)
-                last_candle_time_in_batch = df_batch['time'].iloc[-1]
+        
+        bid_records = []
+        if bid_candles_data:
+            for candle in bid_candles_data:
+                if not candle.get("complete", True): continue
+                try:
+                    record = {
+                        "time": dateutil_parser.isoparse(candle["time"]), "symbol": symbol,
+                        "bid_open": float(candle["bid"]["o"]), "bid_high": float(candle["bid"]["h"]),
+                        "bid_low": float(candle["bid"]["l"]), "bid_close": float(candle["bid"]["c"]),
+                        "volume": int(candle["volume"]),
+                    }
+                    bid_records.append(record)
+                except (KeyError, ValueError) as e:
+                    logger.warning(f"解析 Bid 蠟燭數據時發生錯誤: {e} in candle: {candle} for symbol {symbol}")
+        df_bid = pd.DataFrame(bid_records)
+
+        ask_records = []
+        if ask_candles_data:
+            for candle in ask_candles_data:
+                if not candle.get("complete", True): continue
+                try:
+                    record = {
+                        "time": dateutil_parser.isoparse(candle["time"]), "symbol": symbol,
+                        "ask_open": float(candle["ask"]["o"]), "ask_high": float(candle["ask"]["h"]),
+                        "ask_low": float(candle["ask"]["l"]), "ask_close": float(candle["ask"]["c"]),
+                        "volume": int(candle["volume"]), # Also parse volume from ask candles
+                    }
+                    ask_records.append(record)
+                except (KeyError, ValueError) as e:
+                    logger.warning(f"解析 Ask 蠟燭數據時發生錯誤: {e} in candle: {candle} for symbol {symbol}")
+        df_ask = pd.DataFrame(ask_records)
+
+        df_batch = pd.DataFrame()
+        if not df_bid.empty and not df_ask.empty:
+            df_batch = pd.merge(df_bid, df_ask.drop(columns=['volume'] if 'volume' in df_ask.columns and 'volume' in df_bid.columns else []), on=["time", "symbol"], how="outer")
+        elif not df_bid.empty:
+            df_batch = df_bid
+            for col_ask in ["ask_open", "ask_high", "ask_low", "ask_close"]: df_batch[col_ask] = float('nan')
+        elif not df_ask.empty:
+            df_batch = df_ask
+            for col_bid in ["bid_open", "bid_high", "bid_low", "bid_close"]: df_batch[col_bid] = float('nan')
+            # Ensure 'volume' column exists if only ask data is present
+            if 'volume' not in df_batch.columns and ask_candles_data and len(ask_candles_data) > 0 and 'volume' in ask_candles_data[0]:
+                 # This case should be covered if df_ask is created with volume
+                 pass
+
+
+        if not df_batch.empty:
+            # Ensure all PRICE_COLUMNS are present, filling with NaN if necessary
+            # This is important if one side (bid/ask) was completely missing for a timestamp
+            # or if the merge didn't create all expected columns.
+            # The PRICE_COLUMNS from config should be the definitive list.
+            for col_name in PRICE_COLUMNS:
+                if col_name not in df_batch.columns and col_name not in ['symbol', 'time']: # symbol and time are from merge keys
+                    df_batch[col_name] = float('nan')
+            
+            # Reorder columns to match PRICE_COLUMNS if defined and available
+            # This helps ensure consistency before inserting into DB.
+            # Example: expected_cols = [col for col in PRICE_COLUMNS if col in df_batch.columns]
+            # df_batch = df_batch[expected_cols]
+
+
+        if not df_batch.empty:
+            all_candles_df = pd.concat([all_candles_df, df_batch], ignore_index=True)
+            # Determine last_candle_time_in_batch carefully if df_batch could be sparse
+            # It's safer to use current_fetch_start_dt advancement based on batch_end_dt_actual
+            # However, if data is gappy, using actual last candle time is better.
+            if not df_batch['time'].empty:
+                last_candle_time_in_batch = df_batch['time'].max() # Use max time from the merged batch
                 current_fetch_start_dt = last_candle_time_in_batch + timedelta(seconds=granularity_delta_seconds)
                 if progress_callback:
                     progress_callback(format_datetime_for_oanda(last_candle_time_in_batch), total_segments_for_progress, current_segment_for_progress)
-            else:
-                logger.warning(f"批次 for {symbol} from {batch_start_iso} to {batch_end_iso} 解析後無有效數據。推進時間窗口...")
+            else: # No data in this specific bid/ask combined batch, advance by theoretical window
                 current_fetch_start_dt = batch_end_dt_actual + timedelta(seconds=granularity_delta_seconds)
+
+        elif not bid_candles_data and not ask_candles_data: # Both fetches returned empty lists (not None)
+            logger.info(f"批次 for {symbol} (Bid/Ask) from {batch_start_iso} to {batch_end_iso} 未返回任何蠟燭數據。推進時間窗口...")
+            current_fetch_start_dt = batch_end_dt_actual + timedelta(seconds=granularity_delta_seconds)
+        else: # One or both fetches failed (returned None) - this case is handled by api_request_failed_mid_period check earlier
+            # Or, parsing resulted in empty dataframes, but candles_data was not empty.
+            logger.warning(f"批次 for {symbol} (Bid/Ask) from {batch_start_iso} to {batch_end_iso} 解析後無有效數據或部分失敗。推進時間窗口...")
+            current_fetch_start_dt = batch_end_dt_actual + timedelta(seconds=granularity_delta_seconds)
+
+
     if not all_candles_df.empty:
         all_candles_df = all_candles_df.drop_duplicates(subset=['time']).sort_values(by='time').reset_index(drop=True)
         logger.info(f"為 {symbol} ({granularity}) 在時段內下載並解析了 {len(all_candles_df)} 條不重複的蠟燭數據。")
