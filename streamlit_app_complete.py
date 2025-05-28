@@ -12,9 +12,19 @@ import sys
 os.environ['TORCH_CPP_LOG_LEVEL'] = 'ERROR'
 os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'
 
-# Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warning, 3=error
+# Suppress TensorFlow warnings more aggressively
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0=all, 1=info, 2=warning, 3=error
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN warnings
+os.environ['TF_DISABLE_DEPRECATED_WARNINGS'] = '1'  # Disable deprecated warnings
+os.environ['TF_ENABLE_DEPRECATED_WARNINGS'] = '0'  # Disable deprecated warnings
+
+# Additional warnings suppression
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='streamlit')
+warnings.filterwarnings('ignore', message='.*missing ScriptRunContext.*')
+warnings.filterwarnings('ignore', message='.*Session state does not function.*')
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='tensorflow')
+warnings.filterwarnings('ignore', message='.*tf.reset_default_graph.*')
 
 # Fix for PyTorch 2.7.0+ Streamlit compatibility
 try:
@@ -79,6 +89,21 @@ try:
     GPU_AVAILABLE = True
 except ImportError:
     GPU_AVAILABLE = False
+
+# Suppress TensorFlow warnings immediately after imports
+try:
+    import tensorflow as tf
+    # Disable TensorFlow deprecated warnings using the new API
+    tf.get_logger().setLevel('ERROR')
+    if hasattr(tf, 'compat') and hasattr(tf.compat, 'v1'):
+        tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+    # Additional warning suppression
+    import logging
+    logging.getLogger('tensorflow').setLevel(logging.ERROR)
+except ImportError:
+    pass
+except Exception:
+    pass
 
 # Try to import trainer, use fallback if failed
 try:

@@ -18,6 +18,10 @@ def setup_environment():
     # 禁用一些可能導致問題的 PyTorch 功能
     os.environ['PYTORCH_DISABLE_PER_OP_PROFILING'] = '1'
     
+    # 設置 TensorFlow 環境變量以抑制警告
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 抑制 INFO 和 WARNING
+    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # 禁用 oneDNN 優化警告
+    
     # 設置項目路徑
     project_root = Path(__file__).resolve().parent
     if str(project_root) not in sys.path:
