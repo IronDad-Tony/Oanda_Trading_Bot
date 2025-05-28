@@ -1,57 +1,71 @@
 # src/common/shared_data_manager.py
 """
-共享數據管理器 - 線程安全的訓練數據同步
+共享數據管理器 - 線程安全的訓練數據同步 (使用 multiprocessing.Queue)
 用於在訓練線程和Streamlit UI之間安全地共享數據
 """
 
 import threading
 import time
-import json
+# import json # No longer needed for JSON
 from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
-from pathlib import Path
+# from pathlib import Path # No longer needed for self.save_path
 import numpy as np
+import multiprocessing # Added
+from queue import Empty as QueueEmptyException # Added for non-blocking get
 
 try:
-    from common.config import INITIAL_CAPITAL, LOGS_DIR
+    from common.config import INITIAL_CAPITAL # LOGS_DIR no longer needed here
     from common.logger_setup import logger
 except ImportError:
     import logging
     logger = logging.getLogger(__name__)
     INITIAL_CAPITAL = 100000
-    LOGS_DIR = Path("logs")
+    # LOGS_DIR = Path("logs") # No longer needed
 
 class SharedTrainingDataManager:
     """
     共享訓練數據管理器
     
-    使用線程安全的數據結構來在訓練線程和UI線程之間共享數據
-    避免直接訪問Streamlit的session_state導致的ScriptRunContext問題
+    使用 multiprocessing.Manager().Queue 和線程安全的數據結構來在訓練線程/進程和UI線程之間共享數據。
     """
     
+    _manager = None # Class variable to hold the multiprocessing.Manager instance
+
+    @classmethod
+    def get_manager(cls):
+        if cls._manager is None:
+            cls._manager = multiprocessing.Manager()
+        return cls._manager
+
     def __init__(self, max_metrics=2000, max_trades=10000):
         """
         初始化共享數據管理器
         
         Args:
-            max_metrics: 最大保存的訓練指標數量
-            max_trades: 最大保存的交易記錄數量
+            max_metrics: 最大保存的訓練指標數量 (用於內部deque)
+            max_trades: 最大保存的交易記錄數量 (用於內部deque)
         """
-        self.lock = threading.RLock()  # 使用可重入鎖
+        self.lock = threading.RLock()  # 可重入鎖，主要保護內部狀態和deques
         
         # 訓練狀態
-        self.training_status = 'idle'  # idle, running, completed, error
+        self.training_status = 'idle'
         self.training_progress = 0.0
         self.training_error = None
         self.stop_requested = False
         self.training_start_time = None
         
-        # 使用deque作為線程安全的序列，自動限制大小
+        # multiprocessing Queues for communication from trainer
+        manager = self.get_manager()
+        self.metrics_mp_queue = manager.Queue(maxsize=max_metrics * 2) # Larger buffer for mp queue
+        self.trades_mp_queue = manager.Queue(maxsize=max_trades * 2)  # Larger buffer for mp queue
+
+        # Internal deques for UI to read from (populated from mp_queues)
         self.metrics_queue = deque(maxlen=max_metrics)
         self.trade_queue = deque(maxlen=max_trades)
         
-        # 當前統計數據
+        # 當前統計數據 (由訓練過程直接更新，也通過鎖保護)
         self.current_metrics = {
             'step': 0,
             'reward': 0.0,
@@ -63,11 +77,8 @@ class SharedTrainingDataManager:
             'timestamp': datetime.now(timezone.utc)
         }
         
-        # 交易品種統計
-        self.symbol_stats = {}
-        
-        # 性能統計
-        self.performance_stats = {
+        self.symbol_stats = {} # Updated by add_trade_record
+        self.performance_stats = { # Updated by add_training_metric
             'total_episodes': 0,
             'total_steps': 0,
             'best_reward': float('-inf'),
@@ -76,13 +87,38 @@ class SharedTrainingDataManager:
             'training_efficiency': 0.0
         }
         
-        # 持久化設置
-        self.save_path = LOGS_DIR / "shared_training_data.json"
-        self.auto_save_interval = 300  # 5分鐘自動保存一次
-        self.last_save_time = time.time()
+        # No more file-based persistence attributes
+        # self.save_path = LOGS_DIR / "shared_training_data.json"
+        # self.auto_save_interval = 300
+        # self.last_save_time = time.time()
         
-        logger.info("SharedTrainingDataManager 初始化完成")
+        logger.info("SharedTrainingDataManager 初始化完成 (使用 multiprocessing.Queue)")
     
+    def _pull_data_from_mp_queues(self):
+        """Internal method to pull data from multiprocessing queues into internal deques."""
+        with self.lock: # Protect access to internal deques
+            # Process metrics queue
+            while True:
+                try:
+                    metric = self.metrics_mp_queue.get_nowait()
+                    self.metrics_queue.append(metric)
+                except QueueEmptyException:
+                    break
+                except Exception as e:
+                    logger.error(f"Error pulling from metrics_mp_queue: {e}", exc_info=False) # Log lightly
+                    break 
+            
+            # Process trades queue
+            while True:
+                try:
+                    trade = self.trades_mp_queue.get_nowait()
+                    self.trade_queue.append(trade)
+                except QueueEmptyException:
+                    break
+                except Exception as e:
+                    logger.error(f"Error pulling from trades_mp_queue: {e}", exc_info=False) # Log lightly
+                    break
+
     def update_training_status(self, status: str, progress: Optional[float] = None, 
                              error: Optional[str] = None):
         """
@@ -134,16 +170,8 @@ class SharedTrainingDataManager:
                            actor_loss: Optional[float] = None, critic_loss: Optional[float] = None,
                            l2_norm: Optional[float] = None, grad_norm: Optional[float] = None):
         """
-        添加訓練指標
-        
-        Args:
-            step: 訓練步數
-            reward: 獎勵值
-            portfolio_value: 投資組合價值
-            actor_loss: Actor網絡損失
-            critic_loss: Critic網絡損失
-            l2_norm: L2範數
-            grad_norm: 梯度範數
+        添加訓練指標 - 由訓練過程調用
+        Puts data onto metrics_mp_queue and updates current/performance stats.
         """
         metric = {
             'step': step,
@@ -153,112 +181,95 @@ class SharedTrainingDataManager:
             'critic_loss': float(critic_loss) if critic_loss is not None else 0.0,
             'l2_norm': float(l2_norm) if l2_norm is not None else 0.0,
             'grad_norm': float(grad_norm) if grad_norm is not None else 0.0,
-            'timestamp': datetime.now(timezone.utc)
+            'timestamp': datetime.now(timezone.utc).isoformat() # Store as ISO string for mp.Queue
         }
         
+        try:
+            self.metrics_mp_queue.put_nowait(metric) # Use put_nowait to avoid blocking trainer
+        except multiprocessing.queues.Full:
+            logger.warning("Metrics multiprocessing queue is full. Metric may be lost.")
+        except Exception as e:
+            logger.error(f"Error putting to metrics_mp_queue: {e}", exc_info=False)
+
+
+        # Update current and performance stats directly (thread-safe due to GIL or explicit lock if needed)
         with self.lock:
-            self.metrics_queue.append(metric)
-            self.current_metrics = metric.copy()
-            
-            # 更新性能統計
+            self.current_metrics = { # Keep a serializable copy
+                'step': step,
+                'reward': float(reward),
+                'portfolio_value': float(portfolio_value),
+                'actor_loss': float(actor_loss) if actor_loss is not None else 0.0,
+                'critic_loss': float(critic_loss) if critic_loss is not None else 0.0,
+                'l2_norm': float(l2_norm) if l2_norm is not None else 0.0,
+                'grad_norm': float(grad_norm) if grad_norm is not None else 0.0,
+                'timestamp': metric['timestamp'] # Use the same timestamp
+            }
             self.performance_stats['total_steps'] = step
             if reward > self.performance_stats['best_reward']:
-                self.performance_stats['best_reward'] = reward
+                self.performance_stats['best_reward'] = float(reward)
             if portfolio_value > self.performance_stats['best_portfolio_value']:
-                self.performance_stats['best_portfolio_value'] = portfolio_value
+                self.performance_stats['best_portfolio_value'] = float(portfolio_value)
             
-            # 自動保存檢查
-            if time.time() - self.last_save_time > self.auto_save_interval:
-                self._auto_save()
-    
+            # No more auto-save check
+            # if time.time() - self.last_save_time > self.auto_save_interval:
+            #     self._auto_save() # This method will be removed
+
     def add_trade_record(self, symbol: str, action: str, price: float, 
                         quantity: float, profit_loss: float, 
                         timestamp: Optional[datetime] = None):
         """
-        添加交易記錄
-        
-        Args:
-            symbol: 交易品種
-            action: 交易動作 ('buy', 'sell', 'hold', 'close')
-            price: 交易價格
-            quantity: 交易數量
-            profit_loss: 盈虧
-            timestamp: 時間戳
+        添加交易記錄 - 由訓練過程調用
+        Puts data onto trades_mp_queue and updates symbol_stats.
         """
+        ts = timestamp or datetime.now(timezone.utc)
         trade = {
             'symbol': symbol,
             'action': action,
             'price': float(price),
             'quantity': float(quantity),
             'profit_loss': float(profit_loss),
-            'timestamp': timestamp or datetime.now(timezone.utc)
+            'timestamp': ts.isoformat() # Store as ISO string for mp.Queue
         }
         
+        try:
+            self.trades_mp_queue.put_nowait(trade) # Use put_nowait
+        except multiprocessing.queues.Full:
+            logger.warning("Trades multiprocessing queue is full. Trade record may be lost.")
+        except Exception as e:
+            logger.error(f"Error putting to trades_mp_queue: {e}", exc_info=False)
+
+        # Update symbol_stats directly (thread-safe due to GIL or explicit lock)
         with self.lock:
-            self.trade_queue.append(trade)
-            
-            # 更新交易品種統計
             if symbol not in self.symbol_stats:
                 self.symbol_stats[symbol] = {
-                    'trades': 0,
-                    'total_profit': 0.0,
-                    'wins': 0,
-                    'losses': 0,
-                    'returns': [],
-                    'win_rate': 0.0,
-                    'avg_return': 0.0,
-                    'max_return': 0.0,
-                    'max_loss': 0.0,
-                    'sharpe_ratio': 0.0
+                    'trades': 0, 'total_profit': 0.0, 'wins': 0, 'losses': 0,
+                    'returns': [], 'win_rate': 0.0, 'avg_return': 0.0,
+                    'max_return': 0.0, 'max_loss': 0.0, 'sharpe_ratio': 0.0
                 }
             
             stats = self.symbol_stats[symbol]
             stats['trades'] += 1
-            stats['total_profit'] += profit_loss
-            stats['returns'].append(profit_loss)
-            
-            if profit_loss > 0:
-                stats['wins'] += 1
-            elif profit_loss < 0:
-                stats['losses'] += 1
-            
-            # 計算統計指標
-            if stats['trades'] > 0:
-                stats['win_rate'] = (stats['wins'] / stats['trades']) * 100
-                stats['avg_return'] = np.mean(stats['returns'])
-                stats['max_return'] = np.max(stats['returns'])
-                stats['max_loss'] = np.min(stats['returns'])
-                
-                # 計算夏普比率
-                if len(stats['returns']) > 1:
-                    returns_std = np.std(stats['returns'])
-                    stats['sharpe_ratio'] = stats['avg_return'] / returns_std if returns_std > 0 else 0
-    
+            stats['total_profit'] += float(profit_loss)
+            # For simplicity, 'returns' list for sharpe might be better calculated from the trade_queue later if needed
+            # For now, keep direct update for basic stats
+            if profit_loss > 0: stats['wins'] += 1
+            elif profit_loss < 0: stats['losses'] += 1
+            if stats['trades'] > 0: stats['win_rate'] = (stats['wins'] / stats['trades']) * 100
+            # More complex stats like avg_return, sharpe_ratio might need to pull from the deque/queue
+
     def get_latest_metrics(self, count: int = 100) -> List[Dict[str, Any]]:
-        """
-        獲取最新的訓練指標
-        
-        Args:
-            count: 獲取的數量
-            
-        Returns:
-            訓練指標列表
-        """
+        """獲取最新的訓練指標 - 由 UI 調用"""
+        self._pull_data_from_mp_queues() # Ensure internal deques are updated
         with self.lock:
-            return list(self.metrics_queue)[-count:] if self.metrics_queue else []
-    
+            # Convert ISO string timestamps back to datetime objects for UI if needed
+            # For now, assume UI can handle ISO strings or Plotly handles them.
+            return list(self.metrics_queue)[-count:]
+
     def get_latest_trades(self, count: int = 100) -> List[Dict[str, Any]]:
-        """
-        獲取最新的交易記錄
-        
-        Args:
-            count: 獲取的數量
-            
-        Returns:
-            交易記錄列表
-        """
+        """獲取最新的交易記錄 - 由 UI 調用"""
+        self._pull_data_from_mp_queues() # Ensure internal deques are updated
         with self.lock:
-            return list(self.trade_queue)[-count:] if self.trade_queue else []
+            return list(self.trade_queue)[-count:]
     
     def get_metrics_in_range(self, start_step: int, end_step: int) -> List[Dict[str, Any]]:
         """
@@ -348,6 +359,22 @@ class SharedTrainingDataManager:
     def clear_data(self):
         """清除所有數據"""
         with self.lock:
+            # Drain multiprocessing queues
+            while not self.metrics_mp_queue.empty():
+                try:
+                    self.metrics_mp_queue.get_nowait()
+                except QueueEmptyException:
+                    break
+                except Exception: # Catch any other exception during draining
+                    break
+            while not self.trades_mp_queue.empty():
+                try:
+                    self.trades_mp_queue.get_nowait()
+                except QueueEmptyException:
+                    break
+                except Exception:
+                    break
+
             self.metrics_queue.clear()
             self.trade_queue.clear()
             self.symbol_stats.clear()
@@ -358,150 +385,39 @@ class SharedTrainingDataManager:
             self.training_start_time = None
             
             self.current_metrics = {
-                'step': 0,
-                'reward': 0.0,
-                'portfolio_value': float(INITIAL_CAPITAL),
-                'actor_loss': 0.0,
-                'critic_loss': 0.0,
-                'l2_norm': 0.0,
-                'grad_norm': 0.0,
-                'timestamp': datetime.now(timezone.utc)
+                'step': 0, 'reward': 0.0, 'portfolio_value': float(INITIAL_CAPITAL),
+                'actor_loss': 0.0, 'critic_loss': 0.0, 'l2_norm': 0.0,
+                'grad_norm': 0.0, 'timestamp': datetime.now(timezone.utc).isoformat()
             }
-            
             self.performance_stats = {
-                'total_episodes': 0,
-                'total_steps': 0,
-                'best_reward': float('-inf'),
-                'best_portfolio_value': float(INITIAL_CAPITAL),
-                'avg_episode_length': 0,
+                'total_episodes': 0, 'total_steps': 0, 'best_reward': float('-inf'),
+                'best_portfolio_value': float(INITIAL_CAPITAL), 'avg_episode_length': 0,
                 'training_efficiency': 0.0
             }
-            
-            logger.info("共享數據已清除")
-    
-    def _auto_save(self):
-        """自動保存數據到文件"""
-        try:
-            # 只保存關鍵統計信息，不保存所有原始數據
-            save_data = {
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'training_status': self.training_status,
-                'training_progress': self.training_progress,
-                'current_metrics': self.current_metrics,
-                'symbol_stats': self.symbol_stats,
-                'performance_stats': self.performance_stats,
-                'training_summary': self.get_training_summary()
-            }
-            
-            self.save_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.save_path, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, indent=2, default=str)
-            
-            self.last_save_time = time.time()
-            logger.debug(f"自動保存完成: {self.save_path}")
-            
-        except Exception as e:
-            logger.warning(f"自動保存失敗: {e}")
-    
-    def save_to_file(self, file_path: Optional[Path] = None):
-        """
-        手動保存數據到文件
-        
-        Args:
-            file_path: 保存路徑，如果為None則使用默認路徑
-        """
-        save_path = file_path or self.save_path
-        
-        try:
-            with self.lock:
-                save_data = {
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
-                    'training_status': self.training_status,
-                    'training_progress': self.training_progress,
-                    'current_metrics': self.current_metrics,
-                    'symbol_stats': self.symbol_stats,
-                    'performance_stats': self.performance_stats,
-                    'training_summary': self.get_training_summary(),
-                    'recent_metrics': self.get_latest_metrics(100),
-                    'recent_trades': self.get_latest_trades(100)
-                }
-            
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(save_path, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, indent=2, default=str)
-            
-            logger.info(f"數據已保存到: {save_path}")
-            
-        except Exception as e:
-            logger.error(f"保存數據失敗: {e}")
-            raise
-    
-    def load_from_file(self, file_path: Optional[Path] = None):
-        """
-        從文件加載數據
-        
-        Args:
-            file_path: 加載路徑，如果為None則使用默認路徑
-        """
-        load_path = file_path or self.save_path
-        
-        if not load_path.exists():
-            logger.info(f"保存文件不存在: {load_path}")
-            return
-        
-        try:
-            with open(load_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            with self.lock:
-                self.training_status = data.get('training_status', 'idle')
-                self.training_progress = data.get('training_progress', 0.0)
-                self.current_metrics = data.get('current_metrics', self.current_metrics)
-                self.symbol_stats = data.get('symbol_stats', {})
-                self.performance_stats = data.get('performance_stats', self.performance_stats)
-                
-                # 恢復最近的指標和交易數據
-                recent_metrics = data.get('recent_metrics', [])
-                recent_trades = data.get('recent_trades', [])
-                
-                for metric in recent_metrics:
-                    self.metrics_queue.append(metric)
-                
-                for trade in recent_trades:
-                    self.trade_queue.append(trade)
-            
-            logger.info(f"數據已從文件加載: {load_path}")
-            
-        except Exception as e:
-            logger.error(f"加載數據失敗: {e}")
-            raise
-
+            logger.info("共享數據已清除 (包括 multiprocessing Queues)")
 
 # 全局共享數據管理器實例
-_global_shared_manager = None
-_manager_lock = threading.Lock()
+_global_shared_manager_instance = None # Renamed for clarity
+_manager_init_lock = threading.Lock() # Lock for initializing the manager instance
 
 def get_shared_data_manager() -> SharedTrainingDataManager:
     """
     獲取全局共享數據管理器實例（單例模式）
-    
-    Returns:
-        SharedTrainingDataManager實例
+    Ensures that the multiprocessing.Manager is also handled as a singleton if needed.
     """
-    global _global_shared_manager
-    
-    with _manager_lock:
-        if _global_shared_manager is None:
-            _global_shared_manager = SharedTrainingDataManager()
-            logger.info("創建全局共享數據管理器實例")
-        
-        return _global_shared_manager
+    global _global_shared_manager_instance
+    with _manager_init_lock: # Protect the instantiation of the manager and the singleton
+        if _global_shared_manager_instance is None:
+            # The SharedTrainingDataManager class now handles its own mp.Manager
+            _global_shared_manager_instance = SharedTrainingDataManager()
+            logger.info("創建全局 SharedTrainingDataManager 實例 (with mp.Manager)")
+        return _global_shared_manager_instance
 
 def reset_shared_data_manager():
     """重置全局共享數據管理器"""
-    global _global_shared_manager
+    global _global_shared_manager_instance
     
-    with _manager_lock:
-        if _global_shared_manager is not None:
-            _global_shared_manager.clear_data()
+    with _manager_init_lock:
+        if _global_shared_manager_instance is not None:
+            _global_shared_manager_instance.clear_data()
             logger.info("全局共享數據管理器已重置")
