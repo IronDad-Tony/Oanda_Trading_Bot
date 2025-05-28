@@ -156,7 +156,18 @@ DEVICE = "auto"  # 讓SACAgentWrapper自動選擇最佳設備
 
 # 混合精度訓練 (如果GPU支持且希望加速)
 USE_AMP = GPU_OPTIMIZED
-USE_CUDA_GRAPHS = GPU_OPTIMIZED  # 啟用CUDA圖優化
+
+# 數值穩定性配置
+GRADIENT_CLIP_NORM = 1.0            # 梯度裁剪範數
+ENABLE_GRADIENT_CLIPPING = True     # 是否啟用梯度裁剪
+NAN_CHECK_FREQUENCY = 500           # NaN檢查頻率
+AMP_LOSS_SCALE_INIT = 2**15         # AMP初始損失縮放因子 (降低以提高穩定性)
+
+# 如果檢測到數值不穩定，自動禁用AMP
+AUTO_DISABLE_AMP_ON_INSTABILITY = True
+
+# 早期停止容忍的NaN檢測次數
+MAX_NAN_TOLERANCE = 10
 
 # --- 風險管理參數 ---
 MAX_ACCOUNT_RISK_PERCENTAGE = 0.02  # 單筆交易最大可承受賬戶風險百分比 (例如 2%)

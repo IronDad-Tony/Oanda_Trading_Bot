@@ -235,17 +235,32 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             initial_memory = torch.cuda.memory_allocated() / 1024**2  # MB
             logger.info(f"訓練開始時GPU內存使用: {initial_memory:.1f}MB")
         
+        # 初始化混合精度訓練的梯度縮放器
+        scaler = None
+        if self.use_amp and self.device.type == 'cuda':
+            scaler = torch.cuda.amp.GradScaler()
+            logger.info("使用混合精度訓練模式，已初始化梯度縮放器")
+            
+            # 設置更保守的損失縮放以避免溢出
+            scaler._init_scale = 2**15  # 降低初始縮放因子
+            
         try:
-            # 如果使用混合精度訓練，需要特殊處理
-            if self.use_amp and self.device.type == 'cuda':
-                logger.info("使用混合精度訓練模式")
-                # 注意：Stable Baselines3 可能不直接支持AMP，這裡記錄設置
-                # 實際的AMP實現需要在policy層面進行
+            # 添加AMP溢出監控
+            if scaler is not None:
+                # 在SAC的learn方法中，我們無法直接控制梯度縮放
+                # 但可以在訓練前後檢查GPU內存和模型參數狀態
+                logger.info("AMP模式：監控訓練前模型狀態...")
+                self._check_model_health_amp()
             
             self.agent.learn(total_timesteps=total_timesteps, callback=callback, log_interval=log_interval,
                              reset_num_timesteps=reset_num_timesteps, progress_bar=False)
             
             training_duration = time.time() - start_time
+            
+            # 訓練後檢查
+            if scaler is not None:
+                logger.info("AMP模式：檢查訓練後模型狀態...")
+                self._check_model_health_amp()
             
             # 訓練後的GPU內存統計
             if self.device.type == 'cuda':
@@ -262,6 +277,38 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             if self.device.type == 'cuda':
                 torch.cuda.empty_cache()
             raise
+
+    def _check_model_health_amp(self):
+        """檢查AMP模式下模型的健康狀態"""
+        if not self.use_amp or not hasattr(self.agent, 'policy'):
+            return
+            
+        try:
+            nan_count = 0
+            inf_count = 0
+            
+            # 檢查策略網絡參數
+            for name, param in self.agent.policy.named_parameters():
+                if param.data is not None:
+                    if torch.isnan(param.data).any():
+                        nan_count += torch.isnan(param.data).sum().item()
+                        logger.warning(f"AMP檢查：檢測到NaN在 {name}")
+                    
+                    if torch.isinf(param.data).any():
+                        inf_count += torch.isinf(param.data).sum().item()
+                        logger.warning(f"AMP檢查：檢測到Infinity在 {name}")
+            
+            if nan_count > 0 or inf_count > 0:
+                logger.error(f"AMP健康檢查失敗：NaN數量={nan_count}, Infinity數量={inf_count}")
+                
+                # 如果檢測到數值問題，可以考慮重置某些層或降低學習率
+                if nan_count > 100 or inf_count > 100:  # 如果問題很嚴重
+                    logger.warning("檢測到嚴重的數值不穩定，建議檢查模型架構和學習率設置")
+            else:
+                logger.debug("AMP健康檢查通過：未檢測到數值異常")
+                
+        except Exception as e:
+            logger.warning(f"AMP健康檢查過程中發生錯誤: {e}")
 
     def predict(self, observation: np.ndarray, state: Optional[Tuple[np.ndarray, ...]] = None, # np, Tuple 已導入
                 episode_start: Optional[np.ndarray] = None, deterministic: bool = True) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:

@@ -45,6 +45,22 @@ LOGS_DIR = _config_cb_v5.get("LOGS_DIR", Path("./logs"))
 ACCOUNT_CURRENCY = _config_cb_v5.get("ACCOUNT_CURRENCY", "AUD")
 INITIAL_CAPITAL = _config_cb_v5.get("INITIAL_CAPITAL", 100000.0) # Added INITIAL_CAPITAL
 
+try:
+    from trainer.stability_utils import NumericalStabilityMonitor
+except ImportError:
+    try:
+        from src.trainer.stability_utils import NumericalStabilityMonitor
+    except ImportError:
+        # Fallback: create a dummy class if import fails
+        class NumericalStabilityMonitor:
+            def __init__(self, *args, **kwargs): pass
+            def check_for_nans(self, *args, **kwargs): return False
+            def clip_gradients(self, *args, **kwargs): return 0.0
+            def should_check_nans(self): return False
+            def get_gradient_stats(self, *args, **kwargs): return {}
+            def get_stats(self): return {}
+        logger.warning("Could not import NumericalStabilityMonitor, using dummy implementation")
+
 
 class UniversalCheckpointCallback(BaseCallback):
     def __init__(self,
@@ -63,7 +79,10 @@ class UniversalCheckpointCallback(BaseCallback):
                  log_transformer_norm_freq: int = 1000,
                  verbose: int = 1,
                  streamlit_session_state=None,
-                 shared_data_manager=None): # Added shared_data_manager
+                 shared_data_manager=None, # Added shared_data_manager
+                 enable_gradient_clipping: bool = True,
+                 gradient_clip_norm: float = 1.0,
+                 nan_check_frequency: int = 500):
         super().__init__(verbose)
         self.save_freq = save_freq
         self.save_path = Path(save_path)
@@ -97,7 +116,20 @@ class UniversalCheckpointCallback(BaseCallback):
         self.interrupted = False
         self.streamlit_session_state = streamlit_session_state
         self.shared_data_manager = shared_data_manager # Store shared_data_manager
+        self.enable_gradient_clipping = enable_gradient_clipping
+
+        # 數值穩定性監控
+        self.stability_monitor = NumericalStabilityMonitor(
+            gradient_clip_norm=gradient_clip_norm,
+            nan_check_frequency=nan_check_frequency,
+            enable_gradient_clipping=enable_gradient_clipping
+        )
+        logger.info(f"數值穩定性監控已啟用: 梯度裁剪={enable_gradient_clipping}, 裁剪範數={gradient_clip_norm}")
         
+        # 穩定性統計
+        self.gradient_clip_count = 0
+        self.nan_reset_count = 0
+
         try:
             import signal
             import threading
@@ -298,6 +330,86 @@ class UniversalCheckpointCallback(BaseCallback):
                                     
                 except Exception as e_norm: 
                     logger.warning(f"計算Transformer範數出錯: {e_norm}")
+        
+        # 4. 數值穩定性檢查和梯度裁剪
+        if self.enable_gradient_clipping and hasattr(self.model, 'policy'):
+            try:
+                # 檢查並裁剪策略網絡的梯度
+                if hasattr(self.model.policy, 'actor') and self.model.policy.actor is not None:
+                    grad_norm_actor = self.stability_monitor.clip_gradients(
+                        self.model.policy.actor, self.stability_monitor.gradient_clip_norm
+                    )
+                    if grad_norm_actor > self.stability_monitor.gradient_clip_norm:
+                        self.gradient_clip_count += 1
+                        logger.debug(f"Actor梯度被裁剪: {grad_norm_actor:.4f} -> {self.stability_monitor.gradient_clip_norm}")
+                
+                if hasattr(self.model.policy, 'critic') and self.model.policy.critic is not None:
+                    grad_norm_critic = self.stability_monitor.clip_gradients(
+                        self.model.policy.critic, self.stability_monitor.gradient_clip_norm
+                    )
+                    if grad_norm_critic > self.stability_monitor.gradient_clip_norm:
+                        self.gradient_clip_count += 1
+                        logger.debug(f"Critic梯度被裁剪: {grad_norm_critic:.4f} -> {self.stability_monitor.gradient_clip_norm}")
+                
+                # 檢查特徵提取器的梯度
+                if hasattr(self.model.policy, 'features_extractor') and self.model.policy.features_extractor is not None:
+                    grad_norm_fe = self.stability_monitor.clip_gradients(
+                        self.model.policy.features_extractor, self.stability_monitor.gradient_clip_norm
+                    )
+                    if grad_norm_fe > self.stability_monitor.gradient_clip_norm:
+                        self.gradient_clip_count += 1
+                        logger.debug(f"Feature Extractor梯度被裁剪: {grad_norm_fe:.4f} -> {self.stability_monitor.gradient_clip_norm}")
+                
+            except Exception as e_grad:
+                logger.warning(f"梯度裁剪過程中發生錯誤: {e_grad}")
+        
+        # 5. 定期NaN檢查
+        if self.stability_monitor.should_check_nans():
+            try:
+                nan_detected = False
+                
+                # 檢查策略網絡
+                if hasattr(self.model, 'policy') and self.model.policy is not None:
+                    if hasattr(self.model.policy, 'actor') and self.model.policy.actor is not None:
+                        if self.stability_monitor.check_for_nans(self.model.policy.actor, "policy.actor"):
+                            nan_detected = True
+                    
+                    if hasattr(self.model.policy, 'critic') and self.model.policy.critic is not None:
+                        if self.stability_monitor.check_for_nans(self.model.policy.critic, "policy.critic"):
+                            nan_detected = True
+                    
+                    if hasattr(self.model.policy, 'features_extractor') and self.model.policy.features_extractor is not None:
+                        if self.stability_monitor.check_for_nans(self.model.policy.features_extractor, "policy.features_extractor"):
+                            nan_detected = True
+                
+                if nan_detected:
+                    logger.error(f"檢測到NaN值在步驟 {self.num_timesteps}，這可能導致訓練不穩定")
+                    self.nan_reset_count += 1
+                    
+                    # 記錄到監控系統
+                    if hasattr(self.model, 'logger'):
+                        self.model.logger.record("train/nan_detections", self.stability_monitor.nan_detections)
+                
+            except Exception as e_nan:
+                logger.warning(f"NaN檢查過程中發生錯誤: {e_nan}")
+        
+        # 6. 記錄穩定性統計
+        if self.n_calls > 0 and self.n_calls % self.log_transformer_norm_freq == 0:
+            try:
+                # 記錄梯度統計
+                if hasattr(self.model, 'policy') and hasattr(self.model.policy, 'features_extractor'):
+                    grad_stats = self.stability_monitor.get_gradient_stats(self.model.policy.features_extractor)
+                    for stat_name, stat_value in grad_stats.items():
+                        self.logger.record(f"train/gradient_{stat_name}", stat_value)
+                
+                # 記錄穩定性監控統計
+                stability_stats = self.stability_monitor.get_stats()
+                self.logger.record("train/gradient_clip_count", self.gradient_clip_count)
+                self.logger.record("train/nan_reset_count", self.nan_reset_count)
+                self.logger.record("train/total_nan_detections", stability_stats.get('nan_detections', 0))
+                
+            except Exception as e_stats:
+                logger.warning(f"記錄穩定性統計時發生錯誤: {e_stats}")
         
         # Check for stop request from shared_data_manager (e.g., Streamlit button)
         if self.shared_data_manager is not None and self.shared_data_manager.is_stop_requested():
