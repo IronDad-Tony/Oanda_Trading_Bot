@@ -108,7 +108,7 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             # This is a single environment
             first_env = self.env
         
-        num_active_symbols = getattr(first_env, 'num_active_symbols_in_slots', 1)
+        num_active_symbols = getattr(first_env, 'num_tradable_symbols_this_episode', 1) # V5.0環境使用此屬性名
 
         calculated_buffer_size = num_active_symbols * TIMESTEPS * buffer_size_factor
         self.buffer_size = min(max(calculated_buffer_size, batch_size * 200, 50000),200000)
