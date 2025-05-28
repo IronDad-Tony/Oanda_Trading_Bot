@@ -21,6 +21,9 @@ import atexit
 import glob
 import os
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     from common.config import (
         MMAP_DATA_DIR, TIMESTEPS, PRICE_COLUMNS, GRANULARITY,
@@ -45,7 +48,9 @@ except ImportError:
         from src.data_manager.database_manager import query_historical_data
         from src.feature_engineer.preprocessor import preprocess_data_for_model
         from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
-        logger.info("Direct run MMapDataset: Successfully re-imported common modules.")
+        if not _import_logged:
+            logger.info("Direct run MMapDataset: Successfully re-imported common modules.")
+            _import_logged = True
     except ImportError as e_retry:
         import logging
         logger = logging.getLogger("mmap_dataset_fallback") # type: ignore

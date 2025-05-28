@@ -24,17 +24,22 @@ warnings.filterwarnings(
     module="torch.nn.modules.transformer" # 限定來源模組
 )
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 # --- Simplified Import Block ---
 try:
     from src.common.logger_setup import logger
-    logger.debug("transformer_model.py: Successfully imported logger from src.common.logger_setup.")
+    if not _import_logged:
+        logger.debug("transformer_model.py: Successfully imported logger from src.common.logger_setup.")
 except ImportError:
     logger = logging.getLogger("transformer_model_fallback") # type: ignore
     logger.setLevel(logging.DEBUG)
     _ch_fallback = logging.StreamHandler(sys.stdout)
     _ch_fallback.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     if not logger.handlers: logger.addHandler(_ch_fallback)
-    logger.warning("transformer_model.py: Failed to import logger from src.common.logger_setup. Using fallback logger.")
+    if not _import_logged:
+        logger.warning("transformer_model.py: Failed to import logger from src.common.logger_setup. Using fallback logger.")
 
 try:
     from src.common.config import (
@@ -44,15 +49,20 @@ try:
         TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL,
         DEVICE
     )
-    logger.info("transformer_model.py: Successfully imported common.config.") # type: ignore
+    if not _import_logged:
+        logger.info("transformer_model.py: Successfully imported common.config.") # type: ignore
+        _import_logged = True
 except ImportError as e:
-    logger.error(f"transformer_model.py: Failed to import common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
+    if not _import_logged:
+        logger.error(f"transformer_model.py: Failed to import common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
     TIMESTEPS=128; MAX_SYMBOLS_ALLOWED=20; TRANSFORMER_MODEL_DIM=128;
     TRANSFORMER_NUM_LAYERS=2; TRANSFORMER_NUM_HEADS=2; TRANSFORMER_FFN_DIM=256;
     TRANSFORMER_DROPOUT_RATE=0.1; TRANSFORMER_LAYER_NORM_EPS=1e-5;
     TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING=5000; TRANSFORMER_OUTPUT_DIM_PER_SYMBOL=32;
     DEVICE=torch.device("cpu")
-    logger.warning("transformer_model.py: Using fallback values for config due to import error.") # type: ignore
+    if not _import_logged:
+        logger.warning("transformer_model.py: Using fallback values for config due to import error.") # type: ignore
+        _import_logged = True
 
 
 # --- 位置編碼 (Positional Encoding) ---

@@ -37,13 +37,22 @@ getcontext().prec = 30
 logger: logging.Logger = logging.getLogger("trading_env_module_init") # type: ignore
 # ... (logger 初始化和 try-except import 塊與 V4.9 版本相同，這裡省略以節省篇幅) ...
 _logger_initialized_by_common_env_v5 = False
+
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     from common.logger_setup import logger as common_configured_logger; logger = common_configured_logger; _logger_initialized_by_common_env_v5 = True
-    logger.debug("trading_env.py (V5.0): Successfully imported logger from common.logger_setup.")
+    if not _import_logged:
+        logger.debug("trading_env.py (V5.0): Successfully imported logger from common.logger_setup.")
     from common.config import (TIMESTEPS as _TIMESTEPS, MAX_SYMBOLS_ALLOWED as _MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _DEFAULT_INITIAL_CAPITAL, OANDA_MARGIN_CLOSEOUT_LEVEL as _OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE as _TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY as _OANDA_API_KEY, ATR_PERIOD as _ATR_PERIOD, STOP_LOSS_ATR_MULTIPLIER as _STOP_LOSS_ATR_MULTIPLIER, MAX_ACCOUNT_RISK_PERCENTAGE as _MAX_ACCOUNT_RISK_PERCENTAGE)
     _config_values_env_v5 = {"TIMESTEPS": _TIMESTEPS, "MAX_SYMBOLS_ALLOWED": _MAX_SYMBOLS_ALLOWED, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY, "DEFAULT_INITIAL_CAPITAL": _DEFAULT_INITIAL_CAPITAL, "OANDA_MARGIN_CLOSEOUT_LEVEL": _OANDA_MARGIN_CLOSEOUT_LEVEL, "TRADE_COMMISSION_PERCENTAGE": _TRADE_COMMISSION_PERCENTAGE, "OANDA_API_KEY": _OANDA_API_KEY, "ATR_PERIOD": _ATR_PERIOD, "STOP_LOSS_ATR_MULTIPLIER": _STOP_LOSS_ATR_MULTIPLIER, "MAX_ACCOUNT_RISK_PERCENTAGE": _MAX_ACCOUNT_RISK_PERCENTAGE}
-    logger.info("trading_env.py (V5.0): Successfully imported and stored common.config values.")
-    from data_manager.mmap_dataset import UniversalMemoryMappedDataset; from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from data_manager.instrument_info_manager import InstrumentDetails, InstrumentInfoManager; logger.info("trading_env.py (V5.0): Successfully imported other dependencies.")
+    if not _import_logged:
+        logger.info("trading_env.py (V5.0): Successfully imported and stored common.config values.")
+    from data_manager.mmap_dataset import UniversalMemoryMappedDataset; from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from data_manager.instrument_info_manager import InstrumentDetails, InstrumentInfoManager; 
+    if not _import_logged:
+        logger.info("trading_env.py (V5.0): Successfully imported other dependencies.")
+        _import_logged = True
 except ImportError as e_initial_import_v5:
     logger_temp_v5 = logging.getLogger("trading_env_v5_fallback_initial"); logger_temp_v5.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_v5.setLevel(logging.DEBUG); logger = logger_temp_v5
     logger.warning(f"trading_env.py (V5.0): Initial import failed: {e_initial_import_v5}. Assuming PYTHONPATH is set correctly or this is a critical issue.")

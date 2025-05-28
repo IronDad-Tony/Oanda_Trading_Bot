@@ -14,18 +14,25 @@ from datetime import datetime, timezone
 logger: logging.Logger = logging.getLogger("currency_manager_module_init")
 _logger_initialized_by_common_cm = False
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     from common.logger_setup import logger as common_configured_logger
     logger = common_configured_logger
     _logger_initialized_by_common_cm = True
-    logger.debug("currency_manager.py: Successfully imported logger from common.logger_setup.")
+    if not _import_logged:
+        logger.debug("currency_manager.py: Successfully imported logger from common.logger_setup.")
     
     from common.config import ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY
-    logger.info("currency_manager.py: Successfully imported common.config values.")
+    if not _import_logged:
+        logger.info("currency_manager.py: Successfully imported common.config values.")
     
     from data_manager.oanda_downloader import manage_data_download_for_symbols, format_datetime_for_oanda
     from data_manager.instrument_info_manager import InstrumentInfoManager
-    logger.info("currency_manager.py: Successfully imported other dependencies.")
+    if not _import_logged:
+        logger.info("currency_manager.py: Successfully imported other dependencies.")
+        _import_logged = True
     
 except ImportError as e_initial_import_cm:
     logger_temp_cm = logging.getLogger("currency_manager_fallback_initial")

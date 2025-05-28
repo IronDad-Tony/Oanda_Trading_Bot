@@ -19,23 +19,31 @@ import os
 logger: logging.Logger = logging.getLogger("universal_trainer_module_init")
 _logger_initialized_by_common_ut = False
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     from common.logger_setup import logger as common_configured_logger
     logger = common_configured_logger
     _logger_initialized_by_common_ut = True
-    logger.debug("universal_trainer.py: Successfully imported logger from common.logger_setup.")
+    if not _import_logged:
+        logger.debug("universal_trainer.py: Successfully imported logger from common.logger_setup.")
+        _import_logged = True
     
     from common.config import (
         TIMESTEPS, MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY, INITIAL_CAPITAL,
         OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY,
-        WEIGHTS_DIR, LOGS_DIR, DEVICE, USE_AMP,
+                WEIGHTS_DIR, LOGS_DIR, DEVICE, USE_AMP,
         TRAINER_SAVE_FREQ_STEPS, TRAINER_EVAL_FREQ_STEPS,
         # 不 import 不存在的 *_DEFAULT
     )
-    logger.info("universal_trainer.py: Successfully imported common.config values.")
+    if not _import_logged:
+        logger.info("universal_trainer.py: Successfully imported common.config values.")
+        _import_logged = True
     
     from common.shared_data_manager import get_shared_data_manager
-    logger.info("universal_trainer.py: Successfully imported shared data manager.")
+    if not _import_logged:
+        logger.info("universal_trainer.py: Successfully imported shared data manager.")
     
     from data_manager.currency_manager import CurrencyDependencyManager, ensure_currency_data_for_trading
     from data_manager.mmap_dataset import UniversalMemoryMappedDataset
@@ -44,20 +52,26 @@ try:
     from environment.trading_env import UniversalTradingEnvV4
     from agent.sac_agent_wrapper import SACAgentWrapper
     from trainer.callbacks import UniversalCheckpointCallback # 假設這個Callback已經存在並被正確實作
-    logger.info("universal_trainer.py: Successfully imported other dependencies.")
+    if not _import_logged:
+        logger.info("universal_trainer.py: Successfully imported other dependencies.")
+        _import_logged = True
     
 except ImportError as e_initial_import_ut:
     logger_temp_ut = logging.getLogger("universal_trainer_fallback_initial")
     logger_temp_ut.addHandler(logging.StreamHandler(sys.stdout))
     logger_temp_ut.setLevel(logging.DEBUG)
     logger = logger_temp_ut
-    logger.warning(f"universal_trainer.py: Initial import failed: {e_initial_import_ut}. Attempting path adjustment.")
+    if not _import_logged:
+        logger.warning(f"universal_trainer.py: Initial import failed: {e_initial_import_ut}. Attempting path adjustment.")
+        _import_logged = True
     
     try:
         from src.common.logger_setup import logger as common_logger_retry_ut
         logger = common_logger_retry_ut
         _logger_initialized_by_common_ut = True
-        logger.info("universal_trainer.py: Successfully re-imported common_logger after path adj.")
+        if not _import_logged:
+            logger.info("universal_trainer.py: Successfully re-imported common_logger after path adj.")
+            _import_logged = True
         
         from src.common.config import (
             TIMESTEPS, MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY, INITIAL_CAPITAL,
@@ -66,10 +80,12 @@ except ImportError as e_initial_import_ut:
             TRAINER_SAVE_FREQ_STEPS, TRAINER_EVAL_FREQ_STEPS,
             # 不 import 不存在的 *_DEFAULT
         )
-        logger.info("universal_trainer.py: Successfully re-imported common.config after path adjustment.")
+        if not _import_logged:
+            logger.info("universal_trainer.py: Successfully re-imported common.config after path adjustment.")
         
         from src.common.shared_data_manager import get_shared_data_manager
-        logger.info("universal_trainer.py: Successfully re-imported shared data manager.")
+        if not _import_logged:
+            logger.info("universal_trainer.py: Successfully re-imported shared data manager.")
         
         from src.data_manager.currency_manager import CurrencyDependencyManager, ensure_currency_data_for_trading
         from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset
@@ -78,7 +94,9 @@ except ImportError as e_initial_import_ut:
         from src.environment.trading_env import UniversalTradingEnvV4
         from src.agent.sac_agent_wrapper import SACAgentWrapper
         from src.trainer.callbacks import UniversalCheckpointCallback
-        logger.info("universal_trainer.py: Successfully re-imported other dependencies after path adjustment.")
+        if not _import_logged:
+            logger.info("universal_trainer.py: Successfully re-imported other dependencies after path adjustment.")
+            _import_logged = True
         
     except ImportError as e_retry_critical_ut:
         logger.error(f"universal_trainer.py: Critical import error after path adjustment: {e_retry_critical_ut}", exc_info=True)

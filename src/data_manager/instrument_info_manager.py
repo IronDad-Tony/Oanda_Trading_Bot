@@ -12,6 +12,9 @@ from functools import lru_cache
 import sys # 確保導入
 from pathlib import Path # 確保導入
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     from common.config import (
         OANDA_API_KEY, OANDA_ACCOUNT_ID, OANDA_BASE_URL,
@@ -30,7 +33,9 @@ except ImportError:
             OANDA_API_TIMEOUT_SECONDS
         )
         from src.common.logger_setup import logger
-        logger.info("Direct run InstrumentInfoManager: Successfully re-imported common modules.")
+        if not _import_logged:
+            logger.info("Direct run InstrumentInfoManager: Successfully re-imported common modules.")
+            _import_logged = True
     except ImportError as e_retry_iim:
         import logging
         logger = logging.getLogger("instrument_info_fallback") # type: ignore

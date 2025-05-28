@@ -9,6 +9,9 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional # <--- 已修正導入 Optional
 from sklearn.preprocessing import StandardScaler
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     from common.config import PRICE_COLUMNS, TIMESTEPS # TIMESTEPS 用於滑動窗口標準化
     from common.logger_setup import logger
@@ -23,14 +26,19 @@ except ImportError:
         # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.config import PRICE_COLUMNS, TIMESTEPS
         from src.common.logger_setup import logger
-        logger.info("Direct run Preprocessor: Successfully re-imported common modules.")
+        if not _import_logged:
+            logger.info("Direct run Preprocessor: Successfully re-imported common modules.")
+            _import_logged = True
     except ImportError as e_retry:
         import logging
         logger = logging.getLogger("preprocessor_fallback") # type: ignore
-        logger.error(f"Direct run Preprocessor: Critical import error: {e_retry}", exc_info=True)
+        if not _import_logged:
+            logger.error(f"Direct run Preprocessor: Critical import error: {e_retry}", exc_info=True)
         PRICE_COLUMNS = ['bid_open', 'bid_high', 'bid_low', 'bid_close',
                          'ask_open', 'ask_high', 'ask_low', 'ask_close', 'volume']
         TIMESTEPS = 128
+        if not _import_logged:
+            _import_logged = True
 
 
 # --- 核心預處理函數 ---

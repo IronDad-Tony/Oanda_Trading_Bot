@@ -12,6 +12,10 @@ import sys
 os.environ['TORCH_CPP_LOG_LEVEL'] = 'ERROR'
 os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'
 
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warning, 3=error
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN warnings
+
 # Fix for PyTorch 2.7.0+ Streamlit compatibility
 try:
     import torch
@@ -43,10 +47,15 @@ from src.common.logger_setup import logger # This will run logger_setup.py
 # --- Session State Initialization Flag ---
 # This helps ensure that expensive or critical one-time initializations
 # for the session are managed correctly.
-if 'app_initialized' not in st.session_state:
-    logger.info("Streamlit App: First time initialization of session state flag.")
-    st.session_state.app_initialized = True
-    # Other truly one-time initializations for the entire session can go here.
+try:
+    # Check if we're running in Streamlit context
+    if hasattr(st, 'session_state') and 'app_initialized' not in st.session_state:
+        logger.info("Streamlit App: First time initialization of session state flag.")
+        st.session_state.app_initialized = True
+        # Other truly one-time initializations for the entire session can go here.
+except Exception:
+    # Running outside Streamlit context, ignore session state
+    pass
 
 # Disable file watcher to prevent high CPU usage on file change
 import pandas as pd

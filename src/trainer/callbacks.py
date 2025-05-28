@@ -19,27 +19,37 @@ import shutil # 用於 __main__ 中的清理
 from gymnasium import spaces # 用於 __main__ 測試
 from datetime import datetime, timezone # Added for timestamp
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 # --- Simplified Import Block ---
 try:
     from src.common.logger_setup import logger
-    logger.debug("callbacks.py (V5): Successfully imported logger from src.common.logger_setup.")
+    if not _import_logged:
+        logger.debug("callbacks.py (V5): Successfully imported logger from src.common.logger_setup.")
 except ImportError:
     logger = logging.getLogger("callbacks_v5_fallback") # type: ignore
     logger.setLevel(logging.DEBUG)
     _ch_fallback_cb = logging.StreamHandler(sys.stdout)
     _ch_fallback_cb.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     if not logger.handlers: logger.addHandler(_ch_fallback_cb)
-    logger.warning("callbacks.py (V5): Failed to import logger from src.common.logger_setup. Using fallback logger.")
+    if not _import_logged:
+        logger.warning("callbacks.py (V5): Failed to import logger from src.common.logger_setup. Using fallback logger.")
 
 _config_cb_v5: Dict[str, Any] = {}
 try:
     from src.common.config import LOGS_DIR as _LOGS_DIR, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _INITIAL_CAPITAL
     _config_cb_v5 = {"LOGS_DIR": _LOGS_DIR, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY, "INITIAL_CAPITAL": _INITIAL_CAPITAL}
-    logger.info("callbacks.py (V5): Successfully imported common.config.") # type: ignore
+    if not _import_logged:
+        logger.info("callbacks.py (V5): Successfully imported common.config.") # type: ignore
+        _import_logged = True
 except ImportError as e:
-    logger.error(f"callbacks.py (V5): Failed to import common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
+    if not _import_logged:
+        logger.error(f"callbacks.py (V5): Failed to import common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
     _config_cb_v5 = {"LOGS_DIR": Path("./logs"), "ACCOUNT_CURRENCY": "AUD", "INITIAL_CAPITAL": 100000.0}
-    logger.warning("callbacks.py (V5): Using fallback values for config due to import error.") # type: ignore
+    if not _import_logged:
+        logger.warning("callbacks.py (V5): Using fallback values for config due to import error.") # type: ignore
+        _import_logged = True
 
 LOGS_DIR = _config_cb_v5.get("LOGS_DIR", Path("./logs"))
 ACCOUNT_CURRENCY = _config_cb_v5.get("ACCOUNT_CURRENCY", "AUD")

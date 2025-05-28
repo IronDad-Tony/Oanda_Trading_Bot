@@ -17,30 +17,44 @@ import logging
 
 getcontext().prec = 30 # 設置Decimal精度
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 _logger_trainer_v22: logging.Logger # 使用新版本號
 _config_trainer_v22: Dict[str, Any] = {}
 try:
     from common.logger_setup import logger as common_logger_trainer_v22; _logger_trainer_v22 = common_logger_trainer_v22; logger = _logger_trainer_v22
-    logger.debug("trainer.py (V2.2): Successfully imported logger from common.logger_setup.")
+    if not _import_logged:
+        logger.debug("trainer.py (V2.2): Successfully imported logger from common.logger_setup.")
     from common.config import (TIMESTEPS as _TIMESTEPS, MAX_SYMBOLS_ALLOWED as _MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _INITIAL_CAPITAL_CONFIG, OANDA_MARGIN_CLOSEOUT_LEVEL as _OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE as _TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY as _OANDA_API_KEY, ATR_PERIOD as _ATR_PERIOD, STOP_LOSS_ATR_MULTIPLIER as _STOP_LOSS_ATR_MULTIPLIER, MAX_ACCOUNT_RISK_PERCENTAGE as _MAX_ACCOUNT_RISK_PERCENTAGE, TRAINER_DEFAULT_TOTAL_TIMESTEPS as _TRAINER_DEFAULT_TOTAL_TIMESTEPS, TRAINER_MODEL_NAME_PREFIX as _TRAINER_MODEL_NAME_PREFIX, WEIGHTS_DIR as _WEIGHTS_DIR, TRAINER_SAVE_FREQ_STEPS as _TRAINER_SAVE_FREQ_STEPS, TRAINER_EVAL_FREQ_STEPS as _TRAINER_EVAL_FREQ_STEPS, TRAINER_N_EVAL_EPISODES as _TRAINER_N_EVAL_EPISODES, TRAINER_DETERMINISTIC_EVAL as _TRAINER_DETERMINISTIC_EVAL, BEST_MODEL_SUBDIR as _BEST_MODEL_SUBDIR, EARLY_STOPPING_PATIENCE as _EARLY_STOPPING_PATIENCE, EARLY_STOPPING_MIN_DELTA_PERCENT as _EARLY_STOPPING_MIN_DELTA_PERCENT, EARLY_STOPPING_MIN_EVALS as _EARLY_STOPPING_MIN_EVALS, LOG_TRANSFORMER_NORM_FREQ_STEPS as _LOG_TRANSFORMER_NORM_FREQ_STEPS, DEFAULT_TRAIN_START_ISO as _DEFAULT_TRAIN_START_ISO, DEFAULT_TRAIN_END_ISO as _DEFAULT_TRAIN_END_ISO, DEFAULT_EVAL_START_ISO as _DEFAULT_EVAL_START_ISO, DEFAULT_EVAL_END_ISO as _DEFAULT_EVAL_END_ISO, SAC_LEARNING_RATE as _SAC_LEARNING_RATE, SAC_BATCH_SIZE as _SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR as _SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR, SAC_LEARNING_STARTS_FACTOR as _SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA as _SAC_GAMMA, SAC_ENT_COEF as _SAC_ENT_COEF, SAC_TRAIN_FREQ_STEPS as _SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS as _SAC_GRADIENT_STEPS, SAC_TAU as _SAC_TAU, TRANSFORMER_MODEL_DIM as _TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS as _TRANSFORMER_NUM_LAYERS, TRANSFORMER_NUM_HEADS as _TRANSFORMER_NUM_HEADS, TRANSFORMER_FFN_DIM as _TRANSFORMER_FFN_DIM, TRANSFORMER_DROPOUT_RATE as _TRANSFORMER_DROPOUT_RATE, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL as _TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, DEVICE as _DEVICE, GRANULARITY as _GRANULARITY)
     _config_trainer_v22 = {name: val for name, val in locals().items() if name.isupper() and not name.startswith('_') and isinstance(val, (str, int, float, bool, Path, Decimal, torch.device))}
     _config_trainer_v22["DEFAULT_INITIAL_CAPITAL"] = _INITIAL_CAPITAL_CONFIG # 確保使用正確的鍵名
-    logger.info("trainer.py (V2.2): Successfully imported and stored common.config values.")
+    if not _import_logged:
+        logger.info("trainer.py (V2.2): Successfully imported and stored common.config values.")
     from data_manager.mmap_dataset import UniversalMemoryMappedDataset; from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from data_manager.instrument_info_manager import InstrumentInfoManager, InstrumentDetails; from environment.trading_env import UniversalTradingEnvV4; from agent.sac_policy import CustomSACPolicy; from agent.sac_agent_wrapper import SACAgentWrapper; from trainer.callbacks import UniversalCheckpointCallback; from stable_baselines3.common.vec_env import DummyVecEnv
-    logger.info("trainer.py (V2.2): Successfully imported other dependencies.")
+    if not _import_logged:
+        logger.info("trainer.py (V2.2): Successfully imported other dependencies.")
+        _import_logged = True
 except ImportError as e_initial_import_trainer_v22:
     # ... (後備導入邏輯與 V2.1 版本相同) ...
     logger_temp_trainer_v22 = logging.getLogger("trainer_v22_fallback_initial"); logger_temp_trainer_v22.addHandler(logging.StreamHandler(sys.stdout)); logger_temp_trainer_v22.setLevel(logging.DEBUG); logger = logger_temp_trainer_v22
-    logger.warning(f"trainer.py (V2.2): Initial import failed: {e_initial_import_trainer_v22}. Assuming PYTHONPATH is set correctly or this is a critical issue.")
+    if not _import_logged:
+        logger.warning(f"trainer.py (V2.2): Initial import failed: {e_initial_import_trainer_v22}. Assuming PYTHONPATH is set correctly or this is a critical issue.")
     # project_root_trainer_v22 = Path(__file__).resolve().parent.parent.parent # 移除
     # if str(project_root_trainer_v22) not in sys.path: sys.path.insert(0, str(project_root_trainer_v22)); logger.info(f"trainer.py (V2.2): Added project root to sys.path: {project_root_trainer_v22}") # 移除
     try:
         # 假設 PYTHONPATH 已設定，這些導入應該能工作
-        from src.common.logger_setup import logger as common_logger_retry_trainer_v22; logger = common_logger_retry_trainer_v22; logger.info("trainer.py (V2.2): Successfully re-imported common_logger.")
-        from src.common.config import *; logger.info("trainer.py (V2.2): Successfully re-imported common.config.")
+        from src.common.logger_setup import logger as common_logger_retry_trainer_v22; logger = common_logger_retry_trainer_v22; 
+        if not _import_logged:
+            logger.info("trainer.py (V2.2): Successfully re-imported common_logger.")
+        from src.common.config import *; 
+        if not _import_logged:
+            logger.info("trainer.py (V2.2): Successfully re-imported common.config.")
         _config_trainer_v22 = {k: v for k, v in locals().items() if k.isupper() and not k.startswith('_')}
         from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from src.data_manager.instrument_info_manager import InstrumentInfoManager, InstrumentDetails; from src.environment.trading_env import UniversalTradingEnvV4; from src.agent.sac_policy import CustomSACPolicy; from src.agent.sac_agent_wrapper import SACAgentWrapper; from src.trainer.callbacks import UniversalCheckpointCallback; from stable_baselines3.common.vec_env import DummyVecEnv
-        logger.info("trainer.py (V2.2): Successfully re-imported other dependencies after path adjustment.")
+        if not _import_logged:
+            logger.info("trainer.py (V2.2): Successfully re-imported other dependencies after path adjustment.")
+            _import_logged = True
     except ImportError as e_retry_critical_trainer_v22:
         logger.error(f"trainer.py (V2.2): Critical import error after path adjustment: {e_retry_critical_trainer_v22}", exc_info=True); logger.warning("trainer.py (V2.2): Using fallback values for config (critical error during import).")
         _config_trainer_v22 = {"TIMESTEPS": 128, "MAX_SYMBOLS_ALLOWED": 20, "ACCOUNT_CURRENCY": "AUD", "DEFAULT_INITIAL_CAPITAL": 100000.0, "OANDA_MARGIN_CLOSEOUT_LEVEL": Decimal('0.50'), "TRADE_COMMISSION_PERCENTAGE": Decimal('0.0001'), "OANDA_API_KEY": None, "ATR_PERIOD": 14, "STOP_LOSS_ATR_MULTIPLIER": Decimal('2.0'), "MAX_ACCOUNT_RISK_PERCENTAGE": Decimal('0.01'), "TRAINER_DEFAULT_TOTAL_TIMESTEPS": 1000, "TRAINER_MODEL_NAME_PREFIX":"fallback", "WEIGHTS_DIR":Path("./fb_w"), "TRAINER_SAVE_FREQ_STEPS":100, "TRAINER_EVAL_FREQ_STEPS":50, "TRAINER_N_EVAL_EPISODES":1, "TRAINER_DETERMINISTIC_EVAL":True, "BEST_MODEL_SUBDIR":"best", "EARLY_STOPPING_PATIENCE":3, "EARLY_STOPPING_MIN_DELTA_PERCENT":0.01, "EARLY_STOPPING_MIN_EVALS":2, "LOG_TRANSFORMER_NORM_FREQ_STEPS":20, "DEFAULT_TRAIN_START_ISO":"2023-01-01T00:00:00Z", "DEFAULT_TRAIN_END_ISO":"2023-01-02T00:00:00Z", "DEFAULT_EVAL_START_ISO":"2023-01-02T00:00:00Z", "DEFAULT_EVAL_END_ISO":"2023-01-03T00:00:00Z", "DEVICE":torch.device("cpu")}

@@ -11,6 +11,10 @@ import logging # <--- 將 import logging 移到文件頂部，確保始終可用
 
 # --- 嘗試導入配置和日誌記錄器 ---
 # 這種結構允許在直接運行此文件進行測試時，也能正確設置PYTHONPATH
+
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     # 這種導入方式假設 Oanda_Trading_Bot 的根目錄在 PYTHONPATH 中
     # 或者此文件是被根目錄下的腳本調用的
@@ -34,7 +38,9 @@ except ModuleNotFoundError:
         # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.config import DATABASE_PATH, PRICE_COLUMNS, GRANULARITY
         from src.common.logger_setup import logger
-        logger.info("Direct run: Successfully re-imported common modules after path adjustment.")
+        if not _import_logged:
+            logger.info("Direct run: Successfully re-imported common modules after path adjustment.")
+            _import_logged = True
     except ImportError as e_retry:
         # 如果重試仍然失敗，則使用後備
         fallback_logger = logging.getLogger("database_manager_fallback")

@@ -13,6 +13,9 @@ import sys # 確保 sys 被導入，以便在 __main__ 和 fallback 中使用
 from pathlib import Path # 確保 Path 被導入
 
 # 從 common 模組導入配置和日誌記錄器
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 try:
     from common.config import (
         OANDA_API_KEY, OANDA_ACCOUNT_ID, OANDA_BASE_URL, ACCOUNT_CURRENCY,
@@ -43,7 +46,9 @@ except ImportError:
         from src.data_manager.database_manager import ( # 使用 src.data_manager
             insert_historical_data, update_download_metadata, get_download_metadata
         )
-        logger.info("Direct run OANDA Downloader: Successfully re-imported common modules after path adjustment.")
+        if not _import_logged:
+            logger.info("Direct run OANDA Downloader: Successfully re-imported common modules after path adjustment.")
+            _import_logged = True
     except ImportError as e_retry:
         import logging
         logger = logging.getLogger("oanda_downloader_fallback") # type: ignore

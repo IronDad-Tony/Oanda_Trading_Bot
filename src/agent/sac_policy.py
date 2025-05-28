@@ -13,10 +13,14 @@ from pathlib import Path
 import numpy as np
 import logging # 確保 logging 導入
 
+# Flag to prevent duplicate import logging
+_import_logged = False
+
 # --- Simplified Import Block ---
 try:
     from src.common.logger_setup import logger
-    logger.debug("sac_policy.py: Successfully imported logger from src.common.logger_setup.")
+    if not _import_logged:
+        logger.debug("sac_policy.py: Successfully imported logger from src.common.logger_setup.")
 except ImportError:
     logger = logging.getLogger("sac_policy_fallback") # type: ignore
     logger.setLevel(logging.DEBUG)
@@ -30,7 +34,9 @@ try:
     from src.common.config import (
         MAX_SYMBOLS_ALLOWED, TIMESTEPS, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
     )
-    logger.info("sac_policy.py: Successfully imported AdvancedTransformerFeatureExtractor and common.config.")
+    if not _import_logged:
+        logger.info("sac_policy.py: Successfully imported AdvancedTransformerFeatureExtractor and common.config.")
+        _import_logged = True
 except ImportError as e:
     logger.error(f"sac_policy.py: Failed to import AdvancedTransformerFeatureExtractor or common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
     AdvancedTransformerFeatureExtractor = None # type: ignore
