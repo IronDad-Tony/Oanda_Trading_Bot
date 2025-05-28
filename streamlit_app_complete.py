@@ -38,6 +38,16 @@ def setup_project_path():
 project_root = setup_project_path()
 # --- END OF 路徑設置 ---
 
+from src.common.logger_setup import logger # This will run logger_setup.py
+
+# --- Session State Initialization Flag ---
+# This helps ensure that expensive or critical one-time initializations
+# for the session are managed correctly.
+if 'app_initialized' not in st.session_state:
+    logger.info("Streamlit App: First time initialization of session state flag.")
+    st.session_state.app_initialized = True
+    # Other truly one-time initializations for the entire session can go here.
+
 # Disable file watcher to prevent high CPU usage on file change
 import pandas as pd
 import numpy as np
@@ -64,13 +74,14 @@ except ImportError:
 # Try to import trainer, use fallback if failed
 try:
     from src.trainer.universal_trainer import UniversalTrainer as EnhancedUniversalTrainer, create_training_time_range
-    from src.common.logger_setup import logger
+    # logger is already imported globally
     from src.common.config import ACCOUNT_CURRENCY, INITIAL_CAPITAL, DEVICE, USE_AMP
     from src.common.shared_data_manager import get_shared_data_manager
     from src.data_manager.instrument_info_manager import InstrumentInfoManager
     TRAINER_AVAILABLE = True
-    logger.info("Successfully imported trainer and shared data manager")
+    # Removed logger.info("Successfully imported trainer and shared data manager") to reduce noise on re-runs
 except ImportError as e:
+    logger.error(f"Failed to import trainer modules: {e}", exc_info=True)
     # Fallback configuration if import fails
     logger = logging.getLogger(__name__)
     ACCOUNT_CURRENCY = "USD"
@@ -243,11 +254,19 @@ def get_categorized_symbols_and_details():
     return categorized
 
 def init_session_state():
-    """Initialize all session state variables"""
+    """Initialize all session state variables if they don't exist."""
     if 'shared_data_manager' not in st.session_state:
         st.session_state.shared_data_manager = get_shared_data_manager()
-    if 'training_status' not in st.session_state:
-        st.session_state.training_status = 'idle'
+        logger.info("Initialized shared_data_manager in session state.")
+    
+    # training_status should reflect the source of truth, which is shared_data_manager
+    # Set a default if shared_data_manager hasn't populated it yet.
+    if 'training_status' not in st.session_state: 
+        if hasattr(st.session_state, 'shared_data_manager') and st.session_state.shared_data_manager:
+            st.session_state.training_status = st.session_state.shared_data_manager.get_current_status().get('status', 'idle')
+        else:
+            st.session_state.training_status = 'idle' # Absolute fallback
+
     if 'training_thread' not in st.session_state:
         st.session_state.training_thread = None
     if 'trainer' not in st.session_state:
@@ -256,6 +275,13 @@ def init_session_state():
         st.session_state.auto_refresh = False
     if 'refresh_interval' not in st.session_state:
         st.session_state.refresh_interval = 5
+    if 'total_timesteps' not in st.session_state: # For ETA calculation
+        st.session_state.total_timesteps = 0
+
+    # Flag to indicate this function has run for the current session setup
+    st.session_state.session_state_initialized = True
+    logger.debug("Session state initialized/verified.")
+
 def get_gpu_info():
     """Get GPU usage information with enhanced monitoring"""
     try:
@@ -432,118 +458,201 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
     logger.info("Simulation training completed.")
     return True
 
-def training_worker(trainer, shared_manager, symbols, total_timesteps):
+def training_worker(trainer_instance, shared_manager, symbols, total_timesteps): # Renamed arg for clarity
     """Training worker thread - uses shared data manager"""
-    # --- Add asyncio event loop setup ---
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    # --- End of asyncio event loop setup ---
     try:
-        logger.info("Starting training worker thread with shared data manager")
+        logger.info(f"Training worker thread started. Trainer instance: {trainer_instance}, Symbols: {symbols}, Steps: {total_timesteps}")
         
-        if trainer and TRAINER_AVAILABLE:
-            logger.info("Starting real training process")
-            trainer.shared_data_manager = shared_manager
-            
-            try:
-                success = trainer.run_full_training_pipeline()
-            except Exception as e:
-                logger.error(f"Error in real training process: {e}")
-                logger.info("Falling back to simulation training")
-                success = simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps)
+        if trainer_instance and TRAINER_AVAILABLE:
+            logger.info("Starting real training process with trainer instance.")
+            # Ensure the trainer uses the correct shared manager
+            if hasattr(trainer_instance, 'set_shared_data_manager'):
+                 trainer_instance.set_shared_data_manager(shared_manager)
+            elif hasattr(trainer_instance, 'shared_data_manager'): # Or assign directly if it's a public attribute
+                 trainer_instance.shared_data_manager = shared_manager
+            else:
+                 logger.warning("Trainer instance does not have a method/attribute to set shared_data_manager.")
+
+            success = trainer_instance.run_full_training_pipeline()
         else:
-            logger.info("Starting simulation training process")
+            logger.info("No valid trainer instance or TRAINER_NOT_AVAILABLE. Starting simulation training process.")
             success = simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps)
         
         if shared_manager.is_stop_requested():
             shared_manager.update_training_status('idle')
-            logger.info("Training stopped by user")
+            logger.info("Training worker: Stop request processed. Status set to idle.")
         elif success:
             shared_manager.update_training_status('completed', 100)
-            logger.info("Training completed")
+            logger.info("Training worker: Process completed successfully.")
         else:
-            shared_manager.update_training_status('error', error="Training did not complete successfully")
+            # If success is False but no specific error was set by the trainer, set a generic one.
+            if shared_manager.get_current_status()['status'] != 'error':
+                 shared_manager.update_training_status('error', error="Training did not complete successfully (trainer returned False).")
+            logger.warning("Training worker: Process did not complete successfully.")
             
     except Exception as e:
-        logger.error(f"Error in training process: {e}", exc_info=True)
+        logger.error(f"Error in training worker: {e}", exc_info=True)
         shared_manager.update_training_status('error', error=str(e))
     finally:
-        if trainer and hasattr(trainer, 'cleanup'):
-            trainer.cleanup()
-        # --- Add asyncio event loop cleanup ---
+        logger.info("Training worker: Finalizing.")
+        if trainer_instance and hasattr(trainer_instance, 'cleanup'):
+            logger.info("Training worker: Calling trainer.cleanup()")
+            trainer_instance.cleanup()
         loop.close()
-        # --- End of asyncio event loop cleanup ---
+        logger.info("Training worker: Asyncio loop closed. Thread finishing.")
 
 def start_training(symbols, start_date, end_date, total_timesteps, save_freq, eval_freq):
-    """Start training with enhanced error handling"""
+    """Start training with enhanced error handling and session state management."""
+    
+    # Ensure session state is initialized (though main() should handle this first)
+    if not st.session_state.get('session_state_initialized', False):
+        init_session_state()
+
+    shared_manager = st.session_state.shared_data_manager
+    
+    if st.session_state.get('training_thread') is not None and st.session_state.training_thread.is_alive():
+        st.warning("Training is already in progress.")
+        logger.warning("Attempted to start training while a training thread is already active.")
+        return False
+
+    logger.info(f"Attempting to start new training session for symbols: {symbols}, total_timesteps: {total_timesteps}")
+    shared_manager.clear_data() 
+    shared_manager.reset_stop_flag()
+    shared_manager.update_training_status('starting', 0)
+
     try:
-        shared_manager = st.session_state.shared_data_manager
-        shared_manager.clear_data()
-        shared_manager.reset_stop_flag()
+        start_time_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+        end_time_dt = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
         
-        start_time = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-        end_time = datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-        
+        trainer_instance_for_thread = None 
         if TRAINER_AVAILABLE:
-            trainer = EnhancedUniversalTrainer(
+            logger.info("TRAINER_AVAILABLE is True. Creating new EnhancedUniversalTrainer instance.")
+            # Create a new trainer instance for this training session
+            current_trainer = EnhancedUniversalTrainer(
                 trading_symbols=symbols,
-                start_time=start_time,
-                end_time=end_time,
-                granularity="S5",
+                start_time=start_time_dt,
+                end_time=end_time_dt,
+                granularity="S5", 
                 total_timesteps=total_timesteps,
                 save_freq=save_freq,
                 eval_freq=eval_freq,
                 model_name_prefix="sac_universal_trader",
-                streamlit_session_state=st.session_state
+                # The trainer should ideally get the shared_manager via a method or init arg
+                # For now, we pass it to the worker, which can set it if the trainer supports it.
             )
-            st.session_state.trainer = trainer
+            st.session_state.trainer = current_trainer # Store the new trainer in session state
+            trainer_instance_for_thread = current_trainer
+            logger.info(f"New EnhancedUniversalTrainer instance created and stored in session_state.trainer: {current_trainer}")
         else:
-            st.session_state.trainer = None
-        
-        shared_manager.update_training_status('running', 0)
-        
+            st.session_state.trainer = None 
+            logger.warning("TRAINER_AVAILABLE is False. Real training will not occur; simulation will be used by worker.")
+            trainer_instance_for_thread = None # Pass None to worker for simulation
+
         training_thread = threading.Thread(
             target=training_worker,
-            args=(st.session_state.trainer, shared_manager, symbols, total_timesteps),
+            args=(trainer_instance_for_thread, shared_manager, symbols, total_timesteps),
             daemon=True
         )
         training_thread.start()
+        st.session_state.training_thread = training_thread 
         
-        st.session_state.training_thread = training_thread
-        
+        shared_manager.update_training_status('running', 0) 
+        logger.info(f"Training thread started. Thread ID: {training_thread.ident}. Trainer for thread: {trainer_instance_for_thread}")
+        st.session_state.total_timesteps = total_timesteps 
         return True
         
     except Exception as e:
         st.error(f"Failed to start training: {e}")
-        logger.error(f"Failed to start training: {e}", exc_info=True)
+        logger.error(f"Critical error during training setup: {e}", exc_info=True)
+        shared_manager.update_training_status('error', error=f"Setup failed: {str(e)}")
+        
+        # Cleanup attempt for trainer if it was created
+        if st.session_state.get('trainer') is not None:
+             if hasattr(st.session_state.trainer, 'cleanup'):
+                 try:
+                     st.session_state.trainer.cleanup()
+                     logger.info("Cleaned up trainer instance after setup failure.")
+                 except Exception as cleanup_e:
+                     logger.error(f"Error during trainer cleanup after setup failure: {cleanup_e}", exc_info=True)
+        st.session_state.trainer = None # Ensure it's cleared
+        st.session_state.training_thread = None # Ensure thread is cleared
         return False
 
 def stop_training():
-    """Stop training with proper cleanup"""
-    try:
-        shared_manager = st.session_state.shared_data_manager
-        shared_manager.request_stop()
-        logger.info("Stop signal sent through shared data manager")
+    """Stop training with proper cleanup and session state management."""
+    logger.info("Attempting to stop training via stop_training function.")
+    
+    if not st.session_state.get('session_state_initialized', False):
+        init_session_state() # Should not be strictly necessary if main() calls it, but safe
+
+    shared_manager = st.session_state.shared_data_manager
+    shared_manager.request_stop() 
+    logger.info("Stop request sent to shared_data_manager.")
+
+    trainer_to_stop = st.session_state.get('trainer') 
+    if trainer_to_stop:
+        logger.info(f"Found trainer instance in session state to stop: {trainer_to_stop}")
+        # Prefer a method in trainer that handles its own stop logic, including saving
+        if hasattr(trainer_to_stop, 'stop_training_process'): 
+            logger.info("Calling trainer.stop_training_process() if available.")
+            try:
+                trainer_to_stop.stop_training_process() # This method should ideally handle saving model etc.
+            except Exception as e_stop_trainer:
+                logger.error(f"Error calling trainer.stop_training_process(): {e_stop_trainer}", exc_info=True)
+        elif hasattr(trainer_to_stop, 'stop'): # Fallback
+             logger.info("Calling trainer.stop() as fallback.")
+             try:
+                 trainer_to_stop.stop()
+             except Exception as e_stop_trainer_fallback:
+                 logger.error(f"Error calling trainer.stop() fallback: {e_stop_trainer_fallback}", exc_info=True)
         
-        if st.session_state.trainer:
-            if hasattr(st.session_state.trainer, 'stop'):
-                st.session_state.trainer.stop()
-            
-            if hasattr(st.session_state.trainer, 'save_current_model'):
-                st.session_state.trainer.save_current_model()
-                logger.info("Current training progress saved")
-        
-        if st.session_state.training_thread and st.session_state.training_thread.is_alive():
-            st.session_state.training_thread.join(timeout=5.0)
-        
-        st.session_state.training_status = 'idle'
-        st.session_state.training_thread = None
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error stopping training: {e}", exc_info=True)
-        return False
+        # Explicit save call if not handled by stop_training_process or if needed as a guarantee
+        if hasattr(trainer_to_stop, 'save_current_model'):
+            logger.info("Attempting to save current model via trainer.save_current_model().")
+            try:
+                trainer_to_stop.save_current_model()
+                logger.info("Model save explicitly called and completed.")
+            except Exception as e_save:
+                logger.error(f"Error calling trainer.save_current_model(): {e_save}", exc_info=True)
+    else:
+        logger.warning("No trainer instance found in session state during stop_training call.")
+
+    training_thread_to_join = st.session_state.get('training_thread')
+    if training_thread_to_join and training_thread_to_join.is_alive():
+        logger.info(f"Training thread {training_thread_to_join.ident} is alive. Attempting to join with 10s timeout.")
+        training_thread_to_join.join(timeout=10.0) 
+        if training_thread_to_join.is_alive():
+            logger.warning(f"Training thread {training_thread_to_join.ident} did not join after 10 seconds. It might be stuck or unresponsive.")
+        else:
+            logger.info(f"Training thread {training_thread_to_join.ident} successfully joined.")
+    elif training_thread_to_join:
+        logger.info(f"Training thread {training_thread_to_join.ident} was found but is not alive.")
+    else:
+        logger.info("No active training thread found to join.")
+    
+    current_sm_status = shared_manager.get_current_status()
+    if current_sm_status['status'] not in ['error', 'completed']: 
+        shared_manager.update_training_status('idle') # Set to idle if not already error/completed
+        logger.info("Shared manager status updated to 'idle' after stop sequence.")
+    else:
+        logger.info(f"Shared manager status is '{current_sm_status['status']}', not changing to 'idle'.")
+    
+    st.session_state.training_thread = None # Clear thread from session state
+    if st.session_state.get('trainer') is not None: # If a trainer instance exists
+        if hasattr(st.session_state.trainer, 'cleanup'):
+            logger.info("Calling trainer.cleanup() as part of stop_training finalization.")
+            try:
+                st.session_state.trainer.cleanup()
+            except Exception as e_cleanup:
+                logger.error(f"Error during trainer.cleanup() in stop_training: {e_cleanup}", exc_info=True)
+        st.session_state.trainer = None # Clear trainer from session state
+        logger.info("Trainer instance cleared from session state.")
+    
+    logger.info("stop_training function execution completed.")
+    return True # Assume success in signaling stop, actual stop depends on thread.
+
 def create_real_time_charts():
     """Create real-time training monitoring charts"""
     shared_manager = st.session_state.shared_data_manager
@@ -556,6 +665,7 @@ def create_real_time_charts():
     df = pd.DataFrame(latest_metrics)
     
     if 'timestamp' in df.columns:
+        # Ensure timestamp is parsed from ISO string to datetime objects
         df['timestamp'] = pd.to_datetime(df['timestamp'])
     
     chart_tab1, chart_tab2, chart_tab3, chart_tab4 = st.tabs([
@@ -717,7 +827,9 @@ def create_real_time_charts():
         
         if latest_trades:
             trades_df = pd.DataFrame(latest_trades)
-            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
+            if 'timestamp' in trades_df.columns:
+                # Ensure timestamp is parsed from ISO string to datetime objects
+                trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
             
             fig_pnl = go.Figure()
             fig_pnl.add_trace(go.Histogram(
@@ -764,10 +876,11 @@ def display_training_status():
     steps_per_sec = None
     eta_text = None
     if status == 'running' and current_metrics and current_metrics['step'] > 0:
-        metrics = shared_manager.get_latest_metrics(20)
-        if len(metrics) >= 2:
-            steps = [m['step'] for m in metrics]
-            times = [m['timestamp'] for m in metrics]
+        metrics_for_speed_calc = shared_manager.get_latest_metrics(20) # Use a different variable name
+        if len(metrics_for_speed_calc) >= 2:
+            steps = [m['step'] for m in metrics_for_speed_calc]
+            times = [m['timestamp'] for m in metrics_for_speed_calc]
+            # Ensure timestamp is parsed from ISO string to datetime objects
             if isinstance(times[0], str):
                 times = [pd.to_datetime(t) for t in times]
             dt = (times[-1] - times[0]).total_seconds()
@@ -831,15 +944,22 @@ def download_data_with_progress(symbols, start_date, end_date, granularity="S5")
 def main():
     """Main application function"""
     
-    init_session_state()
+    # Initialize session state ONCE at the beginning of main if not already done.
+    # The 'app_initialized' flag handles the very first run of the script in a session.
+    # init_session_state() ensures all necessary keys are present.
+    if not st.session_state.get('session_state_initialized', False):
+       init_session_state()
+       logger.info("main(): Called init_session_state() because 'session_state_initialized' was not True.")
     
     st.title("🚀 OANDA AI Trading Model")
     st.markdown("**Enhanced Real-time Trading Monitor with GPU Support**")
     
     if not TRAINER_AVAILABLE:
         st.warning("⚠️ Running in simulation mode - trainer modules not available")
+        # logger.info("Main: TRAINER_AVAILABLE is False.") # Logged once at import usually
     else:
         st.success("✅ All modules loaded successfully")
+        # logger.info("Main: TRAINER_AVAILABLE is True.")
     
     with st.sidebar:
         st.header("⚙️ Training Configuration")
@@ -956,13 +1076,20 @@ def main():
         
         st.subheader("Training Controls")
         
-        shared_manager = st.session_state.shared_data_manager
-        current_status = shared_manager.get_current_status()['status']
+        # Ensure shared_manager is available, init_session_state should have created it.
+        shared_manager = st.session_state.get('shared_data_manager')
+        if not shared_manager:
+            st.error("Critical Error: Shared Data Manager not found in session state. Please refresh.")
+            logger.error("CRITICAL: shared_data_manager not found in session_state in main().")
+            return # Stop further rendering if this happens
+
+        current_status_dict = shared_manager.get_current_status()
+        current_status = current_status_dict.get('status', 'idle')
         
         col1, col2 = st.columns(2)
         
         with col1:
-            if current_status != 'running':
+            if current_status not in ['running', 'starting']: # Check for 'starting' as well
                 if st.button("🚀 Start Training", type="primary", use_container_width=True):
                     if not selected_symbols:
                         st.error("Please select at least one trading symbol")
@@ -970,30 +1097,37 @@ def main():
                         st.error("Start date must be before end date")
                     else:
                         # --- Data download progress bar before training ---
+                        logger.info("main(): 'Start Training' button clicked. Proceeding with data download and start_training.")
                         download_data_with_progress(selected_symbols, start_date, end_date)
+                        # Pass the actual initial_capital, risk_pct etc. to start_training if they need to override config
+                        # For now, assuming EnhancedUniversalTrainer uses values from config.py or its defaults
                         success = start_training(
                             selected_symbols, start_date, end_date, 
                             total_timesteps, save_freq, eval_freq
                         )
                         if success:
-                            st.success("Training started successfully!")
+                            st.success("Training start initiated successfully!")
+                            logger.info("main(): start_training call returned True. Rerunning Streamlit.")
                             st.rerun()
                         else:
-                            st.error("Failed to start training")
+                            st.error("Failed to initiate training. Check logs.")
+                            logger.warning("main(): start_training call returned False.")
             else:
-                st.button("🚀 Start Training", disabled=True, use_container_width=True)
+                st.button("🚀 Start Training", disabled=True, use_container_width=True, help="Training is currently active or starting.")
         
         with col2:
-            if current_status == 'running':
+            if current_status in ['running', 'starting']: # Check for 'starting' as well
                 if st.button("⏹️ Stop Training", type="secondary", use_container_width=True):
+                    logger.info("main(): 'Stop Training' button clicked. Calling stop_training.")
                     success = stop_training()
-                    if success:
-                        st.success("Training stopped successfully!")
-                        st.rerun()
-                    else:
-                        st.error("Failed to stop training")
+                    if success: # stop_training now always returns True, success means signal sent
+                        st.info("Stop signal sent. Training will halt shortly.")
+                        logger.info("main(): stop_training call completed. Rerunning Streamlit.")
+                        st.rerun() # Rerun to update UI based on new state
+                    # else: # stop_training doesn't return False in the new logic for failure to stop
+                    # st.error("Failed to send stop signal properly.")
             else:
-                st.button("⏹️ Stop Training", disabled=True, use_container_width=True)
+                st.button("⏹️ Stop Training", disabled=True, use_container_width=True, help="No active training to stop.")
         
         st.subheader("Auto Refresh")
         auto_refresh = st.checkbox("Enable Auto Refresh", value=st.session_state.auto_refresh)
@@ -1080,4 +1214,6 @@ def main():
         st.rerun()
 
 if __name__ == "__main__":
+    # Optional: Add a specific log for direct script run if needed
+    # logger.info(f"Executing streamlit_app_complete.py as __main__.")
     main()

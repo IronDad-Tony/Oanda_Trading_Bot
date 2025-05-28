@@ -5,18 +5,28 @@
 """
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler # RotatingFileHandler is imported but TimedRotatingFileHandler is used later. Consider removing if not used.
 from pathlib import Path
+from datetime import datetime # Moved import here
+import os
 
 # 避免循環導入，直接設置日誌路徑
 # 計算項目根目錄和日誌目錄
 project_root = Path(__file__).resolve().parent.parent.parent
 logs_dir = project_root / "logs"
 
-# 實作時間戳命名機制 - 每次執行產生新的日誌檔案
-from datetime import datetime
-current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-LOG_FILE_PATH = logs_dir / f"trading_system_{current_time}.log"
+# --- 全局變量確保日誌文件名只生成一次 ---
+_log_file_path_instance = None
+
+def get_log_file_path():
+    """Return a unique log file path per process run using an environment-based timestamp."""
+    run_id = os.environ.get('LOG_RUN_ID')
+    if run_id is None:
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.environ['LOG_RUN_ID'] = run_id
+    return logs_dir / f"trading_system_{run_id}.log"
+
+LOG_FILE_PATH = get_log_file_path()  # static log file path
 
 # 確保日誌目錄存在
 logs_dir.mkdir(parents=True, exist_ok=True)
@@ -75,7 +85,7 @@ try:
     if os.name == 'nt':  # Windows 系統
         logger.info("檢測到 Windows 系統，將使用標準的 TimedRotatingFileHandler (無 fcntl 文件鎖)。")
         file_handler = TimedRotatingFileHandler(
-            LOG_FILE_PATH,
+            LOG_FILE_PATH, # 確保這裡使用更新後的 LOG_FILE_PATH
             when='midnight',      # 每天午夜輪轉
             interval=1,           # 每1天輪轉一次
             backupCount=7,        # 保留7天的備份文件
@@ -101,12 +111,12 @@ try:
                                 # 釋放文件鎖
                                 fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
                         else: # 如果 stream 仍然是 None，則直接調用父類 emit (可能觸發錯誤處理)
-                            super().emit(record)
+                            super().emit(record) # type: ignore
                     except Exception: # 捕獲所有可能的異常，包括 stream 為 None 或鎖定失敗
                         self.handleError(record) # 使用 logging 內建的錯誤處理
 
-            file_handler = SafeFileHandler(
-                LOG_FILE_PATH,
+            file_handler = SafeFileHandler( # type: ignore
+                LOG_FILE_PATH, # 確保這裡使用更新後的 LOG_FILE_PATH
                 when='midnight',
                 interval=1,
                 backupCount=7,
@@ -116,7 +126,7 @@ try:
         except ImportError:
             logger.warning("在非 Windows 系統上導入 fcntl 失敗，將使用標準的 TimedRotatingFileHandler。")
             file_handler = TimedRotatingFileHandler(
-                LOG_FILE_PATH,
+                LOG_FILE_PATH, # 確保這裡使用更新後的 LOG_FILE_PATH
                 when='midnight',
                 interval=1,
                 backupCount=7,
@@ -190,6 +200,8 @@ if __name__ == "__main__":
     except ZeroDivisionError:
         logger.error("捕獲到一個異常 (ZeroDivisionError)", exc_info=True) # exc_info=True 會記錄堆棧跟踪
 
+    # 確保 LOG_FILE_PATH 在 __main__ 中也被正確引用
+    current_log_file = get_log_file_path() # 再次調用以確保獲取的是同一個實例
     print(f"\n請檢查日誌輸出:")
     print(f"1. 控制台輸出。")
-    print(f"2. 日誌文件: {LOG_FILE_PATH.resolve()}")
+    print(f"2. 日誌文件: {current_log_file.resolve()}")

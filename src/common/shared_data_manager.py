@@ -74,7 +74,7 @@ class SharedTrainingDataManager:
             'critic_loss': 0.0,
             'l2_norm': 0.0,
             'grad_norm': 0.0,
-            'timestamp': datetime.now(timezone.utc)
+            'timestamp': datetime.now(timezone.utc).isoformat() # Changed to isoformat for consistency
         }
         
         self.symbol_stats = {} # Updated by add_trade_record
