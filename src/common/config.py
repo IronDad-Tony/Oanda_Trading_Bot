@@ -55,7 +55,7 @@ MMAP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 # 為了快速啟動，先用幾個常見的，您可以後續修改或通過UI傳入
 DEFAULT_SYMBOLS = ["EUR_USD", "USD_JPY", "GBP_USD", "AUD_USD", "XAU_USD"]
 GRANULARITY = "S5" # 數據時間粒度
-MAX_SYMBOLS_ALLOWED = 10 # UI允許選擇的最大交易對數量 (用於Transformer輸入維度等)
+MAX_SYMBOLS_ALLOWED = 5 # UI允許選擇的最大交易對數量 (用於Transformer輸入維度等)
 PRICE_COLUMNS = ['bid_open', 'bid_high', 'bid_low', 'bid_close',
                  'ask_open', 'ask_high', 'ask_low', 'ask_close', 'volume']
 PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
@@ -117,10 +117,10 @@ BEST_MODEL_SUBDIR = "best_model" # 相對於 WEIGHTS_DIR
 SAC_GAMMA = 0.95             # 折扣因子
 SAC_LEARNING_RATE = 3e-5     # 學習率
 SAC_BATCH_SIZE = 64          # 根據用戶要求設定批次大小
-SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # 這個參數的用途將被修改，buffer size 將動態設定
+SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # 每個交易對的緩衝區大小因子，恢復為 500
 SAC_LEARNING_STARTS_FACTOR = 200 # 學習開始前收集的最小樣本數因子 (總樣本 = N_symbols * BATCH_SIZE * factor)
 SAC_TRAIN_FREQ_STEPS = 32    # 減少訓練頻率以提高效率
-SAC_GRADIENT_STEPS = 32      # 每次訓練迭代執行多少梯度步數
+SAC_GRADIENT_STEPS = 16      # 每次訓練迭代執行多少梯度步數，設定為 16
 SAC_ENT_COEF = 'auto'        # 熵系數 ('auto' 或 float)
 SAC_TARGET_UPDATE_INTERVAL = 1 # Target network 更新頻率 (相對於gradient_steps)
 SAC_TAU = 0.005              # Target network 軟更新系數

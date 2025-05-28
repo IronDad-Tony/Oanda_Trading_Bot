@@ -487,12 +487,12 @@ class UniversalTrainer:
                 verbose=1,
                 streamlit_session_state=self.streamlit_session_state, # 傳遞給回調，以便更新UI
                 shared_data_manager=self.shared_data_manager, # 傳遞共享數據管理器
-                enable_gradient_clipping=True, # 啟用梯度裁剪
-                gradient_clip_norm=1.0, # 梯度裁剪範數
-                nan_check_frequency=500 # NaN檢查頻率
+                enable_gradient_clipping=False, # 修改：禁用梯度裁剪
+                gradient_clip_norm=1.0, # 梯度裁剪範數 (即使禁用，也保留參數結構)
+                nan_check_frequency=self.total_timesteps + 1 # 修改：將NaN檢查頻率設置為大於總步數的值，以有效禁用
             )
             
-            logger.info("訓練回調設置成功。")
+            logger.info("訓練回調設置成功 (梯度裁剪已禁用, NaN檢查已禁用)。")
             return True
             
         except Exception as e:

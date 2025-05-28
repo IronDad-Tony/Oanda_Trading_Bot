@@ -554,6 +554,11 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
     logger.info(f"Attempting to start new training session for symbols: {symbols}, total_timesteps: {total_timesteps}")
     shared_manager.clear_data() 
     shared_manager.reset_stop_flag()
+    # Reset session-specific step tracking
+    st.session_state.initial_global_step_of_session = None
+    st.session_state.first_metric_received = False
+    logger.info("Initialized initial_global_step_of_session and first_metric_received for new session.")
+
     shared_manager.update_training_status('starting', 0)
 
     try:
@@ -690,18 +695,48 @@ def stop_training():
 def create_real_time_charts():
     """Create real-time training monitoring charts"""
     shared_manager = st.session_state.shared_data_manager
-    latest_metrics = shared_manager.get_latest_metrics(200)
+    all_metrics = shared_manager.get_all_metrics() 
     
-    if not latest_metrics:
+    if not all_metrics:
         st.info("No training data available. Start training to view real-time charts.")
         return
     
-    df = pd.DataFrame(latest_metrics)
+    df = pd.DataFrame(all_metrics)
     
+    # Determine initial global step for session-relative plotting
+    initial_global_step = st.session_state.get('initial_global_step_of_session')
+    if initial_global_step is None: # If not captured yet (e.g., very early, or no training started)
+        initial_global_step = 0
+        # Try to infer if possible, though it's best captured in display_training_status
+        if 'step' in df.columns and not df.empty:
+            # Heuristic: if the first step in data is significantly > 0, it might be an initial global step
+            # This is less reliable than the capture in display_training_status
+            pass 
+
+
+    x_axis_column = 'step' # Default to global step
+    if 'step' in df.columns:
+        df['session_step'] = df['step'] - initial_global_step
+        x_axis_column = 'session_step' # Prefer session step for plotting
+        # Ensure session_step is non-negative, can happen if initial_global_step captured late
+        df['session_step'] = df['session_step'].clip(lower=0)
+
+
     if 'timestamp' in df.columns:
-        # Ensure timestamp is parsed from ISO string to datetime objects
         df['timestamp'] = pd.to_datetime(df['timestamp'])
     
+    # Ensure required columns are present and handle potential NaN from initialization
+    for col in ['actor_loss', 'critic_loss', 'l2_norm', 'grad_norm']:
+        if col not in df.columns:
+            df[col] = np.nan # Add column with NaNs if missing
+        # else:
+            # df[col] = pd.to_numeric(df[col], errors='coerce') # Ensure numeric, coerce errors to NaN
+
+    # Filter out rows where essential data for plotting might be NaN, 
+    # but be careful not to filter too aggressively if NaNs are expected (e.g. initial steps)
+    # For losses and norms, we want to plot them even if they start as NaN and then get values.
+    # Plotly handles NaNs by skipping those points, which is usually desired.
+
     chart_tab1, chart_tab2, chart_tab3, chart_tab4 = st.tabs([
         "📈 Performance", "🧠 Model Diagnostics", "💰 Portfolio", "📊 Trading Activity"
     ])
@@ -711,7 +746,7 @@ def create_real_time_charts():
         
         fig_reward = go.Figure()
         fig_reward.add_trace(go.Scatter(
-            x=df['step'],
+            x=df[x_axis_column], # Use determined x-axis column
             y=df['reward'],
             mode='lines+markers',
             name='Reward',
@@ -720,7 +755,7 @@ def create_real_time_charts():
         ))
         fig_reward.update_layout(
             title="Training Reward Progression",
-            xaxis_title="Training Steps",
+            xaxis_title="Training Steps (Session)", # Updated X-axis label
             yaxis_title="Reward",
             hovermode='x unified',
             height=400
@@ -733,7 +768,7 @@ def create_real_time_charts():
             
             fig_ma = go.Figure()
             fig_ma.add_trace(go.Scatter(
-                x=df['step'],
+                x=df[x_axis_column], # Use determined x-axis column
                 y=df['reward'],
                 mode='lines',
                 name='Raw Reward',
@@ -741,7 +776,7 @@ def create_real_time_charts():
                 opacity=0.5
             ))
             fig_ma.add_trace(go.Scatter(
-                x=df['step'],
+                x=df[x_axis_column], # Use determined x-axis column
                 y=df['reward_ma'],
                 mode='lines',
                 name=f'Moving Average ({window_size})',
@@ -749,7 +784,7 @@ def create_real_time_charts():
             ))
             fig_ma.update_layout(
                 title=f"Reward Trend Analysis",
-                xaxis_title="Training Steps",
+                xaxis_title="Training Steps (Session)", # Updated X-axis label
                 yaxis_title="Reward",
                 height=400
             )
@@ -759,49 +794,53 @@ def create_real_time_charts():
         st.subheader("Model Diagnostics")
         
         fig_loss = go.Figure()
-        fig_loss.add_trace(go.Scatter(
-            x=df['step'],
-            y=df['actor_loss'],
-            mode='lines',
-            name='Actor Loss',
-            line=dict(color='orange', width=2)
-        ))
-        fig_loss.add_trace(go.Scatter(
-            x=df['step'],
-            y=df['critic_loss'],
-            mode='lines',
-            name='Critic Loss',
-            line=dict(color='green', width=2)
-        ))
+        if 'actor_loss' in df.columns and df['actor_loss'].notna().any():
+            fig_loss.add_trace(go.Scatter(
+                x=df[x_axis_column], # Use determined x-axis column
+                y=df['actor_loss'],
+                mode='lines',
+                name='Actor Loss',
+                line=dict(color='orange', width=2)
+            ))
+        if 'critic_loss' in df.columns and df['critic_loss'].notna().any():
+            fig_loss.add_trace(go.Scatter(
+                x=df[x_axis_column], # Use determined x-axis column
+                y=df['critic_loss'],
+                mode='lines',
+                name='Critic Loss',
+                line=dict(color='green', width=2)
+            ))
         fig_loss.update_layout(
             title="Training Loss Curves",
-            xaxis_title="Training Steps",
+            xaxis_title="Training Steps (Session)", # Updated X-axis label
             yaxis_title="Loss",
-            yaxis_type="log",
+            yaxis_type="log", # Consider making this conditional or providing a toggle if losses can be zero/negative
             height=400
         )
         st.plotly_chart(fig_loss, use_container_width=True)
         
         fig_norms = go.Figure()
-        fig_norms.add_trace(go.Scatter(
-            x=df['step'],
-            y=df['l2_norm'],
-            mode='lines',
-            name='L2 Norm',
-            line=dict(color='purple', width=2),
-            yaxis='y'
-        ))
-        fig_norms.add_trace(go.Scatter(
-            x=df['step'],
-            y=df['grad_norm'],
-            mode='lines',
-            name='Gradient Norm',
-            line=dict(color='red', width=2),
-            yaxis='y2'
-        ))
+        if 'l2_norm' in df.columns and df['l2_norm'].notna().any():
+            fig_norms.add_trace(go.Scatter(
+                x=df[x_axis_column], # Use determined x-axis column
+                y=df['l2_norm'],
+                mode='lines',
+                name='L2 Norm',
+                line=dict(color='purple', width=2),
+                yaxis='y'
+            ))
+        if 'grad_norm' in df.columns and df['grad_norm'].notna().any():
+            fig_norms.add_trace(go.Scatter(
+                x=df[x_axis_column], # Use determined x-axis column
+                y=df['grad_norm'],
+                mode='lines',
+                name='Gradient Norm',
+                line=dict(color='red', width=2),
+                yaxis='y2'
+            ))
         fig_norms.update_layout(
             title="Model Parameter Norms",
-            xaxis_title="Training Steps",
+            xaxis_title="Training Steps (Session)", # Updated X-axis label
             yaxis=dict(title="L2 Norm", side="left"),
             yaxis2=dict(title="Gradient Norm", side="right", overlaying="y"),
             height=400
@@ -813,7 +852,7 @@ def create_real_time_charts():
         
         fig_portfolio = go.Figure()
         fig_portfolio.add_trace(go.Scatter(
-            x=df['step'],
+            x=df[x_axis_column], # Use determined x-axis column
             y=df['portfolio_value'],
             mode='lines+markers',
             name='Portfolio Value',
@@ -831,7 +870,7 @@ def create_real_time_charts():
         
         fig_portfolio.update_layout(
             title="Portfolio Value Over Time",
-            xaxis_title="Training Steps",
+            xaxis_title="Training Steps (Session)", # Updated X-axis label
             yaxis_title="Portfolio Value ($)",
             hovermode='x unified',
             height=400
@@ -857,30 +896,34 @@ def create_real_time_charts():
     with chart_tab4:
         st.subheader("Trading Activity")
         
-        latest_trades = shared_manager.get_latest_trades(100)
+        # Use get_all_trades() instead of get_latest_trades()
+        all_trades = shared_manager.get_all_trades()
         
-        if latest_trades:
-            trades_df = pd.DataFrame(latest_trades)
+        if all_trades:
+            trades_df = pd.DataFrame(all_trades)
             if 'timestamp' in trades_df.columns:
-                # Ensure timestamp is parsed from ISO string to datetime objects
                 trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
             
-            fig_pnl = go.Figure()
-            fig_pnl.add_trace(go.Histogram(
-                x=trades_df['profit_loss'],
-                nbinsx=30,
-                name='P&L Distribution',
-                marker_color='lightblue'
-            ))
-            fig_pnl.update_layout(
-                title="Profit & Loss Distribution",
-                xaxis_title="Profit/Loss",
-                yaxis_title="Frequency",
-                height=400
-            )
-            st.plotly_chart(fig_pnl, use_container_width=True)
+            # Ensure profit_loss column exists for histogram
+            if 'profit_loss' in trades_df.columns and trades_df['profit_loss'].notna().any():
+                fig_pnl = go.Figure()
+                fig_pnl.add_trace(go.Histogram(
+                    x=trades_df['profit_loss'],
+                    nbinsx=30,
+                    name='P&L Distribution',
+                    marker_color='lightblue'
+                ))
+                fig_pnl.update_layout(
+                    title="Profit & Loss Distribution",
+                    xaxis_title="Profit/Loss",
+                    yaxis_title="Frequency",
+                    height=400
+                )
+                st.plotly_chart(fig_pnl, use_container_width=True)
+            else:
+                st.info("No profit and loss data to display for trades.")
             
-            if 'symbol' in trades_df.columns:
+            if 'symbol' in trades_df.columns and trades_df['symbol'].notna().any():
                 symbol_counts = trades_df['symbol'].value_counts()
                 
                 fig_symbols = go.Figure(data=[
@@ -904,43 +947,89 @@ def display_training_status():
     status = status_info['status']
     progress = status_info['progress']
     error = status_info['error']
-    current_metrics = status_info['current_metrics']
+    current_metrics = status_info['current_metrics'] # This contains global_step
+
+    current_global_step = current_metrics.get('step', 0)
+
+    # Capture initial global step for the current session
+    if status == 'running' and not st.session_state.get('first_metric_received', False) and hasattr(st.session_state, 'shared_data_manager'):
+        # This condition ensures we capture the first step reported by the trainer for this session
+        # current_global_step here is the first step value received from the trainer after clear_data()
+        st.session_state.initial_global_step_of_session = current_global_step
+        st.session_state.first_metric_received = True
+        logger.info(f"Captured initial global step for session: {st.session_state.initial_global_step_of_session}")
+
+    initial_global_step = st.session_state.get('initial_global_step_of_session')
+    if initial_global_step is None: # Default if not captured yet (e.g., before training starts or first metric)
+        initial_global_step = 0
+        if status == 'running' and current_global_step > 0: # Attempt to set if running and not yet set (less ideal)
+             st.session_state.initial_global_step_of_session = current_global_step
+             initial_global_step = current_global_step
+
+
+    session_steps_done = current_global_step - initial_global_step
+    session_target_steps = st.session_state.get('total_timesteps', 0)
+
 
     # --- Training speed and ETA calculation ---
     steps_per_sec = None
     eta_text = None
-    if status == 'running' and current_metrics and current_metrics['step'] > 0:
-        metrics_for_speed_calc = shared_manager.get_latest_metrics(20) # Use a different variable name
+    if status == 'running' and current_global_step > initial_global_step : # Ensure some progress in global steps
+        metrics_for_speed_calc = shared_manager.get_latest_metrics(20) 
         if len(metrics_for_speed_calc) >= 2:
-            steps = [m['step'] for m in metrics_for_speed_calc]
-            times = [m['timestamp'] for m in metrics_for_speed_calc]
-            # Ensure timestamp is parsed from ISO string to datetime objects
-            if isinstance(times[0], str):
-                times = [pd.to_datetime(t) for t in times]
-            dt = (times[-1] - times[0]).total_seconds()
-            dsteps = steps[-1] - steps[0]
-            if dt > 0 and dsteps > 0:
-                steps_per_sec = dsteps / dt
-                total_steps = st.session_state.get('total_timesteps', 0)
-                steps_left = total_steps - steps[-1] if total_steps > 0 else 0
-                if steps_per_sec > 0 and steps_left > 0:
-                    eta_sec = int(steps_left / steps_per_sec)
+            global_steps_from_deque = [m['step'] for m in metrics_for_speed_calc]
+            # Ensure timestamps are datetime objects
+            times_from_deque = [m['timestamp'] for m in metrics_for_speed_calc]
+            if isinstance(times_from_deque[0], str):
+                times_from_deque = [pd.to_datetime(t) for t in times_from_deque]
+            
+            dt = (times_from_deque[-1] - times_from_deque[0]).total_seconds()
+            d_global_steps = global_steps_from_deque[-1] - global_steps_from_deque[0]
+            
+            if dt > 0 and d_global_steps > 0:
+                steps_per_sec = d_global_steps / dt
+                
+                # Calculate session steps based on the latest global step from deque
+                current_session_step_for_eta = global_steps_from_deque[-1] - initial_global_step
+                session_steps_left = session_target_steps - current_session_step_for_eta
+                
+                if steps_per_sec > 0 and session_steps_left > 0:
+                    eta_sec = int(session_steps_left / steps_per_sec)
                     h, m, s = eta_sec // 3600, (eta_sec % 3600) // 60, eta_sec % 60
                     eta_text = f"ETA: {h:02d}:{m:02d}:{s:02d}"
 
     if status == 'running':
-        st.success(f"🚀 Training in Progress - {progress:.1f}% Complete")
-        st.progress(progress / 100)
-        if current_metrics and current_metrics['step'] > 0:
-            col1, col2, col3, col4 = st.columns(4)
+        # Calculate progress based on session steps
+        session_progress_percentage = (session_steps_done / session_target_steps * 100) if session_target_steps > 0 else 0
+        session_progress_percentage = max(0, min(100, session_progress_percentage))
+
+        st.success(f"🚀 Training in Progress - {session_progress_percentage:.1f}% Complete (Session)")
+        st.progress(session_progress_percentage / 100)
+        
+        if current_metrics and current_global_step >= initial_global_step: # Check if current_metrics is populated
+            # Display key metrics in columns
+            # col1, col2, col3, col4 = st.columns(4) # Old: 4 columns
+            col1, col2, col3, col4, col5 = st.columns(5) # New: 5 columns
+
             with col1:
-                st.metric("Current Step", f"{current_metrics['step']:,}")
+                st.metric("模型總步數", f"{current_global_step:,}", help="模型自創建以來已訓練的總步數。")
+            
             with col2:
-                st.metric("Latest Reward", f"{current_metrics['reward']:.3f}")
+                # Display session step / session target steps
+                step_display_text = f"{session_steps_done:,} / {session_target_steps:,}"
+                # Removed help text that showed global step, as it's now a separate metric
+                st.metric("當前訓練步數", step_display_text, help="當前訓練會話的步數進度。")
+            
             with col3:
-                st.metric("Portfolio Value", f"${current_metrics['portfolio_value']:,.2f}")
+                st.metric("最新獎勵", f"{current_metrics['reward']:.3f}") # "Latest Reward"
+            
             with col4:
-                st.metric("Actor Loss", f"{current_metrics['actor_loss']:.4f}")
+                st.metric("投資組合價值", f"${current_metrics['portfolio_value']:,.2f}") # "Portfolio Value"
+            
+            with col5: # New column for Actor Loss, previously in col4
+                actor_loss_val = current_metrics.get('actor_loss', float('nan'))
+                st.metric("Actor Loss", f"{actor_loss_val:.4f}")
+
         if steps_per_sec:
             st.info(f"Training Speed: {steps_per_sec:.2f} steps/sec")
         if eta_text:
@@ -948,8 +1037,9 @@ def display_training_status():
         
     elif status == 'completed':
         st.success("✅ Training Completed Successfully!")
-        if current_metrics:
-            st.info(f"Final Step: {current_metrics['step']:,} | Final Portfolio: ${current_metrics['portfolio_value']:,.2f}")
+        if current_metrics: # current_metrics still holds the last global state
+            final_session_steps = current_global_step - initial_global_step
+            st.info(f"Final Session Step: {final_session_steps:,} (Global: {current_global_step:,}) | Final Portfolio: ${current_metrics['portfolio_value']:,.2f}")
         
     elif status == 'error':
         st.error(f"❌ Training Error: {error}")

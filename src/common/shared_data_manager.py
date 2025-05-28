@@ -70,10 +70,10 @@ class SharedTrainingDataManager:
             'step': 0,
             'reward': 0.0,
             'portfolio_value': float(INITIAL_CAPITAL),
-            'actor_loss': 0.0,
-            'critic_loss': 0.0,
-            'l2_norm': 0.0,
-            'grad_norm': 0.0,
+            'actor_loss': np.nan, # Changed from 0.0
+            'critic_loss': np.nan, # Changed from 0.0
+            'l2_norm': np.nan, # Changed from 0.0
+            'grad_norm': np.nan, # Changed from 0.0
             'timestamp': datetime.now(timezone.utc).isoformat() # Changed to isoformat for consistency
         }
         
@@ -177,11 +177,11 @@ class SharedTrainingDataManager:
             'step': step,
             'reward': float(reward),
             'portfolio_value': float(portfolio_value),
-            'actor_loss': float(actor_loss) if actor_loss is not None else 0.0,
-            'critic_loss': float(critic_loss) if critic_loss is not None else 0.0,
-            'l2_norm': float(l2_norm) if l2_norm is not None else 0.0,
-            'grad_norm': float(grad_norm) if grad_norm is not None else 0.0,
-            'timestamp': datetime.now(timezone.utc).isoformat() # Store as ISO string for mp.Queue
+            'actor_loss': float(actor_loss) if actor_loss is not None else np.nan, # Changed
+            'critic_loss': float(critic_loss) if critic_loss is not None else np.nan, # Changed
+            'l2_norm': float(l2_norm) if l2_norm is not None else np.nan, # Changed
+            'grad_norm': float(grad_norm) if grad_norm is not None else np.nan, # Changed
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
         
         try:
@@ -194,14 +194,14 @@ class SharedTrainingDataManager:
 
         # Update current and performance stats directly (thread-safe due to GIL or explicit lock if needed)
         with self.lock:
-            self.current_metrics = { # Keep a serializable copy
+            self.current_metrics = {
                 'step': step,
                 'reward': float(reward),
                 'portfolio_value': float(portfolio_value),
-                'actor_loss': float(actor_loss) if actor_loss is not None else 0.0,
-                'critic_loss': float(critic_loss) if critic_loss is not None else 0.0,
-                'l2_norm': float(l2_norm) if l2_norm is not None else 0.0,
-                'grad_norm': float(grad_norm) if grad_norm is not None else 0.0,
+                'actor_loss': float(actor_loss) if actor_loss is not None else np.nan, # Changed
+                'critic_loss': float(critic_loss) if critic_loss is not None else np.nan, # Changed
+                'l2_norm': float(l2_norm) if l2_norm is not None else np.nan, # Changed
+                'grad_norm': float(grad_norm) if grad_norm is not None else np.nan, # Changed
                 'timestamp': metric['timestamp'] # Use the same timestamp
             }
             self.performance_stats['total_steps'] = step
@@ -270,6 +270,18 @@ class SharedTrainingDataManager:
         self._pull_data_from_mp_queues() # Ensure internal deques are updated
         with self.lock:
             return list(self.trade_queue)[-count:]
+
+    def get_all_metrics(self) -> List[Dict[str, Any]]: # New method
+        """獲取內部隊列中所有可用的訓練指標 - 由 UI 調用"""
+        self._pull_data_from_mp_queues() # Ensure internal deques are updated
+        with self.lock:
+            return list(self.metrics_queue)
+
+    def get_all_trades(self) -> List[Dict[str, Any]]: # New method
+        """獲取內部隊列中所有可用的交易記錄 - 由 UI 調用"""
+        self._pull_data_from_mp_queues() # Ensure internal deques are updated
+        with self.lock:
+            return list(self.trade_queue)
     
     def get_metrics_in_range(self, start_step: int, end_step: int) -> List[Dict[str, Any]]:
         """
@@ -386,8 +398,11 @@ class SharedTrainingDataManager:
             
             self.current_metrics = {
                 'step': 0, 'reward': 0.0, 'portfolio_value': float(INITIAL_CAPITAL),
-                'actor_loss': 0.0, 'critic_loss': 0.0, 'l2_norm': 0.0,
-                'grad_norm': 0.0, 'timestamp': datetime.now(timezone.utc).isoformat()
+                'actor_loss': np.nan, # Changed
+                'critic_loss': np.nan, # Changed
+                'l2_norm': np.nan, # Changed
+                'grad_norm': np.nan, # Changed
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
             self.performance_stats = {
                 'total_episodes': 0, 'total_steps': 0, 'best_reward': float('-inf'),
