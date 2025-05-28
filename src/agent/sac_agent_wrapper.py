@@ -238,7 +238,7 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         # 初始化混合精度訓練的梯度縮放器
         scaler = None
         if self.use_amp and self.device.type == 'cuda':
-            scaler = torch.cuda.amp.GradScaler()
+            scaler = torch.amp.GradScaler(device='cuda', enabled=self.use_amp)
             logger.info("使用混合精度訓練模式，已初始化梯度縮放器")
             
             # 設置更保守的損失縮放以避免溢出
