@@ -21,6 +21,7 @@ import psutil
 import logging
 from collections import defaultdict
 from src.data_manager.oanda_downloader import manage_data_download_for_symbols
+import asyncio # Add asyncio import
 
 # Try to import GPU monitoring
 try:
@@ -407,6 +408,10 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
 
 def training_worker(trainer, shared_manager, symbols, total_timesteps):
     """Training worker thread - uses shared data manager"""
+    # --- Add asyncio event loop setup ---
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    # --- End of asyncio event loop setup ---
     try:
         logger.info("Starting training worker thread with shared data manager")
         
@@ -439,6 +444,9 @@ def training_worker(trainer, shared_manager, symbols, total_timesteps):
     finally:
         if trainer and hasattr(trainer, 'cleanup'):
             trainer.cleanup()
+        # --- Add asyncio event loop cleanup ---
+        loop.close()
+        # --- End of asyncio event loop cleanup ---
 
 def start_training(symbols, start_date, end_date, total_timesteps, save_freq, eval_freq):
     """Start training with enhanced error handling"""
