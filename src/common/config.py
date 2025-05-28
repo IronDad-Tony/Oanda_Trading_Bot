@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 import torch
 from dotenv import load_dotenv
-from .logger_setup import logger # 導入日誌記錄器
+
+# 避免循環導入，推遲日誌記錄器的導入
 
 # --- 基礎路徑 ---
 # Path(__file__) 會獲取當前文件 (config.py) 的路徑
@@ -133,21 +134,26 @@ SAVE_MODEL_INTERVAL_STEPS = 50000       # 模型保存間隔 (按總訓練steps)
 # --- GPU優化配置 ---
 def setup_gpu_optimization():
     """設置GPU優化配置"""
-    if torch.cuda.is_available():
-        # 啟用TensorFloat-32 (TF32) 以提高性能
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        
-        # 設置cuDNN基準測試以優化卷積性能
-        torch.backends.cudnn.benchmark = True
-        
-        # 設置內存分配策略
-        # 嘗試使用 expandable_segments:True 來減少碎片
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256,expandable_segments:True"
-        logger.info(f"PYTORCH_CUDA_ALLOC_CONF set to: {os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
-        
-        # 啟用混合精度訓練
-        return True
+    try:
+        if torch.cuda.is_available():
+            # 啟用TensorFloat-32 (TF32) 以提高性能
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            
+            # 設置cuDNN基準測試以優化卷積性能
+            torch.backends.cudnn.benchmark = True
+            
+            # 設置內存分配策略
+            # 嘗試使用 expandable_segments:True 來減少碎片
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256,expandable_segments:True"
+            # logger 在文件末尾才定義，所以這裡使用 print
+            print(f"PYTORCH_CUDA_ALLOC_CONF set to: {os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
+            
+            # 啟用混合精度訓練
+            return True
+    except Exception as e:
+        print(f"Warning: GPU optimization setup failed: {e}")
+        print("Continuing with CPU-only mode...")
     return False
 
 # 設備配置
@@ -245,3 +251,21 @@ GRANULARITY_SECONDS = get_granularity_seconds(GRANULARITY)
 # print(f"Database path: {DATABASE_PATH}")
 # print(f"Default symbols: {DEFAULT_SYMBOLS}")
 # print(f"Granularity: {GRANULARITY} ({GRANULARITY_SECONDS} seconds)")
+
+# --- 在文件末尾導入日誌記錄器以避免循環導入 ---
+try:
+    from .logger_setup import logger
+except ImportError:
+    # 如果相對導入失敗，嘗試絕對導入
+    try:
+        from src.common.logger_setup import logger
+    except ImportError:
+        # 最終後備：創建一個簡單的日誌記錄器
+        import logging
+        logger = logging.getLogger("config_fallback")
+        logger.setLevel(logging.INFO)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)

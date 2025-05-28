@@ -12,6 +12,10 @@ REM 獲取批次文件所在目錄
 set "PROJECT_DIR=%~dp0"
 cd /d "%PROJECT_DIR%"
 
+REM 設置 PYTHONPATH
+set PYTHONPATH=%cd%;%PYTHONPATH%
+echo 已設置 PYTHONPATH: %PYTHONPATH%
+
 echo 📁 項目目錄: %PROJECT_DIR%
 echo.
 
@@ -191,17 +195,17 @@ REM 10. 運行整合測試
 echo ========================================
 echo 🧪 整合測試
 echo ========================================
-if exist "integration_test.py" (
-    echo 🔍 運行整合測試...
-    python integration_test.py
+if exist "test_imports.py" (
+    echo 🔍 運行模組導入測試...
+    python test_imports.py
     if errorlevel 1 (
-        echo ❌ 整合測試失敗
+        echo ❌ 模組導入測試失敗
         echo 💡 請檢查上述診斷結果並修復問題
     ) else (
-        echo ✅ 整合測試通過
+        echo ✅ 模組導入測試通過
     )
 ) else (
-    echo ⚠️  整合測試文件不存在，跳過測試
+    echo ⚠️  測試文件不存在，跳過測試
 )
 
 echo.

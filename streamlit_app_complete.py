@@ -4,23 +4,54 @@ OANDA AI Trading Model - Complete Streamlit Application
 Enhanced real-time monitoring with proper data synchronization and GPU monitoring
 """
 
+# Fix PyTorch Streamlit compatibility issue
+import os
+import sys
+
+# Set environment variables before importing torch
+os.environ['TORCH_CPP_LOG_LEVEL'] = 'ERROR'
+os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'
+
+# Fix for PyTorch 2.7.0+ Streamlit compatibility
+try:
+    import torch
+    # Disable torch._classes module path inspection by Streamlit
+    if hasattr(torch, '_classes'):
+        torch._classes.__path__ = []
+except:
+    pass
+
 import streamlit as st
+
+# --- BEGINNING OF SCRIPT - 路徑設置 ---
+import sys
+from pathlib import Path
+
+# 確保項目模組可以被找到 - 統一路徑設置
+def setup_project_path():
+    """設置項目的 Python 路徑"""
+    project_root = Path(__file__).resolve().parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    return project_root
+
+project_root = setup_project_path()
+# --- END OF 路徑設置 ---
+
+# Disable file watcher to prevent high CPU usage on file change
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from pathlib import Path
 import json
 import time
 import threading
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
-import sys
-import os
 import psutil
 import logging
 from collections import defaultdict
-from src.data_manager.oanda_downloader import manage_data_download_for_symbols
+from src.data_manager.oanda_downloader import manage_data_download_for_symbols # This import should now be more reliable
 import asyncio # Add asyncio import
 
 # Try to import GPU monitoring
@@ -29,11 +60,6 @@ try:
     GPU_AVAILABLE = True
 except ImportError:
     GPU_AVAILABLE = False
-
-# Ensure src modules can be found
-project_root = Path(__file__).resolve().parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
 
 # Try to import trainer, use fallback if failed
 try:

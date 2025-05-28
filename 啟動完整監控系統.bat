@@ -19,6 +19,18 @@ echo.
 
 cd /d "%~dp0"
 
+REM 設置 Python 路徑環境變量
+set PYTHONPATH=%cd%;%PYTHONPATH%
+echo 已設置 PYTHONPATH: %PYTHONPATH%
+
+REM 設置 PyTorch 兼容性環境變量
+set "TORCH_CPP_LOG_LEVEL=ERROR"
+set "TORCH_DISTRIBUTED_DEBUG=OFF"
+set "TORCH_SHOW_CPP_STACKTRACES=0"
+set "PYTORCH_DISABLE_PER_OP_PROFILING=1"
+echo 已設置 PyTorch 兼容性環境變量
+echo.
+
 REM 檢查 Python 是否安裝
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -68,7 +80,7 @@ REM 在背景啟動瀏覽器（只開 TensorBoard，Streamlit 讓其自動開啟
 start "" "http://localhost:6006"
 
 REM 啟動 Streamlit (前景執行，這樣可以看到日誌)
-streamlit run streamlit_app_complete.py --server.port=8501 --server.address=localhost
+python streamlit_launcher.py
 
 echo.
 echo 系統已停止

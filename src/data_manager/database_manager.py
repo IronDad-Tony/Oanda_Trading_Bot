@@ -29,9 +29,7 @@ except ModuleNotFoundError:
     # src_path = project_root / "src" # 確保我們添加的是包含 common 的 src 的父目錄 # 移除
     # if str(project_root) not in sys.path: # 移除
     #     sys.path.insert(0, str(project_root)) # 移除
-        # print(f"Added to sys.path for direct run: {project_root}") # 調試信息 # 移除
-
-    # 再次嘗試導入
+        # print(f"Added to sys.path for direct run: {project_root}") # 調試信息 # 移除    # 再次嘗試導入
     try:
         # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.common.config import DATABASE_PATH, PRICE_COLUMNS, GRANULARITY
@@ -39,14 +37,15 @@ except ModuleNotFoundError:
         logger.info("Direct run: Successfully re-imported common modules after path adjustment.")
     except ImportError as e_retry:
         # 如果重試仍然失敗，則使用後備
-        logger = logging.getLogger("database_manager_fallback")
-        logger.setLevel(logging.DEBUG)
+        fallback_logger = logging.getLogger("database_manager_fallback")
+        fallback_logger.setLevel(logging.DEBUG)
         ch = logging.StreamHandler()
         ch.setLevel(logging.DEBUG)
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         ch.setFormatter(formatter)
-        if not logger.handlers:
-            logger.addHandler(ch)
+        if not fallback_logger.handlers:
+            fallback_logger.addHandler(ch)
+        logger = fallback_logger
         logger.error(f"Direct run: Failed to re-import common modules even after path adjustment: {e_retry}. Using fallback logger and config.", exc_info=True)
         # 定義後備的 DATABASE_PATH 等，如果需要
         project_root = Path(__file__).resolve().parent.parent.parent
