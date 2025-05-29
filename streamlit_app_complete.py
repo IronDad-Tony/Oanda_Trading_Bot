@@ -43,7 +43,7 @@ from pathlib import Path
 
 # 確保項目模組可以被找到 - 統一路徑設置
 def setup_project_path():
-    """設置項目的 Python 路徑"""
+    """Set up the Python path for the project.""" # Translated
     project_root = Path(__file__).resolve().parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
@@ -82,6 +82,7 @@ import logging
 from collections import defaultdict
 from src.data_manager.oanda_downloader import manage_data_download_for_symbols # This import should now be more reliable
 import asyncio # Add asyncio import
+import re # Ensure re is imported at the top
 
 # Try to import GPU monitoring
 try:
@@ -109,7 +110,7 @@ except Exception:
 try:
     from src.trainer.universal_trainer import UniversalTrainer as EnhancedUniversalTrainer, create_training_time_range
     # logger is already imported globally
-    from src.common.config import ACCOUNT_CURRENCY, INITIAL_CAPITAL, DEVICE, USE_AMP
+    from src.common.config import ACCOUNT_CURRENCY, INITIAL_CAPITAL, DEVICE, USE_AMP, MAX_ACCOUNT_RISK_PERCENTAGE, ATR_STOP_LOSS_MULTIPLIER, MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY, MAX_SYMBOLS_ALLOWED
     from src.common.shared_data_manager import get_shared_data_manager
     from src.data_manager.instrument_info_manager import InstrumentInfoManager
     TRAINER_AVAILABLE = True
@@ -185,7 +186,7 @@ except ImportError as e:
                     'price': kwargs.get('price', 1.0),
                     'quantity': kwargs.get('quantity', 1000),
                     'profit_loss': kwargs.get('profit_loss', 0.0),
-                    'training_step': kwargs.get('training_step', 0),  # 新增：訓練步數
+                    'training_step': kwargs.get('training_step', 0),  # Added: training step
                     'timestamp': kwargs.get('timestamp', datetime.now())
                 }
                 self.trades_data.append(trade)
@@ -702,7 +703,7 @@ def stop_training():
             old_value = st.session_state[key]
             st.session_state[key] = None if key in ['training_thread', 'trainer'] else False if key == 'first_metric_received' else 0
             logger.info(f"Reset session state key '{key}' from {old_value} to {st.session_state[key]}")
-    
+
     # 特別處理 trainer 的 cleanup
     if st.session_state.get('trainer') is not None: # Double check after reset
         if hasattr(st.session_state.trainer, 'cleanup'):
@@ -796,7 +797,7 @@ def create_real_time_charts():
         ))
         fig_reward.update_layout(
             title="Training Reward Progression",
-            xaxis_title="Training Steps (Session)", # Updated X-axis label
+            xaxis_title="Training Steps (Session)", # X-axis label updated
             yaxis_title="Reward",
             hovermode='x unified',
             height=400
@@ -825,7 +826,7 @@ def create_real_time_charts():
             ))
             fig_ma.update_layout(
                 title=f"Reward Trend Analysis",
-                xaxis_title="Training Steps (Session)", # Updated X-axis label
+                xaxis_title="Training Steps (Session)", # X-axis label updated
                 yaxis_title="Reward",
                 height=400
             )
@@ -853,7 +854,7 @@ def create_real_time_charts():
             ))
         fig_loss.update_layout(
             title="Training Loss Curves",
-            xaxis_title="Training Steps (Session)", # Updated X-axis label
+            xaxis_title="Training Steps (Session)", # X-axis label updated
             yaxis_title="Loss",
             yaxis_type="log", # Consider making this conditional or providing a toggle if losses can be zero/negative
             height=400
@@ -881,7 +882,7 @@ def create_real_time_charts():
             ))
         fig_norms.update_layout(
             title="Model Parameter Norms",
-            xaxis_title="Training Steps (Session)", # Updated X-axis label
+            xaxis_title="Training Steps (Session)", # X-axis label updated
             yaxis=dict(title="L2 Norm", side="left"),
             yaxis2=dict(title="Gradient Norm", side="right", overlaying="y"),
             height=400
@@ -911,8 +912,8 @@ def create_real_time_charts():
         
         fig_portfolio.update_layout(
             title="Portfolio Value Over Time",
-            xaxis_title="Training Steps (Session)", # Updated X-axis label
-            yaxis_title="Portfolio Value ($)",
+            xaxis_title="Training Steps (Session)", # X-axis label updated
+            yaxis_title=f"Portfolio Value ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
             hovermode='x unified',            height=400
         )
         st.plotly_chart(fig_portfolio, use_container_width=True)
@@ -925,13 +926,13 @@ def create_real_time_charts():
             
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Current Value", f"${current_value:,.2f}")
+                st.metric("Current Value", f"{ACCOUNT_CURRENCY} {current_value:,.2f}") # Using ACCOUNT_CURRENCY
             with col2:
                 st.metric("Total Return", f"{total_return:+.2f}%")
             with col3:
-                st.metric("Max Value", f"${max_value:,.2f}")
+                st.metric("Max Value", f"{ACCOUNT_CURRENCY} {max_value:,.2f}") # Using ACCOUNT_CURRENCY
             with col4:
-                st.metric("Min Value", f"${min_value:,.2f}")
+                st.metric("Min Value", f"{ACCOUNT_CURRENCY} {min_value:,.2f}") # Using ACCOUNT_CURRENCY
     
     with chart_tab4:
         st.subheader("Trading Activity")
@@ -999,7 +1000,7 @@ def create_real_time_charts():
                                  '<br>Quantity: ' + buy_trades['quantity'].round(2).astype(str),
                             hovertemplate='<b>%{text}</b><br>' +
                                         'Training Step: %{x}<br>' +
-                                        'P&L: $%{y:.2f}<extra></extra>'
+                                        f'P&L: {ACCOUNT_CURRENCY} %{{y:.2f}}<extra></extra>' # Using ACCOUNT_CURRENCY
                         ))
                     
                     if not sell_trades.empty:
@@ -1017,7 +1018,7 @@ def create_real_time_charts():
                                  '<br>Quantity: ' + sell_trades['quantity'].round(2).astype(str),
                             hovertemplate='<b>%{text}</b><br>' +
                                         'Training Step: %{x}<br>' +
-                                        'P&L: $%{y:.2f}<extra></extra>'
+                                        f'P&L: {ACCOUNT_CURRENCY} %{{y:.2f}}<extra></extra>' # Using ACCOUNT_CURRENCY
                         ))
                     
                     # Add horizontal line at zero P&L
@@ -1026,7 +1027,7 @@ def create_real_time_charts():
                     fig_trades_timeline.update_layout(
                         title="Trade Execution Timeline (by Training Steps)",
                         xaxis_title="Training Steps (Session)",
-                        yaxis_title="Profit/Loss per Trade ($)",
+                        yaxis_title=f"Profit/Loss per Trade ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
                         hovermode='closest',
                         height=500,
                         showlegend=True
@@ -1054,7 +1055,7 @@ def create_real_time_charts():
                         fig_cumulative.update_layout(
                             title="Cumulative Trading P&L Over Training Steps",
                             xaxis_title="Training Steps (Session)",
-                            yaxis_title="Cumulative P&L ($)",
+                            yaxis_title=f"Cumulative P&L ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
                             hovermode='x unified',
                             height=400
                         )
@@ -1110,7 +1111,7 @@ def create_real_time_charts():
                         fig_trades_time.update_layout(
                             title="Trade Execution Timeline (by Timestamp)",
                             xaxis_title="Time",
-                            yaxis_title="Profit/Loss per Trade ($)",
+                            yaxis_title=f"Profit/Loss per Trade ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
                             height=400
                         )
                         st.plotly_chart(fig_trades_time, use_container_width=True)
@@ -1131,7 +1132,7 @@ def create_real_time_charts():
                     ))
                     fig_pnl.update_layout(
                         title="Profit & Loss Distribution",
-                        xaxis_title="Profit/Loss ($)",
+                        xaxis_title=f"Profit/Loss ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
                         yaxis_title="Frequency",
                         height=400
                     )
@@ -1140,9 +1141,9 @@ def create_real_time_charts():
                     # P&L statistics
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Total P&L", f"${trades_df['profit_loss'].sum():.2f}")
+                        st.metric("Total P&L", f"{ACCOUNT_CURRENCY} {trades_df['profit_loss'].sum():.2f}") # Using ACCOUNT_CURRENCY
                     with col2:
-                        st.metric("Average P&L", f"${trades_df['profit_loss'].mean():.2f}")
+                        st.metric("Average P&L", f"{ACCOUNT_CURRENCY} {trades_df['profit_loss'].mean():.2f}") # Using ACCOUNT_CURRENCY
                     with col3:
                         winning_trades = len(trades_df[trades_df['profit_loss'] > 0])
                         total_trades = len(trades_df)
@@ -1197,20 +1198,20 @@ def create_real_time_charts():
 
 # 新增：智能更新管理器
 class SmartUpdateManager:
-    """智能更新管理器 - 根據訓練狀態和數據變化智能調整更新頻率"""
+    """Smart Update Manager - Intelligently adjusts update frequency based on training status and data changes.""" # Translated
     
     def __init__(self):
         self.last_update_time = {}
         self.update_intervals = {
-            'metrics': 2,      # 關鍵指標每2秒
-            'charts': 5,       # 圖表每5秒
-            'system': 10,      # 系統資源每10秒
-            'logs': 15         # 日誌每15秒
+            'metrics': 2,      # Critical metrics every 2s
+            'charts': 5,       # Charts every 5s
+            'system': 10,      # System resources every 10s
+            'logs': 15         # Logs every 15s
         }
         self.training_state = 'idle'
         
     def should_update(self, component: str) -> bool:
-        """判斷是否應該更新指定組件"""
+        """Determine if the specified component should be updated.""" # Translated
         current_time = time.time()
         
         # 根據訓練狀態調整更新頻率
@@ -1230,7 +1231,7 @@ class SmartUpdateManager:
         return False
     
     def update_training_state(self, state: str):
-        """更新訓練狀態"""
+        """Update the training state.""" # Translated
         self.training_state = state
 
 # 全局更新管理器實例
@@ -1247,9 +1248,9 @@ def display_training_status():
     error = status_info['error']
     current_metrics = status_info['current_metrics'] # This contains global_step
 
-    current_global_step = current_metrics.get('step', 0)  # 模型總步數（累積里程）
+    current_global_step = current_metrics.get('step', 0)  # Total steps of the model (cumulative mileage)
 
-    # Capture initial global step for the current session (當前訓練會話的起始步數)
+    # Capture initial global step for the current session
     if status == 'running' and not st.session_state.get('first_metric_received', False) and hasattr(st.session_state, 'shared_data_manager'):
         # This condition ensures we capture the first step reported by the trainer for this session
         # current_global_step here is the first step value received from the trainer after clear_data()
@@ -1259,17 +1260,17 @@ def display_training_status():
 
     initial_global_step = st.session_state.get('initial_global_step_of_session', 0)
     
-    # 計算當前會話的步數（從1開始，而不是從累積步數開始）
+    # Calculate current session steps (starting from 1, not cumulative)
     if initial_global_step is None or initial_global_step == 0:
         if status == 'running' and current_global_step > 0:
-            # 如果訓練正在進行但沒有記錄初始步數，設置為當前步數
+            # If training is ongoing but initial step wasn't recorded, set to current step
             st.session_state.initial_global_step_of_session = current_global_step
             initial_global_step = current_global_step
             logger.info(f"Late capture of initial global step for session: {initial_global_step}")
         else:
             initial_global_step = 0
 
-    # 當前會話的訓練步數（本次會話已完成的步數）
+    # Training steps for the current session (steps completed in this session)
     current_session_steps = max(0, current_global_step - initial_global_step)
     session_target_steps = st.session_state.get('total_timesteps', 0)
 
@@ -1311,7 +1312,7 @@ def display_training_status():
                     eta_text = f"ETA: {h:02d}:{m:02d}:{s:02d}"
 
     if status == 'running':
-        # Calculate progress based on session steps (當前會話的進度)
+        # Calculate progress based on session steps
         session_progress_percentage = (current_session_steps / session_target_steps * 100) if session_target_steps > 0 else 0
         session_progress_percentage = max(0, min(100, session_progress_percentage))
 
@@ -1324,18 +1325,18 @@ def display_training_status():
 
             with col1:
                 # 模型總步數（累積里程）- 模型自創建以來的總訓練步數
-                st.metric("模型總步數", f"{current_global_step:,}", help="模型自創建以來已訓練的總步數（累積里程）。")
+                st.metric("Model Total Steps", f"{current_global_step:,}", help="Total number of training steps the model has undergone since its creation (cumulative mileage).")
             
             with col2:
                 # 當前會話步數 - 本次訓練會話的步數，從0開始計數
                 step_display_text = f"{current_session_steps:,} / {session_target_steps:,}"
-                st.metric("當前會話步數", step_display_text, help="本次訓練會話的步數進度，從0開始計數。")
+                st.metric("Current Session Steps", step_display_text, help="Progress of training steps in the current session, counting from 0 towards the session target.")
             
             with col3:
-                st.metric("最新獎勵", f"{current_metrics['reward']:.3f}")
+                st.metric("Latest Reward", f"{current_metrics['reward']:.3f}")
             
             with col4:
-                st.metric("投資組合價值", f"${current_metrics['portfolio_value']:,.2f}")
+                st.metric("Portfolio Value", f"{ACCOUNT_CURRENCY} {current_metrics['portfolio_value']:,.2f}") # Using ACCOUNT_CURRENCY
             
             with col5:
                 actor_loss_val = current_metrics.get('actor_loss', float('nan'))
@@ -1350,7 +1351,7 @@ def display_training_status():
         st.success("✅ Training Completed Successfully!")
         if current_metrics: # current_metrics still holds the last global state
             final_session_steps = current_global_step - initial_global_step
-            st.info(f"Final Session Steps: {final_session_steps:,} | Model Total Steps: {current_global_step:,} | Final Portfolio: ${current_metrics['portfolio_value']:,.2f}")
+            st.info(f"Final Session Steps: {final_session_steps:,} | Model Total Steps: {current_global_step:,} | Final Portfolio: {ACCOUNT_CURRENCY} {current_metrics['portfolio_value']:,.2f}") # Using ACCOUNT_CURRENCY
         
     elif status == 'error':
         st.error(f"❌ Training Error: {error}")
@@ -1382,7 +1383,7 @@ def download_data_with_progress(symbols, start_date, end_date, granularity="S5")
 
 @st.fragment(run_every=2)
 def update_critical_training_metrics():
-    """實時更新關鍵訓練指標 - 每2秒更新一次"""
+    """Update critical training metrics in real-time - updates every 2 seconds""" # Translated
     try:
         if 'shared_data_manager' not in st.session_state:
             return
@@ -1398,37 +1399,47 @@ def update_critical_training_metrics():
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            current_step = current_status.get('step', 0)
-            total_steps = st.session_state.get('total_timesteps', 0)
+            current_step = current_status.get('current_metrics', {}).get('step', 0) # This should be global_step from metrics
+            total_steps = st.session_state.get('total_timesteps', 0) # This is session target
+            
+            # Calculate session steps for display
+            initial_global_step = st.session_state.get('initial_global_step_of_session', 0)
+            session_current_steps = max(0, current_step - initial_global_step)
+
             st.metric(
-                "訓練步數", 
-                f"{current_step:,}",
-                delta=f"/ {total_steps:,}" if total_steps > 0 else None
+                "Training Steps (Session)", 
+                f"{session_current_steps:,}",
+                delta=f"/ {total_steps:,}" if total_steps > 0 else None,
+                help="Current steps in this training session out of the target steps for this session. This shows how much of the current training job is complete."
             )
         
         with col2:
-            portfolio_value = current_status.get('portfolio_value', 0)
+            portfolio_value = current_status.get('current_metrics', {}).get('portfolio_value', INITIAL_CAPITAL) # Use INITIAL_CAPITAL as default
+            initial_cap_for_delta = INITIAL_CAPITAL # Ensure this is the correct initial capital for comparison
             st.metric(
-                "投資組合價值", 
-                f"${portfolio_value:,.2f}",
-                delta=f"{((portfolio_value / INITIAL_CAPITAL - 1) * 100):+.2f}%" if portfolio_value > 0 else None
+                "Portfolio Value", 
+                f"{ACCOUNT_CURRENCY} {portfolio_value:,.2f}", # Using ACCOUNT_CURRENCY
+                delta=f"{((portfolio_value / initial_cap_for_delta - 1) * 100):+.2f}%" if initial_cap_for_delta > 0 and portfolio_value != initial_cap_for_delta else None,
+                help=f"Current value of the trading portfolio in {ACCOUNT_CURRENCY} and its percentage change from the initial capital. This reflects the overall performance."
             )
         
         with col3:
             status = current_status.get('status', 'idle')
-            status_color = "🟢" if status == 'running' else "🟡" if status == 'starting' else "🔴"
-            st.metric("訓練狀態", f"{status_color} {status.upper()}")
+            status_color = "🟢" if status == 'running' else "🟡" if status == 'starting' else "🔴" if status == 'error' else "⏸️" # Added error and idle differentiation
+            st.metric("Training Status", f"{status_color} {status.upper()}", help="Current operational status of the training process: Running, Starting, Error, Idle, or Completed.")
         
         with col4:
-            progress = current_status.get('progress', 0)
-            st.metric("進度", f"{progress:.1f}%")
+            # Progress should be based on session steps vs session target
+            session_progress = (session_current_steps / total_steps * 100) if total_steps > 0 else 0
+            session_progress = max(0, min(100, session_progress)) # Clamp between 0 and 100
+            st.metric("Session Progress", f"{session_progress:.1f}%", help="Percentage of training steps completed in the current session. This provides a visual of how far along the current training is.")
             
     except Exception as e:
         logger.error(f"Fragment update error: {e}")
 
 @st.fragment(run_every=5)
 def update_performance_charts():
-    """更新效能圖表 - 每5秒更新一次"""
+    """Update performance charts - updates every 5 seconds""" # Translated
     try:
         if 'shared_data_manager' not in st.session_state:
             return
@@ -1449,7 +1460,18 @@ def update_performance_charts():
             # 使用更輕量的圖表更新
             if not df.empty and 'step' in df.columns:
                 # 只顯示關鍵指標的簡化圖表
-                chart_data = df.set_index('step')[['reward', 'portfolio_value']].tail(30)  # 只顯示最近30點
+                # Determine initial global step for session-relative plotting
+                initial_global_step = st.session_state.get('initial_global_step_of_session')
+                if initial_global_step is None: # If not captured yet
+                    if 'step' in df.columns and not df.empty:
+                        initial_global_step = df['step'].min()
+                    else:
+                        initial_global_step = 0 # Fallback
+                
+                df['session_step'] = df['step'] - initial_global_step
+                df['session_step'] = df['session_step'].clip(lower=0) # Ensure non-negative
+                
+                chart_data = df.set_index('session_step')[['reward', 'portfolio_value']].tail(30)  # Display only the last 30 points
                 st.line_chart(chart_data, height=250)
                 
     except Exception as e:
@@ -1457,7 +1479,7 @@ def update_performance_charts():
 
 @st.fragment(run_every=10)
 def update_system_resources():
-    """更新系統資源監控 - 每10秒更新一次"""
+    """Update system resource monitoring - updates every 10 seconds""" # Translated
     try:
         system_info = get_system_info()
         if not system_info:
@@ -1469,18 +1491,20 @@ def update_system_resources():
             if system_info.get('gpu'):
                 for gpu in system_info['gpu']:
                     st.metric(
-                        f"GPU {gpu['id']} 使用率",
+                        f"GPU {gpu['id']} Usage",
                         f"{gpu['load']:.1f}%",
-                        delta=f"記憶體: {gpu['memory_percent']:.1f}%"
+                        delta=f"Memory: {gpu['memory_percent']:.1f}%",
+                        help=f"GPU Name: {gpu['name']}. Shows current utilization (load) and video memory (VRAM) usage percentage. Helps monitor GPU performance and bottlenecks."
                     )
         
         with col2:
             memory = system_info.get('memory', {})
             if memory:
                 st.metric(
-                    "系統記憶體",
+                    "System Memory",
                     f"{memory['percent']:.1f}%",
-                    delta=f"{memory['used']:.1f}GB / {memory['total']:.1f}GB"
+                    delta=f"{memory['used']:.1f}GB / {memory['total']:.1f}GB",
+                    help="Overall system RAM usage. Shows percentage used, amount used in GB, and total available RAM. Useful for identifying memory constraints."
                 )
                 
     except Exception as e:
@@ -1500,10 +1524,10 @@ def main():
     st.markdown("**Enhanced Real-time Trading Monitor with GPU Support**")
     
     if not TRAINER_AVAILABLE:
-        st.warning("⚠️ Running in simulation mode - trainer modules not available")
+        st.warning("⚠️ Running in simulation mode - trainer modules not available. Full functionality may be limited.")
         # logger.info("Main: TRAINER_AVAILABLE is False.") # Logged once at import usually
     else:
-        st.success("✅ All modules loaded successfully")
+        st.success("✅ All modules loaded successfully. System is ready for training.")
         # logger.info("Main: TRAINER_AVAILABLE is True.")
     
     with st.sidebar:
@@ -1515,13 +1539,13 @@ def main():
         selected_symbols = []
         for cat, symbols in sorted(categorized.items()):
             with st.expander(f"{cat} ({len(symbols)})", expanded=(cat=="CURRENCY")):
-                options = [f"{sym} - {display}" for sym, display, _ in symbols]
-                default = [options[0]] if cat=="CURRENCY" and options else []
+                options = [f"{sym} - {display}" for sym, display, _ in symbols] # Ensure f-string is correctly formatted
+                default = [options[0]] if cat=="CURRENCY" and options and options[0] in options else [] # Default to first currency for convenience, ensure default is valid
                 selected = st.multiselect(
                     f"Select {cat} symbols:",
                     options,
                     default=default,
-                    help=f"Select {cat} instruments."
+                    help=f"Choose the financial instruments from the {cat} category for the trading model. You can select multiple symbols. The model will be trained on the selected instruments."
                 )
                 # Map back to symbol codes
                 for sel in selected:
@@ -1530,9 +1554,9 @@ def main():
         # Limit to MAX_SYMBOLS_ALLOWED
         from src.common.config import MAX_SYMBOLS_ALLOWED
         # --- 新增：顯示選取狀態 ---
-        st.markdown(f"<span style='font-size:16px;'>最多可選取 <b style='color:#0072C6;'>{MAX_SYMBOLS_ALLOWED}</b> 個 symbols，目前已選取 <b style='color:{'red' if len(selected_symbols)>MAX_SYMBOLS_ALLOWED else '#009900'};'>{len(selected_symbols)}</b> 個。</span>", unsafe_allow_html=True)
+        st.markdown(f"<span style='font-size:16px;'>Max <b style='color:#0072C6;'>{MAX_SYMBOLS_ALLOWED}</b> symbols can be selected. Currently selected: <b style='color:{'red' if len(selected_symbols)>MAX_SYMBOLS_ALLOWED else '#009900'};'>{len(selected_symbols)}</b>.</span>", unsafe_allow_html=True) # Translated
         if len(selected_symbols) > MAX_SYMBOLS_ALLOWED:
-            st.warning(f"You selected {len(selected_symbols)} symbols, but only {MAX_SYMBOLS_ALLOWED} are allowed. Truncating.")
+            st.warning(f"You selected {len(selected_symbols)} symbols, but only {MAX_SYMBOLS_ALLOWED} are allowed. Truncating to the first {MAX_SYMBOLS_ALLOWED}.") # Enhanced warning
             selected_symbols = selected_symbols[:MAX_SYMBOLS_ALLOWED]        
         st.subheader("Trading Parameters")
         from src.common.config import (
@@ -1543,14 +1567,14 @@ def main():
             start_date = st.date_input(
                 "Start Date",
                 value=datetime.now().date() - timedelta(days=30),
-                help="Training data start date",
+                help="Select the beginning date for the historical data used in training. The model will learn from data starting from this date. Ensure this date is before the End Date.",
                 format="DD/MM/YYYY"
             )
         with col2:
             end_date = st.date_input(
                 "End Date", 
                 value=datetime.now().date() - timedelta(days=1),
-                help="Training data end date",
+                help="Select the end date for the historical training data. The data up to this date (exclusive of the current day) will be used. This date must be after the Start Date.",
                 format="DD/MM/YYYY"
             )
         total_timesteps = st.number_input(
@@ -1559,7 +1583,7 @@ def main():
             max_value=1000000,
             value=50000,
             step=1000,
-            help="Total number of training steps"
+            help="Define the total number of iterations or steps the training process will run for. A higher number generally means more learning but will take longer to complete."
         )
         # --- Custom training parameters ---
         col1, col2 = st.columns(2)
@@ -1569,7 +1593,7 @@ def main():
                 min_value=1000.0,
                 max_value=1e8,
                 value=float(INITIAL_CAPITAL),
-                step=1000.0,                help="Initial simulated account capital."
+                step=1000.0,                help="Set the initial amount of virtual capital for the simulated trading account (e.g., 100000). This is the starting equity for backtesting and training sessions."
             )
             risk_pct = st.number_input(
                 "Max Risk % per Trade",
@@ -1578,7 +1602,7 @@ def main():
                 value=float(MAX_ACCOUNT_RISK_PERCENTAGE * 100),  # Convert to percentage
                 step=0.1,
                 format="%.1f",
-                help="Maximum risk per trade as a percentage of account equity."
+                help="Specify the maximum percentage (e.g., 1.0 for 1%) of the total account equity that can be risked on any single trade. This helps in managing overall portfolio risk."
             )
             # Convert back to decimal for internal use
             risk_pct = risk_pct / 100
@@ -1588,16 +1612,15 @@ def main():
                 min_value=0.5,
                 max_value=10.0,
                 value=float(ATR_STOP_LOSS_MULTIPLIER),
-                step=0.1,                help="ATR-based stop loss multiplier."
+                step=0.1,                help="Set the multiplier for the Average True Range (ATR) to determine stop-loss levels (e.g., 2.5). A larger multiplier means a wider stop loss, potentially reducing premature exits but increasing risk per trade."
             )
             max_pos_pct = st.number_input(
                 "Max Position Size %",
                 min_value=0.1,
                 max_value=100.0,
-                value=float(MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY * 100),  # Convert to percentage
-                step=0.1,
+                value=float(MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY * 100),  # Convert to percentage                step=0.1,
                 format="%.1f",
-                help="Maximum nominal position size as a percentage of equity."
+                help="Define the maximum percentage (e.g., 5.0 for 5%) of account equity that can be allocated to a single position. This controls exposure to any one instrument."
             )
             # Convert back to decimal for internal use
             max_pos_pct = max_pos_pct / 100
@@ -1610,7 +1633,7 @@ def main():
                 max_value=10000,
                 value=2000,
                 step=100,
-                help="How often to save the model"
+                help="Determine how frequently (in training steps, e.g., every 2000 steps) the current state of the model should be saved to disk. Frequent saves allow resuming training but can take up disk space."
             )
         with col2:
             eval_freq = st.number_input(
@@ -1619,11 +1642,12 @@ def main():
                 max_value=10000,
                 value=5000,
                 step=100,
-                help="How often to evaluate the model"
+                help="Specify how often (in training steps, e.g., every 5000 steps) the model should be evaluated on a separate validation dataset (if configured). Evaluation provides insights into generalization."
             )
         
         st.subheader("Training Controls")
         
+               
         # Ensure shared_manager is available, init_session_state should have created it.
         shared_manager = st.session_state.get('shared_data_manager')
         if not shared_manager:
@@ -1640,9 +1664,9 @@ def main():
             if current_status not in ['running', 'starting']: # Check for 'starting' as well
                 if st.button("🚀 Start Training", type="primary", use_container_width=True):
                     if not selected_symbols:
-                        st.error("Please select at least one trading symbol")
+                        st.error("Please select at least one trading symbol before starting.")
                     elif start_date >= end_date:
-                        st.error("Start date must be before end date")
+                        st.error("Start date must be before end date. Please adjust the dates.")
                     else:
                         # --- Data download progress bar before training ---
                         logger.info("main(): 'Start Training' button clicked. Proceeding with data download and start_training.")
@@ -1654,14 +1678,14 @@ def main():
                             total_timesteps, save_freq, eval_freq
                         )
                         if success:
-                            st.success("Training start initiated successfully!")
+                            st.success("Training start initiated successfully! Monitor progress below.")
                             logger.info("main(): start_training call returned True. Rerunning Streamlit.")
                             st.rerun()
                         else:
-                            st.error("Failed to initiate training. Check logs.")
+                            st.error("Failed to initiate training. Please check the logs for more details.")
                             logger.warning("main(): start_training call returned False.")
             else:
-                st.button("🚀 Start Training", disabled=True, use_container_width=True, help="Training is currently active or starting.")
+                st.button("🚀 Start Training", disabled=True, use_container_width=True, help="Training is currently active or in the process of starting. Please wait or stop the current session to start a new one.")
         
         with col2:
             if current_status in ['running', 'starting']: # Check for 'starting' as well
@@ -1669,16 +1693,16 @@ def main():
                     logger.info("main(): 'Stop Training' button clicked. Calling stop_training.")
                     success = stop_training()
                     if success: # stop_training now always returns True, success means signal sent
-                        st.info("Stop signal sent. Training will halt shortly.")
+                        st.info("Stop signal sent. Training will halt shortly and data will be reset.")
                         logger.info("main(): stop_training call completed. Rerunning Streamlit.")
                         st.rerun() # Rerun to update UI based on new state
                     # else: # stop_training doesn't return False in the new logic for failure to stop
                     # st.error("Failed to send stop signal properly.")
             else:
-                st.button("⏹️ Stop Training", disabled=True, use_container_width=True, help="No active training to stop.")
+                st.button("⏹️ Stop Training", disabled=True, use_container_width=True, help="No active training session to stop. Start training first to enable this button.")
         
         st.subheader("Auto Refresh")
-        auto_refresh = st.checkbox("Enable Auto Refresh", value=st.session_state.auto_refresh)
+        auto_refresh = st.checkbox("Enable Auto Refresh", value=st.session_state.auto_refresh, help="Automatically refresh the dashboard at a set interval to see live updates. Disable for manual control or to reduce system load if experiencing performance issues.")
         st.session_state.auto_refresh = auto_refresh
         
         # 新增：顯示模式控制
@@ -1687,7 +1711,7 @@ def main():
             "Chart Display Mode",
             options=['full', 'lite', 'minimal'],
             index=['full', 'lite', 'minimal'].index(st.session_state.get('chart_display_mode', 'full')),
-            help="Full: 最完整顯示 | Lite: 平衡模式 | Minimal: 最輕量顯示"
+            help="Adjust the detail level of charts. 'Full' shows all details and plot types. 'Lite' offers a balanced view with fewer points or simplified charts. 'Minimal' provides the most lightweight display, suitable for performance on slower systems or connections."
         )
         st.session_state.chart_display_mode = chart_mode
         
@@ -1695,7 +1719,7 @@ def main():
         enable_smart_updates = st.checkbox(
             "Enable Smart Updates", 
             value=st.session_state.get('enable_smart_updates', True),
-            help="根據訓練狀態智能調整更新頻率"
+            help="Dynamically adjust data refresh frequency based on training status. This means faster updates during active training or startup/shutdown phases, and slower updates when the system is idle or has completed training, optimizing performance."
         )
         st.session_state.enable_smart_updates = enable_smart_updates
         
@@ -1705,7 +1729,7 @@ def main():
                 min_value=1,
                 max_value=30,
                 value=st.session_state.refresh_interval,
-                help="How often to refresh the data"
+                help="Set how often (in seconds) the data and charts on the dashboard should refresh. This setting is active only if 'Enable Auto Refresh' is checked above."
             )
             st.session_state.refresh_interval = refresh_interval
         
@@ -1719,31 +1743,33 @@ def main():
     # 添加性能監控指示器
     if st.session_state.get('enable_smart_updates', True):
         update_manager = get_update_manager()
-        with st.expander("🔧 Performance Monitor", expanded=False):
+        with st.expander("🔧 Performance Monitor", expanded=False): # Title already in English
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Update Mode", st.session_state.get('chart_display_mode', 'full').upper())
+                st.metric("Chart Mode", st.session_state.get('chart_display_mode', 'full').upper(), help="Current display mode for charts (Full, Lite, or Minimal). This affects the amount of data shown and chart complexity.")
             
             with col2:
-                current_status = shared_manager.get_current_status()
-                training_status = current_status.get('status', 'idle')
-                st.metric("Training Status", training_status.upper())
+                current_status_info = shared_manager.get_current_status() # Renamed to avoid conflict
+                training_status_display = current_status_info.get('status', 'idle') # Renamed
+                st.metric("Training Status", training_status_display.upper(), help="Live status of the model training process (e.g., Running, Idle, Error, Completed).")
             
             with col3:
-                # 顯示當前更新間隔
-                refresh_info = f"{st.session_state.refresh_interval}s"
+                # Display current effective refresh interval
+                base_interval = st.session_state.refresh_interval
+                effective_interval_info = f"{base_interval}s"
+                
                 if st.session_state.get('enable_smart_updates', True):
-                    if training_status == 'running':
-                        refresh_info += " (Normal)"
-                    elif training_status in ['starting', 'stopping']:
-                        refresh_info += " (Fast)"
-                    else:
-                        refresh_info += " (Slow)"
-                st.metric("Refresh Rate", refresh_info)
+                    if training_status_display == 'running':
+                        effective_interval_info += " (Normal)"
+                    elif training_status_display in ['starting', 'stopping']:
+                        effective_interval_info = f"{max(1, base_interval // 2)}s (Fast)" # Show actual fast interval
+                    else: # idle, completed, error
+                        effective_interval_info = f"{base_interval * 2}s (Slow)" # Show actual slow interval
+                st.metric("Effective Refresh", effective_interval_info, help="Current dashboard refresh rate. This rate adapts if 'Enable Smart Updates' is active, becoming faster during critical operations and slower when idle.")
     
     # Create tabs for different sections
-    tab1, tab2, tab3 = st.tabs(["📊 Real-time Charts", "💻 System Monitor", "📋 Training Logs"])
+    tab1, tab2, tab3 = st.tabs(["📊 Real-time Charts", "💻 System Monitor", "📋 Training Data"]) # Changed "Training Logs" to "Training Data"
     
     with tab1:
         create_real_time_charts()
@@ -1752,92 +1778,107 @@ def main():
         display_system_monitoring()
     
     with tab3:
-        st.subheader("📋 Training Logs")
+        st.subheader("📋 Recent Trades") # MOVED UP, Title translated
         shared_manager = st.session_state.shared_data_manager
-        latest_metrics = shared_manager.get_latest_metrics(50)
-        if latest_metrics:
-            df = pd.DataFrame(latest_metrics)
-            df = df.sort_values('step', ascending=False)
+        latest_trades = shared_manager.get_latest_trades(50) # Increased number of trades to fetch
 
-            st.dataframe(
-                df[['step', 'reward', 'portfolio_value', 'actor_loss', 'critic_loss']],
-                use_container_width=True,
-                hide_index=True
-            )
-        else:
-            st.info("No training logs available yet.")
-        
-        latest_trades = shared_manager.get_latest_trades(20)
         if latest_trades:
-            st.subheader("Recent Trades")
             trades_df = pd.DataFrame(latest_trades)
             
-            # Compute total P&L only for reduce/close actions, color-code
-            def calc_total_pnl(row):
-                # Only show P&L for reduce/close, not open/add
-                action = row.get('action', '').lower()
-                if action in ['reduce', 'close', 'sell', 'buy']:
-                    # Assume profit_loss is per unit, total = profit_loss * quantity
-                    qty = row.get('quantity', 0)
-                    pl = row.get('profit_loss', 0)
-                    total = pl * qty
-                    return total
-                return None
+            # Ensure trades_df_display is defined from trades_df before styling
+            trades_df_display = trades_df.copy()
+
+            # Rename 'profit_loss' to 'Total_PnL' to match the expected column name for styling
+            if 'profit_loss' in trades_df_display.columns:
+                trades_df_display.rename(columns={'profit_loss': 'Total_PnL'}, inplace=True)
             
-            trades_df['Total_PnL'] = trades_df.apply(calc_total_pnl, axis=1)
-            
-            # Enhanced color function with white for zero P&L and 3x font size
-            def color_pnl(val):
-                if pd.isna(val):
-                    return 'font-size: 24px;'  # 3x larger font (8px * 3 = 24px)
+            # Apply currency prefix and rounding to 'Total_PnL' if the column exists
+            if 'Total_PnL' in trades_df_display.columns:
+                trades_df_display['Total_PnL'] = trades_df_display['Total_PnL'].apply(
+                    lambda x: f"{ACCOUNT_CURRENCY} {x:.2f}" if isinstance(x, (int, float)) else x
+                )
+            # Apply rounding to 'Price' if the column exists
+            if 'Price' in trades_df_display.columns:
+                trades_df_display['Price'] = trades_df_display['Price'].apply(
+                    lambda x: f"{x:.5f}" if isinstance(x, (int, float)) else x # Assuming price needs more precision
+                )
+
+            TARGET_FONT_SIZE_PX = '24px'
+
+            # Helper function for PnL column styling (color and font size)
+            def format_and_color_pnl(val_str):
+                style_rules = [f'font-size: {TARGET_FONT_SIZE_PX}']
+                color = 'black' # Default color
+                try:
+                    # Extract numeric value for color determination
+                    match = re.search(r'([-+]?\\d*\\.?\\d+)', str(val_str))
+                    if match:
+                        numeric_val = float(match.group(1))
+                        color = 'green' if numeric_val >= 0 else 'red'
+                except ValueError:
+                    pass # If float conversion fails, color remains black
+                style_rules.append(f'color: {color}')
+                return '; '.join(style_rules)
+
+            # Helper function for general column styling (font size only)
+            def general_font_style(_): # Value not used, but applymap expects a function taking one arg
+                return f'font-size: {TARGET_FONT_SIZE_PX};'
+
+            # Check if trades_df_display is not empty before styling
+            if not trades_df_display.empty:
+                styled_df = trades_df_display.style # Initialize Styler object
+
+                # Apply PnL specific styling if the column exists
+                if 'Total_PnL' in trades_df_display.columns:
+                    styled_df = styled_df.applymap(
+                        format_and_color_pnl, subset=['Total_PnL']
+                    )
+
+                # Apply general font styling to all other columns
+                for col_name in trades_df_display.columns:
+                    if col_name != 'Total_PnL': # Only apply general style if not the P&L column (or if P&L doesn't exist)
+                        styled_df = styled_df.applymap(general_font_style, subset=[col_name])
                 
-                if val == 0:
-                    color = 'white'
-                elif val > 0:
-                    color = 'green'
-                else:
-                    color = 'red'
-                
-                return f'color: {color}; font-weight: bold; font-size: 24px;'
+                st.dataframe(styled_df, height=600, use_container_width=True)
+            elif 'trades_df' in locals() and trades_df.empty: # If original df was empty
+                 st.info("No trade records available yet.")
+            else: # If trades_df_display somehow became empty but trades_df wasn't (should not happen with copy)
+                 st.info("No trade records to display after formatting.")
+
+        else:
+            st.info("No trade records available yet.")
+
+        st.divider() # Visual separator
+
+        st.subheader("📋 Training Metrics Log") # MOVED DOWN, Title translated
+        latest_metrics = shared_manager.get_latest_metrics(50) 
+        if latest_metrics:
+            df_metrics = pd.DataFrame(latest_metrics) 
+            df_metrics = df_metrics.sort_values('step', ascending=False)
+
+            if 'portfolio_value' in df_metrics.columns:
+                df_metrics['portfolio_value_formatted'] = df_metrics['portfolio_value'].apply(lambda x: f"{ACCOUNT_CURRENCY} {x:,.2f}")
             
-            # Prioritize training_step over step, then step, then fallback to index
-            # Sort by training step with latest at top (descending order)
-            if 'training_step' in trades_df.columns:
-                trades_df = trades_df.sort_values('training_step', ascending=False)
-                show_cols = ['training_step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
-                # Rename column for display
-                trades_df_display = trades_df.copy()
-                trades_df_display = trades_df_display.rename(columns={'training_step': 'Training_Step'})
-                show_cols = ['Training_Step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
-            elif 'step' in trades_df.columns:
-                trades_df = trades_df.sort_values('step', ascending=False)
-                trades_df_display = trades_df.copy()
-                trades_df_display = trades_df_display.rename(columns={'step': 'Training_Step'})
-                show_cols = ['Training_Step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
-            else:
-                trades_df = trades_df.reset_index()
-                trades_df_display = trades_df.copy()
-                # Keep index as fallback but rename for clarity
-                trades_df_display = trades_df_display.rename(columns={'index': 'Record_Index'})
-                show_cols = ['Record_Index', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
-              # Apply styling with enhanced font size and color coding
-            styled_df = trades_df_display[show_cols].style.map(color_pnl, subset=['Total_PnL'])
-            
-            # Apply 3x font size to all columns, not just P&L
-            def apply_large_font(val):
-                return 'font-size: 24px;'
-            
-            # Apply large font to all columns except Total_PnL (which already has styling)
-            non_pnl_cols = [col for col in show_cols if col != 'Total_PnL']
-            styled_df = styled_df.map(apply_large_font, subset=non_pnl_cols)
-            
+            metric_display_cols = {
+                'step': 'Step',
+                'reward': 'Reward',
+                'portfolio_value_formatted': 'Portfolio Value', # Use formatted column
+                'actor_loss': 'Actor Loss',
+                'critic_loss': 'Critic Loss'
+            }
+            # Ensure only existing columns are selected and renamed
+            cols_to_display = [col for col in metric_display_cols.keys() if col in df_metrics.columns or col == 'portfolio_value_formatted']
+            df_metrics_display = df_metrics[cols_to_display].rename(columns=metric_display_cols)
+
+
             st.dataframe(
-                styled_df,
+                df_metrics_display,
                 use_container_width=True,
                 hide_index=True
             )
         else:
-            st.info("No recent trades data available yet.")
+            st.info("No training metrics log available yet. Metrics will populate as training progresses.")
+        
       # Auto refresh functionality with smart intervals
     if st.session_state.auto_refresh:
         update_manager = get_update_manager()
