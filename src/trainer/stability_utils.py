@@ -245,6 +245,18 @@ class NumericalStabilityMonitor:
             "explosion_rate": self.gradient_explosion_count / max(self.total_checks, 1)
         }
     
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get stability statistics (alias for get_stability_summary).
+        
+        Returns:
+            Dictionary with stability statistics
+        """
+        stability_summary = self.get_stability_summary()
+        # Add nan_detections for backward compatibility
+        stability_summary['nan_detections'] = self.nan_count
+        return stability_summary
+
     def reset_stats(self):
         """Reset all statistics counters."""
         self.nan_count = 0

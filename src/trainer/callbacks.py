@@ -262,9 +262,32 @@ class UniversalCheckpointCallback(BaseCallback):
             if 'infos' in self.locals and isinstance(self.locals['infos'], list) and len(self.locals['infos']) > 0:
                 info_dict = self.locals['infos'][0] # Assuming single env or primary env's info
                 portfolio_value = info_dict.get('portfolio_value', info_dict.get('portfolio_value_ac', INITIAL_CAPITAL))
+              # 計算實時L2範數和梯度範數
+            l2_norm_val = 0.0
+            grad_norm_val = 0.0
             
-            l2_norm_val = self.model.logger.name_to_value.get('train/transformer_l2_norm', 0.0) # Will be updated later if transformer exists
-            grad_norm_val = self.model.logger.name_to_value.get('train/gradient_norm', self.model.logger.name_to_value.get('actor_grad_norm', 0.0))
+            # 計算L2範數 - 如果有transformer
+            if hasattr(self.model.policy, 'features_extractor') and \
+               self.model.policy.features_extractor is not None and \
+               hasattr(self.model.policy.features_extractor, 'transformer'):
+                try:
+                    transformer_module = getattr(self.model.policy.features_extractor, 'transformer', None)
+                    if transformer_module is not None:
+                        transformer_params = list(transformer_module.parameters())
+                        if transformer_params:
+                            l2_norm_val = sum(p.data.norm(2).item() ** 2 for p in transformer_params if p.requires_grad) ** 0.5
+                except Exception as e_l2:
+                    logger.debug(f"L2範數計算錯誤: {e_l2}")
+                    l2_norm_val = 0.0
+            
+            # 計算梯度範數 - 使用穩定性監控器
+            try:
+                if hasattr(self.model, 'policy'):
+                    grad_stats = self.stability_monitor.compute_gradient_stats(self.model.policy)
+                    grad_norm_val = grad_stats.get('total_norm', 0.0)
+            except Exception as e_grad:
+                logger.debug(f"梯度範數計算錯誤: {e_grad}")
+                grad_norm_val = 0.0
 
             self.shared_data_manager.add_training_metric(
                 step=step_count,
@@ -314,33 +337,16 @@ class UniversalCheckpointCallback(BaseCallback):
                     self.interrupted = True
                     return False 
             elif current_metric > self.es_best_metric_val :
-                 self.es_best_metric_val = current_metric
-
-        # 3. 記錄Transformer範數
+                 self.es_best_metric_val = current_metric        # 3. 記錄Transformer範數（定期記錄到SB3日誌）
         if self.n_calls > 0 and self.n_calls % self.log_transformer_norm_freq == 0:
-            # Corrected line continuation and attribute access
-            if hasattr(self.model.policy, 'features_extractor') and \
-               self.model.policy.features_extractor is not None and \
-               hasattr(self.model.policy.features_extractor, 'transformer'):
-                try:
-                    transformer_module = getattr(self.model.policy.features_extractor, 'transformer', None)
-                    if transformer_module is not None:
-                        transformer_params = transformer_module.parameters()
-                        l2_norm = sum(p.data.norm(2).item() ** 2 for p in transformer_params if p.requires_grad) ** 0.5
-                        self.logger.record("train/transformer_l2_norm", l2_norm) # Log to SB3 logger
-                        logger.debug(f"Transformer L2 Norm @{self.num_timesteps}: {l2_norm:.4f}")
-                        
-                        # If shared_data_manager is available and has metrics_data, update the l2_norm of the last entry
-                        if self.shared_data_manager and self.shared_data_manager.metrics_data:
-                            # This is a simplified update; ideally, metrics are structured to accommodate this.
-                            # For now, we assume the main add_training_metric has a placeholder or this is logged separately for UI.
-                            # To directly update the last metric:
-                            # self.shared_data_manager.metrics_data[-1]['l2_norm'] = l2_norm
-                            pass # Placeholder for more sophisticated update if needed
-                                    
-                except Exception as e_norm: 
-                    # Assuming this was pass or an empty block as per attachment
-                    pass
+            # 記錄到 SB3 logger 用於 TensorBoard
+            if l2_norm_val > 0:
+                self.logger.record("train/transformer_l2_norm", l2_norm_val)
+                logger.debug(f"Transformer L2 Norm @{self.num_timesteps}: {l2_norm_val:.4f}")
+            
+            if grad_norm_val > 0:
+                self.logger.record("train/gradient_norm", grad_norm_val)
+                logger.debug(f"Gradient Norm @{self.num_timesteps}: {grad_norm_val:.4f}")
         
         # 4. 數值穩定性檢查和梯度裁剪
         # # --- 自定義梯度裁剪邏輯已禁用 ---
@@ -399,10 +405,9 @@ class UniversalCheckpointCallback(BaseCallback):
         
         # 6. 記錄穩定性統計
         if self.n_calls > 0 and self.n_calls % self.log_transformer_norm_freq == 0:
-            try:
-                # 記錄梯度統計
+            try:                # 記錄梯度統計
                 if hasattr(self.model, 'policy') and hasattr(self.model.policy, 'features_extractor'):
-                    grad_stats = self.stability_monitor.get_gradient_stats(self.model.policy.features_extractor)
+                    grad_stats = self.stability_monitor.compute_gradient_stats(self.model.policy.features_extractor)
                     for stat_name, stat_value in grad_stats.items():
                         self.logger.record(f"train/gradient_{stat_name}", stat_value)
                 
