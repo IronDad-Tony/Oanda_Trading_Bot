@@ -372,14 +372,25 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             "equity_after_trade": float(self.equity_ac + realized_pnl_ac - commission_ac) # 這裡的equity_after_trade是預估值，最終會在_update_portfolio_and_equity_value更新
         })
         self.last_trade_step_per_slot[slot_idx] = self.episode_step_count
-        
-        # Log trade to shared data manager for real-time monitoring
+          # Log trade to shared data manager for real-time monitoring
         if self.shared_data_manager is not None:
             # Calculate global training step
             global_training_step = self.training_step_offset + self.episode_step_count
             
-            # Determine action for shared data manager
-            action_str = "buy" if units_to_trade > 0 else "sell"
+            # Determine action for shared data manager with detailed format: [Long/Short] - [Trade Type]
+            position_direction = "Long" if units_to_trade > 0 else "Short"
+            
+            # Map trade_type to user-friendly terms
+            trade_type_mapping = {
+                "OPEN": "Open",
+                "ADD": "Add", 
+                "REDUCE": "Reduce",
+                "CLOSE": "Close",
+                "CLOSE_AND_REVERSE": "Close & Reverse"
+            }
+            trade_action = trade_type_mapping.get(trade_type, trade_type)
+            
+            action_str = f"{position_direction} - {trade_action}"
             
             # Convert price to account currency for consistency
             trade_price_ac = float(trade_price_qc * exchange_rate_qc_to_ac)
