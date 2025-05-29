@@ -684,18 +684,33 @@ def stop_training():
     else:
         logger.info(f"Shared manager status is '{current_sm_status['status']}', not changing to 'idle'.")
     
-    st.session_state.training_thread = None # Clear thread from session state
-    if st.session_state.get('trainer') is not None: # If a trainer instance exists
+    # 清理訓練相關的 session state 變量，確保 UI 完全重置到初始狀態
+    training_session_keys_to_reset = [
+        'training_thread',
+        'trainer', 
+        'first_metric_received',
+        'initial_global_step_of_session',
+        'total_timesteps'
+    ]
+    
+    for key in training_session_keys_to_reset:
+        if key in st.session_state:
+            old_value = st.session_state[key]
+            st.session_state[key] = None if key in ['training_thread', 'trainer'] else False if key == 'first_metric_received' else 0
+            logger.info(f"Reset session state key '{key}' from {old_value} to {st.session_state[key]}")
+    
+    # 特別處理 trainer 的 cleanup
+    if st.session_state.get('trainer') is not None: # Double check after reset
         if hasattr(st.session_state.trainer, 'cleanup'):
             logger.info("Calling trainer.cleanup() as part of stop_training finalization.")
             try:
                 st.session_state.trainer.cleanup()
             except Exception as e_cleanup:
                 logger.error(f"Error during trainer.cleanup() in stop_training: {e_cleanup}", exc_info=True)
-        st.session_state.trainer = None # Clear trainer from session state
+        st.session_state.trainer = None # Ensure it's cleared
         logger.info("Trainer instance cleared from session state.")
     
-    logger.info("stop_training function execution completed.")
+    logger.info("stop_training function execution completed with full UI state reset.")
     return True # Assume success in signaling stop, actual stop depends on thread.
 
 def create_real_time_charts():
@@ -1211,9 +1226,9 @@ def display_training_status():
     error = status_info['error']
     current_metrics = status_info['current_metrics'] # This contains global_step
 
-    current_global_step = current_metrics.get('step', 0)
+    current_global_step = current_metrics.get('step', 0)  # 模型總步數（累積里程）
 
-    # Capture initial global step for the current session
+    # Capture initial global step for the current session (當前訓練會話的起始步數)
     if status == 'running' and not st.session_state.get('first_metric_received', False) and hasattr(st.session_state, 'shared_data_manager'):
         # This condition ensures we capture the first step reported by the trainer for this session
         # current_global_step here is the first step value received from the trainer after clear_data()
@@ -1221,27 +1236,30 @@ def display_training_status():
         st.session_state.first_metric_received = True
         logger.info(f"Captured initial global step for session: {st.session_state.initial_global_step_of_session}")
 
-    initial_global_step = st.session_state.get('initial_global_step_of_session')
-    if initial_global_step is None: # Default if not captured yet (e.g., before training starts or first metric)
-        initial_global_step = 0
-        if status == 'running' and current_global_step > 0: # Attempt to set if running and not yet set (less ideal)
-             st.session_state.initial_global_step_of_session = current_global_step
-             initial_global_step = current_global_step
+    initial_global_step = st.session_state.get('initial_global_step_of_session', 0)
+    
+    # 計算當前會話的步數（從1開始，而不是從累積步數開始）
+    if initial_global_step is None or initial_global_step == 0:
+        if status == 'running' and current_global_step > 0:
+            # 如果訓練正在進行但沒有記錄初始步數，設置為當前步數
+            st.session_state.initial_global_step_of_session = current_global_step
+            initial_global_step = current_global_step
+            logger.info(f"Late capture of initial global step for session: {initial_global_step}")
+        else:
+            initial_global_step = 0
 
-
-    session_steps_done = current_global_step - initial_global_step
+    # 當前會話的訓練步數（本次會話已完成的步數）
+    current_session_steps = max(0, current_global_step - initial_global_step)
     session_target_steps = st.session_state.get('total_timesteps', 0)
-
 
     # --- Training speed and ETA calculation ---
     steps_per_sec = None
     eta_text = None
-    if status == 'running' and current_global_step > initial_global_step : # Ensure some progress in global steps
+    if status == 'running' and current_global_step > initial_global_step: # Ensure some progress in global steps
         metrics_for_speed_calc = shared_manager.get_latest_metrics(20) 
         if len(metrics_for_speed_calc) >= 2:
             global_steps_from_deque = [m['step'] for m in metrics_for_speed_calc]
-            # Ensure timestamps are datetime objects
-            times_from_deque = [m['timestamp'] for m in metrics_for_speed_calc]
+            # Ensure timestamps are datetime objects            times_from_deque = [m['timestamp'] for m in metrics_for_speed_calc]
             if isinstance(times_from_deque[0], str):
                 times_from_deque = [pd.to_datetime(t) for t in times_from_deque]
             
@@ -1251,9 +1269,8 @@ def display_training_status():
             if dt > 0 and d_global_steps > 0:
                 steps_per_sec = d_global_steps / dt
                 
-                # Calculate session steps based on the latest global step from deque
-                current_session_step_for_eta = global_steps_from_deque[-1] - initial_global_step
-                session_steps_left = session_target_steps - current_session_step_for_eta
+                # Calculate session steps left based on current session progress
+                session_steps_left = session_target_steps - current_session_steps
                 
                 if steps_per_sec > 0 and session_steps_left > 0:
                     eta_sec = int(session_steps_left / steps_per_sec)
@@ -1261,37 +1278,36 @@ def display_training_status():
                     eta_text = f"ETA: {h:02d}:{m:02d}:{s:02d}"
 
     if status == 'running':
-        # Calculate progress based on session steps
-        session_progress_percentage = (session_steps_done / session_target_steps * 100) if session_target_steps > 0 else 0
+        # Calculate progress based on session steps (當前會話的進度)
+        session_progress_percentage = (current_session_steps / session_target_steps * 100) if session_target_steps > 0 else 0
         session_progress_percentage = max(0, min(100, session_progress_percentage))
 
         st.success(f"🚀 Training in Progress - {session_progress_percentage:.1f}% Complete (Session)")
         st.progress(session_progress_percentage / 100)
         
         if current_metrics and current_global_step >= initial_global_step: # Check if current_metrics is populated
-            # Display key metrics in columns
-            # col1, col2, col3, col4 = st.columns(4) # Old: 4 columns
-            col1, col2, col3, col4, col5 = st.columns(5) # New: 5 columns
+            # Display key metrics in columns with clear distinction
+            col1, col2, col3, col4, col5 = st.columns(5)
 
             with col1:
-                st.metric("模型總步數", f"{current_global_step:,}", help="模型自創建以來已訓練的總步數。")
+                # 模型總步數（累積里程）- 模型自創建以來的總訓練步數
+                st.metric("模型總步數", f"{current_global_step:,}", help="模型自創建以來已訓練的總步數（累積里程）。")
             
             with col2:
-                # Display session step / session target steps
-                step_display_text = f"{session_steps_done:,} / {session_target_steps:,}"
-                # Removed help text that showed global step, as it's now a separate metric
-                st.metric("當前訓練步數", step_display_text, help="當前訓練會話的步數進度。")
+                # 當前會話步數 - 本次訓練會話的步數，從0開始計數
+                step_display_text = f"{current_session_steps:,} / {session_target_steps:,}"
+                st.metric("當前會話步數", step_display_text, help="本次訓練會話的步數進度，從0開始計數。")
             
             with col3:
-                st.metric("最新獎勵", f"{current_metrics['reward']:.3f}") # "Latest Reward"
+                st.metric("最新獎勵", f"{current_metrics['reward']:.3f}")
             
             with col4:
-                st.metric("投資組合價值", f"${current_metrics['portfolio_value']:,.2f}") # "Portfolio Value"
+                st.metric("投資組合價值", f"${current_metrics['portfolio_value']:,.2f}")
             
-            with col5: # New column for Actor Loss, previously in col4
+            with col5:
                 actor_loss_val = current_metrics.get('actor_loss', float('nan'))
                 st.metric("Actor Loss", f"{actor_loss_val:.4f}")
-
+        
         if steps_per_sec:
             st.info(f"Training Speed: {steps_per_sec:.2f} steps/sec")
         if eta_text:
@@ -1301,7 +1317,7 @@ def display_training_status():
         st.success("✅ Training Completed Successfully!")
         if current_metrics: # current_metrics still holds the last global state
             final_session_steps = current_global_step - initial_global_step
-            st.info(f"Final Session Step: {final_session_steps:,} (Global: {current_global_step:,}) | Final Portfolio: ${current_metrics['portfolio_value']:,.2f}")
+            st.info(f"Final Session Steps: {final_session_steps:,} | Model Total Steps: {current_global_step:,} | Final Portfolio: ${current_metrics['portfolio_value']:,.2f}")
         
     elif status == 'error':
         st.error(f"❌ Training Error: {error}")
@@ -1311,6 +1327,8 @@ def display_training_status():
     
     else:
         st.warning(f"Unknown Status: {status}")
+
+
 def download_data_with_progress(symbols, start_date, end_date, granularity="S5"):
     """Download historical data with Streamlit progress bar and status text."""
     st.info("Checking and downloading required historical data for selected symbols...")
