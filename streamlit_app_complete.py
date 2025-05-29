@@ -1767,8 +1767,7 @@ def main():
                     else: # idle, completed, error
                         effective_interval_info = f"{base_interval * 2}s (Slow)" # Show actual slow interval
                 st.metric("Effective Refresh", effective_interval_info, help="Current dashboard refresh rate. This rate adapts if 'Enable Smart Updates' is active, becoming faster during critical operations and slower when idle.")
-    
-    # Create tabs for different sections
+      # Create tabs for different sections
     tab1, tab2, tab3 = st.tabs(["📊 Real-time Charts", "💻 System Monitor", "📋 Training Data"]) # Changed "Training Logs" to "Training Data"
     
     with tab1:
@@ -1781,12 +1780,16 @@ def main():
         st.subheader("📋 Recent Trades") # MOVED UP, Title translated
         shared_manager = st.session_state.shared_data_manager
         latest_trades = shared_manager.get_latest_trades(50) # Increased number of trades to fetch
-
+        
         if latest_trades:
             trades_df = pd.DataFrame(latest_trades)
             
             # Ensure trades_df_display is defined from trades_df before styling
             trades_df_display = trades_df.copy()
+
+            # Remove timestamp column if it exists
+            if 'timestamp' in trades_df_display.columns:
+                trades_df_display = trades_df_display.drop(columns=['timestamp'])
 
             # Rename 'profit_loss' to 'Total_PnL' to match the expected column name for styling
             if 'profit_loss' in trades_df_display.columns:
@@ -1805,19 +1808,26 @@ def main():
 
             TARGET_FONT_SIZE_PX = '24px'
 
-            # Helper function for PnL column styling (color and font size)
+            # Helper function for PnL column styling (color, background, and font size)
             def format_and_color_pnl(val_str):
                 style_rules = [f'font-size: {TARGET_FONT_SIZE_PX}']
                 color = 'black' # Default color
+                background_color = 'white' # Default background
                 try:
                     # Extract numeric value for color determination
-                    match = re.search(r'([-+]?\\d*\\.?\\d+)', str(val_str))
+                    match = re.search(r'([-+]?\d*\.?\d+)', str(val_str))
                     if match:
                         numeric_val = float(match.group(1))
-                        color = 'green' if numeric_val >= 0 else 'red'
+                        if numeric_val >= 0:
+                            color = 'green'
+                            background_color = '#d4edda'  # Light green background for profit
+                        else:
+                            color = 'red'
+                            background_color = '#f8d7da'  # Light red background for loss
                 except ValueError:
                     pass # If float conversion fails, color remains black
                 style_rules.append(f'color: {color}')
+                style_rules.append(f'background-color: {background_color}')
                 return '; '.join(style_rules)
 
             # Helper function for general column styling (font size only)
@@ -1865,11 +1875,9 @@ def main():
                 'portfolio_value_formatted': 'Portfolio Value', # Use formatted column
                 'actor_loss': 'Actor Loss',
                 'critic_loss': 'Critic Loss'
-            }
-            # Ensure only existing columns are selected and renamed
+            }            # Ensure only existing columns are selected and renamed
             cols_to_display = [col for col in metric_display_cols.keys() if col in df_metrics.columns or col == 'portfolio_value_formatted']
             df_metrics_display = df_metrics[cols_to_display].rename(columns=metric_display_cols)
-
 
             st.dataframe(
                 df_metrics_display,
@@ -1879,7 +1887,7 @@ def main():
         else:
             st.info("No training metrics log available yet. Metrics will populate as training progresses.")
         
-      # Auto refresh functionality with smart intervals
+    # Auto refresh functionality with smart intervals
     if st.session_state.auto_refresh:
         update_manager = get_update_manager()
         
