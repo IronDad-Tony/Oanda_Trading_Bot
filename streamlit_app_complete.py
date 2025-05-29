@@ -299,7 +299,9 @@ def init_session_state():
         if hasattr(st.session_state, 'shared_data_manager') and st.session_state.shared_data_manager:
             st.session_state.training_status = st.session_state.shared_data_manager.get_current_status().get('status', 'idle')
         else:
-            st.session_state.training_status = 'idle' # Absolute fallback    if 'training_thread' not in st.session_state:
+            st.session_state.training_status = 'idle' # Absolute fallback
+    
+    if 'training_thread' not in st.session_state:
         st.session_state.training_thread = None
     if 'trainer' not in st.session_state:
         st.session_state.trainer = None
@@ -309,6 +311,14 @@ def init_session_state():
         st.session_state.refresh_interval = 5
     if 'total_timesteps' not in st.session_state: # For ETA calculation
         st.session_state.total_timesteps = 0
+
+    # 新增：UI 優化相關的 session state
+    if 'last_data_update' not in st.session_state:
+        st.session_state.last_data_update = 0
+    if 'update_cache' not in st.session_state:
+        st.session_state.update_cache = {}
+    if 'chart_display_mode' not in st.session_state:
+        st.session_state.chart_display_mode = 'full'  # 'full', 'lite', 'minimal'
 
     # Flag to indicate this function has run for the current session setup
     st.session_state.session_state_initialized = True
@@ -689,9 +699,26 @@ def stop_training():
     return True # Assume success in signaling stop, actual stop depends on thread.
 
 def create_real_time_charts():
-    """Create real-time training monitoring charts"""
+    """Create real-time training monitoring charts with smart updating"""
     shared_manager = st.session_state.shared_data_manager
-    all_metrics = shared_manager.get_all_metrics() 
+    update_manager = get_update_manager()
+    
+    # 更新訓練狀態到智能管理器
+    current_status = shared_manager.get_current_status()
+    update_manager.update_training_state(current_status.get('status', 'idle'))
+    
+    # 檢查是否需要更新圖表
+    chart_mode = st.session_state.get('chart_display_mode', 'full')
+    
+    # 根據模式決定數據量
+    if chart_mode == 'minimal':
+        max_points = 50
+    elif chart_mode == 'lite':
+        max_points = 100
+    else:
+        max_points = 500
+    
+    all_metrics = shared_manager.get_latest_metrics(max_points)
     
     if not all_metrics:
         st.info("No training data available. Start training to view real-time charts.")
@@ -1132,6 +1159,49 @@ def create_real_time_charts():
         else:
             st.info("No trading data available yet.")
 
+# 新增：智能更新管理器
+class SmartUpdateManager:
+    """智能更新管理器 - 根據訓練狀態和數據變化智能調整更新頻率"""
+    
+    def __init__(self):
+        self.last_update_time = {}
+        self.update_intervals = {
+            'metrics': 2,      # 關鍵指標每2秒
+            'charts': 5,       # 圖表每5秒
+            'system': 10,      # 系統資源每10秒
+            'logs': 15         # 日誌每15秒
+        }
+        self.training_state = 'idle'
+        
+    def should_update(self, component: str) -> bool:
+        """判斷是否應該更新指定組件"""
+        current_time = time.time()
+        
+        # 根據訓練狀態調整更新頻率
+        if self.training_state == 'running':
+            multiplier = 1.0
+        elif self.training_state in ['starting', 'stopping']:
+            multiplier = 0.5  # 更頻繁的更新
+        else:
+            multiplier = 2.0  # 較少的更新
+            
+        interval = self.update_intervals.get(component, 5) * multiplier
+        last_update = self.last_update_time.get(component, 0)
+        
+        if current_time - last_update >= interval:
+            self.last_update_time[component] = current_time
+            return True
+        return False
+    
+    def update_training_state(self, state: str):
+        """更新訓練狀態"""
+        self.training_state = state
+
+# 全局更新管理器實例
+@st.cache_resource
+def get_update_manager():
+    return SmartUpdateManager()
+
 def display_training_status():
     """Display current training status with enhanced information"""
     shared_manager = st.session_state.shared_data_manager
@@ -1256,6 +1326,114 @@ def download_data_with_progress(symbols, start_date, end_date, granularity="S5")
     )
     progress_bar.progress(1.0)
     status_text.success("Historical data download complete.")
+
+# --- Fragment-based UI Updates for Better Performance ---
+
+@st.fragment(run_every=2)
+def update_critical_training_metrics():
+    """實時更新關鍵訓練指標 - 每2秒更新一次"""
+    try:
+        if 'shared_data_manager' not in st.session_state:
+            return
+        
+        shared_manager = st.session_state.shared_data_manager
+        current_status = shared_manager.get_current_status()
+        
+        # 只在訓練進行時更新，減少不必要的計算
+        if current_status.get('status') not in ['running', 'starting']:
+            return
+        
+        # 創建指標顯示
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            current_step = current_status.get('step', 0)
+            total_steps = st.session_state.get('total_timesteps', 0)
+            st.metric(
+                "訓練步數", 
+                f"{current_step:,}",
+                delta=f"/ {total_steps:,}" if total_steps > 0 else None
+            )
+        
+        with col2:
+            portfolio_value = current_status.get('portfolio_value', 0)
+            st.metric(
+                "投資組合價值", 
+                f"${portfolio_value:,.2f}",
+                delta=f"{((portfolio_value / INITIAL_CAPITAL - 1) * 100):+.2f}%" if portfolio_value > 0 else None
+            )
+        
+        with col3:
+            status = current_status.get('status', 'idle')
+            status_color = "🟢" if status == 'running' else "🟡" if status == 'starting' else "🔴"
+            st.metric("訓練狀態", f"{status_color} {status.upper()}")
+        
+        with col4:
+            progress = current_status.get('progress', 0)
+            st.metric("進度", f"{progress:.1f}%")
+            
+    except Exception as e:
+        logger.error(f"Fragment update error: {e}")
+
+@st.fragment(run_every=5)
+def update_performance_charts():
+    """更新效能圖表 - 每5秒更新一次"""
+    try:
+        if 'shared_data_manager' not in st.session_state:
+            return
+        
+        shared_manager = st.session_state.shared_data_manager
+        current_status = shared_manager.get_current_status()
+        
+        # 只在有數據時更新圖表
+        if current_status.get('status') not in ['running', 'starting']:
+            return
+            
+        # 只更新圖表數據，不重新渲染整個頁面
+        latest_metrics = shared_manager.get_latest_metrics(50)  # 減少數據量
+        
+        if latest_metrics and len(latest_metrics) > 1:
+            df = pd.DataFrame(latest_metrics)
+            
+            # 使用更輕量的圖表更新
+            if not df.empty and 'step' in df.columns:
+                # 只顯示關鍵指標的簡化圖表
+                chart_data = df.set_index('step')[['reward', 'portfolio_value']].tail(30)  # 只顯示最近30點
+                st.line_chart(chart_data, height=250)
+                
+    except Exception as e:
+        logger.error(f"Chart fragment update error: {e}")
+
+@st.fragment(run_every=10)
+def update_system_resources():
+    """更新系統資源監控 - 每10秒更新一次"""
+    try:
+        system_info = get_system_info()
+        if not system_info:
+            return
+            
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if system_info.get('gpu'):
+                for gpu in system_info['gpu']:
+                    st.metric(
+                        f"GPU {gpu['id']} 使用率",
+                        f"{gpu['load']:.1f}%",
+                        delta=f"記憶體: {gpu['memory_percent']:.1f}%"
+                    )
+        
+        with col2:
+            memory = system_info.get('memory', {})
+            if memory:
+                st.metric(
+                    "系統記憶體",
+                    f"{memory['percent']:.1f}%",
+                    delta=f"{memory['used']:.1f}GB / {memory['total']:.1f}GB"
+                )
+                
+    except Exception as e:
+        logger.error(f"System resource fragment update error: {e}")
 
 def main():
     """Main application function"""
@@ -1452,6 +1630,24 @@ def main():
         auto_refresh = st.checkbox("Enable Auto Refresh", value=st.session_state.auto_refresh)
         st.session_state.auto_refresh = auto_refresh
         
+        # 新增：顯示模式控制
+        st.subheader("Display Settings")
+        chart_mode = st.selectbox(
+            "Chart Display Mode",
+            options=['full', 'lite', 'minimal'],
+            index=['full', 'lite', 'minimal'].index(st.session_state.get('chart_display_mode', 'full')),
+            help="Full: 最完整顯示 | Lite: 平衡模式 | Minimal: 最輕量顯示"
+        )
+        st.session_state.chart_display_mode = chart_mode
+        
+        # 智能更新控制
+        enable_smart_updates = st.checkbox(
+            "Enable Smart Updates", 
+            value=st.session_state.get('enable_smart_updates', True),
+            help="根據訓練狀態智能調整更新頻率"
+        )
+        st.session_state.enable_smart_updates = enable_smart_updates
+        
         if auto_refresh:
             refresh_interval = st.slider(
                 "Refresh Interval (seconds)",
@@ -1467,6 +1663,32 @@ def main():
     
     # Main content area
     display_training_status()
+    
+    # 添加性能監控指示器
+    if st.session_state.get('enable_smart_updates', True):
+        update_manager = get_update_manager()
+        with st.expander("🔧 Performance Monitor", expanded=False):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Update Mode", st.session_state.get('chart_display_mode', 'full').upper())
+            
+            with col2:
+                current_status = shared_manager.get_current_status()
+                training_status = current_status.get('status', 'idle')
+                st.metric("Training Status", training_status.upper())
+            
+            with col3:
+                # 顯示當前更新間隔
+                refresh_info = f"{st.session_state.refresh_interval}s"
+                if st.session_state.get('enable_smart_updates', True):
+                    if training_status == 'running':
+                        refresh_info += " (Normal)"
+                    elif training_status in ['starting', 'stopping']:
+                        refresh_info += " (Fast)"
+                    else:
+                        refresh_info += " (Slow)"
+                st.metric("Refresh Rate", refresh_info)
     
     # Create tabs for different sections
     tab1, tab2, tab3 = st.tabs(["📊 Real-time Charts", "💻 System Monitor", "📋 Training Logs"])
@@ -1484,6 +1706,7 @@ def main():
         if latest_metrics:
             df = pd.DataFrame(latest_metrics)
             df = df.sort_values('step', ascending=False)
+
             st.dataframe(
                 df[['step', 'reward', 'portfolio_value', 'actor_loss', 'critic_loss']],
                 use_container_width=True,
@@ -1564,10 +1787,25 @@ def main():
             )
         else:
             st.info("No recent trades data available yet.")
-    
-    # Auto refresh functionality
+      # Auto refresh functionality with smart intervals
     if st.session_state.auto_refresh:
-        time.sleep(st.session_state.refresh_interval)
+        update_manager = get_update_manager()
+        
+        # 根據訓練狀態動態調整刷新間隔
+        current_status = shared_manager.get_current_status()
+        training_status = current_status.get('status', 'idle')
+        
+        if st.session_state.get('enable_smart_updates', True):
+            if training_status == 'running':
+                refresh_interval = st.session_state.refresh_interval
+            elif training_status in ['starting', 'stopping']:
+                refresh_interval = max(1, st.session_state.refresh_interval // 2)  # 更頻繁
+            else:
+                refresh_interval = st.session_state.refresh_interval * 2  # 較少刷新
+        else:
+            refresh_interval = st.session_state.refresh_interval
+            
+        time.sleep(refresh_interval)
         st.rerun()
 
 if __name__ == "__main__":
