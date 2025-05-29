@@ -678,11 +678,15 @@ def stop_training():
         logger.info("No active training thread found to join.")
     
     current_sm_status = shared_manager.get_current_status()
-    if current_sm_status['status'] not in ['error', 'completed']: 
+    if current_sm_status['status'] not in ['error', 'completed']:
         shared_manager.update_training_status('idle') # Set to idle if not already error/completed
         logger.info("Shared manager status updated to 'idle' after stop sequence.")
     else:
         logger.info(f"Shared manager status is '{current_sm_status['status']}', not changing to 'idle'.")
+    
+    # 清除所有共享數據，包括訓練指標、交易記錄和圖表數據
+    shared_manager.clear_data()
+    logger.info("All shared training data, metrics, and trade records have been cleared.")
     
     # 清理訓練相關的 session state 變量，確保 UI 完全重置到初始狀態
     training_session_keys_to_reset = [
