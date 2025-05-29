@@ -299,14 +299,12 @@ def init_session_state():
         if hasattr(st.session_state, 'shared_data_manager') and st.session_state.shared_data_manager:
             st.session_state.training_status = st.session_state.shared_data_manager.get_current_status().get('status', 'idle')
         else:
-            st.session_state.training_status = 'idle' # Absolute fallback
-
-    if 'training_thread' not in st.session_state:
+            st.session_state.training_status = 'idle' # Absolute fallback    if 'training_thread' not in st.session_state:
         st.session_state.training_thread = None
     if 'trainer' not in st.session_state:
         st.session_state.trainer = None
     if 'auto_refresh' not in st.session_state:
-        st.session_state.auto_refresh = False
+        st.session_state.auto_refresh = True
     if 'refresh_interval' not in st.session_state:
         st.session_state.refresh_interval = 5
     if 'total_timesteps' not in st.session_state: # For ETA calculation
@@ -1306,8 +1304,7 @@ def main():
         st.markdown(f"<span style='font-size:16px;'>最多可選取 <b style='color:#0072C6;'>{MAX_SYMBOLS_ALLOWED}</b> 個 symbols，目前已選取 <b style='color:{'red' if len(selected_symbols)>MAX_SYMBOLS_ALLOWED else '#009900'};'>{len(selected_symbols)}</b> 個。</span>", unsafe_allow_html=True)
         if len(selected_symbols) > MAX_SYMBOLS_ALLOWED:
             st.warning(f"You selected {len(selected_symbols)} symbols, but only {MAX_SYMBOLS_ALLOWED} are allowed. Truncating.")
-            selected_symbols = selected_symbols[:MAX_SYMBOLS_ALLOWED]
-        
+            selected_symbols = selected_symbols[:MAX_SYMBOLS_ALLOWED]        
         st.subheader("Trading Parameters")
         from src.common.config import (
             INITIAL_CAPITAL, MAX_ACCOUNT_RISK_PERCENTAGE, ATR_STOP_LOSS_MULTIPLIER, MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY
@@ -1317,13 +1314,15 @@ def main():
             start_date = st.date_input(
                 "Start Date",
                 value=datetime.now().date() - timedelta(days=30),
-                help="Training data start date"
+                help="Training data start date",
+                format="DD/MM/YYYY"
             )
         with col2:
             end_date = st.date_input(
                 "End Date", 
                 value=datetime.now().date() - timedelta(days=1),
-                help="Training data end date"
+                help="Training data end date",
+                format="DD/MM/YYYY"
             )
         total_timesteps = st.number_input(
             "Total Training Steps",
@@ -1341,36 +1340,38 @@ def main():
                 min_value=1000.0,
                 max_value=1e8,
                 value=float(INITIAL_CAPITAL),
-                step=1000.0,
-                help="Initial simulated account capital."
+                step=1000.0,                help="Initial simulated account capital."
             )
             risk_pct = st.number_input(
                 "Max Risk % per Trade",
-                min_value=0.01,
-                max_value=1.0,
-                value=float(MAX_ACCOUNT_RISK_PERCENTAGE),
-                step=0.01,
-                format="%.2f",
+                min_value=0.1,
+                max_value=100.0,
+                value=float(MAX_ACCOUNT_RISK_PERCENTAGE * 100),  # Convert to percentage
+                step=0.1,
+                format="%.1f",
                 help="Maximum risk per trade as a percentage of account equity."
             )
+            # Convert back to decimal for internal use
+            risk_pct = risk_pct / 100
         with col2:
             atr_mult = st.number_input(
                 "ATR Stop Multiplier",
                 min_value=0.5,
                 max_value=10.0,
                 value=float(ATR_STOP_LOSS_MULTIPLIER),
-                step=0.1,
-                help="ATR-based stop loss multiplier."
+                step=0.1,                help="ATR-based stop loss multiplier."
             )
             max_pos_pct = st.number_input(
                 "Max Position Size %",
-                min_value=0.01,
-                max_value=1.0,
-                value=float(MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY),
-                step=0.01,
-                format="%.2f",
+                min_value=0.1,
+                max_value=100.0,
+                value=float(MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY * 100),  # Convert to percentage
+                step=0.1,
+                format="%.1f",
                 help="Maximum nominal position size as a percentage of equity."
             )
+            # Convert back to decimal for internal use
+            max_pos_pct = max_pos_pct / 100
         # --- Save/Eval frequency controls ---
         col1, col2 = st.columns(2)
         with col1:
