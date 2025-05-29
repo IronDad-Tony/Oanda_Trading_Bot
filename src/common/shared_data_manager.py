@@ -177,10 +177,10 @@ class SharedTrainingDataManager:
             'step': step,
             'reward': float(reward),
             'portfolio_value': float(portfolio_value),
-            'actor_loss': float(actor_loss) if actor_loss is not None else np.nan, # Changed
-            'critic_loss': float(critic_loss) if critic_loss is not None else np.nan, # Changed
-            'l2_norm': float(l2_norm) if l2_norm is not None else np.nan, # Changed
-            'grad_norm': float(grad_norm) if grad_norm is not None else np.nan, # Changed
+            'actor_loss': float(actor_loss) if actor_loss is not None and not np.isnan(actor_loss) else np.nan,
+            'critic_loss': float(critic_loss) if critic_loss is not None and not np.isnan(critic_loss) else np.nan,
+            'l2_norm': float(l2_norm) if l2_norm is not None and not np.isnan(l2_norm) and l2_norm > 0 else np.nan,
+            'grad_norm': float(grad_norm) if grad_norm is not None and not np.isnan(grad_norm) and grad_norm > 0 else np.nan,
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
         
@@ -189,19 +189,16 @@ class SharedTrainingDataManager:
         except multiprocessing.queues.Full:
             logger.warning("Metrics multiprocessing queue is full. Metric may be lost.")
         except Exception as e:
-            logger.error(f"Error putting to metrics_mp_queue: {e}", exc_info=False)
-
-
-        # Update current and performance stats directly (thread-safe due to GIL or explicit lock if needed)
+            logger.error(f"Error putting to metrics_mp_queue: {e}", exc_info=False)        # Update current and performance stats directly (thread-safe due to GIL or explicit lock if needed)
         with self.lock:
             self.current_metrics = {
                 'step': step,
                 'reward': float(reward),
                 'portfolio_value': float(portfolio_value),
-                'actor_loss': float(actor_loss) if actor_loss is not None else np.nan, # Changed
-                'critic_loss': float(critic_loss) if critic_loss is not None else np.nan, # Changed
-                'l2_norm': float(l2_norm) if l2_norm is not None else np.nan, # Changed
-                'grad_norm': float(grad_norm) if grad_norm is not None else np.nan, # Changed
+                'actor_loss': float(actor_loss) if actor_loss is not None and not np.isnan(actor_loss) else np.nan,
+                'critic_loss': float(critic_loss) if critic_loss is not None and not np.isnan(critic_loss) else np.nan,
+                'l2_norm': float(l2_norm) if l2_norm is not None and not np.isnan(l2_norm) and l2_norm > 0 else np.nan,
+                'grad_norm': float(grad_norm) if grad_norm is not None and not np.isnan(grad_norm) and grad_norm > 0 else np.nan,
                 'timestamp': metric['timestamp'] # Use the same timestamp
             }
             self.performance_stats['total_steps'] = step
@@ -209,7 +206,7 @@ class SharedTrainingDataManager:
                 self.performance_stats['best_reward'] = float(reward)
             if portfolio_value > self.performance_stats['best_portfolio_value']:
                 self.performance_stats['best_portfolio_value'] = float(portfolio_value)
-              # No more auto-save check
+            # No more auto-save check
             # if time.time() - self.last_save_time > self.auto_save_interval:
             #     self._auto_save() # This method will be removed
     

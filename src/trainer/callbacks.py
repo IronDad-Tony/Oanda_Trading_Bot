@@ -260,33 +260,69 @@ class UniversalCheckpointCallback(BaseCallback):
             # self.locals 'infos' is a list of dicts, one per env
             if 'infos' in self.locals and isinstance(self.locals['infos'], list) and len(self.locals['infos']) > 0:
                 info_dict = self.locals['infos'][0] # Assuming single env or primary env's info
-                portfolio_value = info_dict.get('portfolio_value', info_dict.get('portfolio_value_ac', INITIAL_CAPITAL))
-              # 計算實時L2範數和梯度範數
+                portfolio_value = info_dict.get('portfolio_value', info_dict.get('portfolio_value_ac', INITIAL_CAPITAL))              # 計算實時L2範數和梯度範數
             l2_norm_val = 0.0
             grad_norm_val = 0.0
             
-            # 計算L2範數 - 如果有transformer
-            if hasattr(self.model.policy, 'features_extractor') and \
-               self.model.policy.features_extractor is not None and \
-               hasattr(self.model.policy.features_extractor, 'transformer'):
-                try:
-                    transformer_module = getattr(self.model.policy.features_extractor, 'transformer', None)
-                    if transformer_module is not None:
-                        transformer_params = list(transformer_module.parameters())
-                        if transformer_params:
-                            l2_norm_val = sum(p.data.norm(2).item() ** 2 for p in transformer_params if p.requires_grad) ** 0.5
-                except Exception as e_l2:
-                    logger.debug(f"L2範數計算錯誤: {e_l2}")
-                    l2_norm_val = 0.0
-            
-            # 計算梯度範數 - 使用穩定性監控器
+            # 計算L2範數 - 擴展檢查範圍
+            try:
+                # First try transformer in features_extractor
+                if hasattr(self.model.policy, 'features_extractor') and \
+                   self.model.policy.features_extractor is not None:
+                    
+                    # Check for transformer attribute
+                    if hasattr(self.model.policy.features_extractor, 'transformer'):
+                        transformer_module = getattr(self.model.policy.features_extractor, 'transformer', None)
+                        if transformer_module is not None:
+                            transformer_params = list(transformer_module.parameters())
+                            if transformer_params:
+                                l2_norm_val = sum(p.data.norm(2).item() ** 2 for p in transformer_params if p.requires_grad) ** 0.5
+                                logger.debug(f"Calculated L2 norm from transformer: {l2_norm_val:.6f}")
+                    
+                    # If no transformer or L2 norm is still 0, calculate from entire features_extractor
+                    if l2_norm_val == 0.0:
+                        extractor_params = list(self.model.policy.features_extractor.parameters())
+                        if extractor_params:
+                            l2_norm_val = sum(p.data.norm(2).item() ** 2 for p in extractor_params if p.requires_grad) ** 0.5
+                            logger.debug(f"Calculated L2 norm from features_extractor: {l2_norm_val:.6f}")
+                
+                # If still 0, calculate from entire policy
+                if l2_norm_val == 0.0 and hasattr(self.model, 'policy'):
+                    policy_params = list(self.model.policy.parameters())
+                    if policy_params:
+                        l2_norm_val = sum(p.data.norm(2).item() ** 2 for p in policy_params if p.requires_grad) ** 0.5
+                        logger.debug(f"Calculated L2 norm from entire policy: {l2_norm_val:.6f}")
+                        
+            except Exception as e_l2:
+                logger.warning(f"L2範數計算錯誤: {e_l2}")
+                l2_norm_val = 0.0
+              # 計算梯度範數 - 使用穩定性監控器並添加備用方法
             try:
                 if hasattr(self.model, 'policy'):
                     grad_stats = self.stability_monitor.compute_gradient_stats(self.model.policy)
                     grad_norm_val = grad_stats.get('total_norm', 0.0)
+                    
+                    # If stability monitor returns 0, try direct calculation
+                    if grad_norm_val == 0.0:
+                        total_norm = 0.0
+                        param_count = 0
+                        for param in self.model.policy.parameters():
+                            if param.grad is not None and param.requires_grad:
+                                param_norm = param.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                                param_count += 1
+                        
+                        if param_count > 0:
+                            grad_norm_val = total_norm ** 0.5
+                            logger.debug(f"Calculated gradient norm directly: {grad_norm_val:.6f}")
+                        
             except Exception as e_grad:
-                logger.debug(f"梯度範數計算錯誤: {e_grad}")
+                logger.warning(f"梯度範數計算錯誤: {e_grad}")
                 grad_norm_val = 0.0
+
+            # Debug: Log the actual values being passed to shared_data_manager
+            if self.n_calls % 100 == 0:  # Log every 100 steps to avoid spam
+                logger.info(f"Step {step_count}: L2={l2_norm_val:.6f}, Grad={grad_norm_val:.6f}, Actor_Loss={actor_loss}, Critic_Loss={critic_loss}")
 
             self.shared_data_manager.add_training_metric(
                 step=step_count,
@@ -440,3 +476,19 @@ class UniversalCheckpointCallback(BaseCallback):
             # or ensure the current `trainer.save_current_model()` in streamlit_app_complete.py handles this.
             # The current logic in streamlit_app_complete.py calls trainer.save_current_model() which saves a "_checkpoint.zip"
             # This _on_training_end save will be the "final" state, even if interrupted.
+
+            # Log model structure info for debugging (only once)
+        if self.n_calls == 1 and hasattr(self.model, 'policy'):
+            logger.info("=== Model Structure Debug Info ===")
+            logger.info(f"Model has policy: {hasattr(self.model, 'policy')}")
+            if hasattr(self.model.policy, 'features_extractor'):
+                logger.info(f"Policy has features_extractor: True")
+                logger.info(f"Features extractor type: {type(self.model.policy.features_extractor)}")
+                logger.info(f"Features extractor has transformer: {hasattr(self.model.policy.features_extractor, 'transformer')}")
+                if hasattr(self.model.policy.features_extractor, 'transformer'):
+                    transformer = self.model.policy.features_extractor.transformer
+                    logger.info(f"Transformer type: {type(transformer)}")
+                    logger.info(f"Transformer param count: {sum(1 for _ in transformer.parameters())}")
+            else:
+                logger.info("Policy has no features_extractor")
+            logger.info("=== End Model Structure Debug ===")

@@ -740,20 +740,19 @@ def create_real_time_charts():
         return
     
     df = pd.DataFrame(all_metrics)
-    
-    # Determine initial global step for session-relative plotting
+      # Determine initial global step for session-relative plotting
     initial_global_step = st.session_state.get('initial_global_step_of_session')
     if initial_global_step is None: # If not captured yet (e.g., very early, or no training started)
-        initial_global_step = 0
-        # Try to infer if possible, though it's best captured in display_training_status
+        # Try to infer from the data - use the minimum step as the session start
         if 'step' in df.columns and not df.empty:
-            # Heuristic: if the first step in data is significantly > 0, it might be an initial global step
-            # This is less reliable than the capture in display_training_status
-            pass 
+            initial_global_step = df['step'].min()
+            st.session_state['initial_global_step_of_session'] = initial_global_step
+        else:
+            initial_global_step = 0
 
 
     x_axis_column = 'step' # Default to global step
-    if 'step' in df.columns:
+    if 'step' in df.columns and not df.empty:
         df['session_step'] = df['step'] - initial_global_step
         x_axis_column = 'session_step' # Prefer session step for plotting
         # Ensure session_step is non-negative, can happen if initial_global_step captured late
@@ -948,11 +947,15 @@ def create_real_time_charts():
             
             with trade_tab1:
                 st.subheader("Trades Over Training Steps")
-                
-                # Check if we have training_step data
+                  # Check if we have training_step data
                 if 'training_step' in trades_df.columns and trades_df['training_step'].notna().any():
                     # Convert training steps to session-relative if needed
-                    initial_global_step = st.session_state.get('initial_global_step_of_session', 0)
+                    initial_global_step = st.session_state.get('initial_global_step_of_session')
+                    if initial_global_step is None:
+                        # Use the minimum training step from trades as session start
+                        initial_global_step = trades_df['training_step'].min()
+                        st.session_state['initial_global_step_of_session'] = initial_global_step
+                    
                     trades_df['session_step'] = trades_df['training_step'] - initial_global_step
                     trades_df['session_step'] = trades_df['session_step'].clip(lower=0)
                     
