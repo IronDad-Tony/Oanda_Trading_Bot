@@ -1794,11 +1794,10 @@ def main():
             # Rename 'profit_loss' to 'Total_PnL' to match the expected column name for styling
             if 'profit_loss' in trades_df_display.columns:
                 trades_df_display.rename(columns={'profit_loss': 'Total_PnL'}, inplace=True)
-            
-            # Apply currency prefix and rounding to 'Total_PnL' if the column exists
+              # Apply currency prefix and rounding to 'Total_PnL' if the column exists
             if 'Total_PnL' in trades_df_display.columns:
                 trades_df_display['Total_PnL'] = trades_df_display['Total_PnL'].apply(
-                    lambda x: f"{ACCOUNT_CURRENCY} {x:.2f}" if isinstance(x, (int, float)) else x
+                    lambda x: f"{ACCOUNT_CURRENCY} $ {x:.2f}" if isinstance(x, (int, float)) else x
                 )
             # Apply rounding to 'Price' if the column exists
             if 'Price' in trades_df_display.columns:
@@ -1806,11 +1805,9 @@ def main():
                     lambda x: f"{x:.5f}" if isinstance(x, (int, float)) else x # Assuming price needs more precision
                 )
 
-            TARGET_FONT_SIZE_PX = '24px'
-
-            # Helper function for PnL column styling (color, background, and font size)
+            TARGET_FONT_SIZE_PX = '24px'            # Helper function for PnL column styling (color, background, and font size)
             def format_and_color_pnl(val_str):
-                style_rules = [f'font-size: {TARGET_FONT_SIZE_PX}']
+                style_rules = [f'font-size: {TARGET_FONT_SIZE_PX}', 'font-weight: bold']
                 color = 'black' # Default color
                 background_color = 'white' # Default background
                 try:
@@ -1858,19 +1855,26 @@ def main():
         else:
             st.info("No trade records available yet.")
 
-        st.divider() # Visual separator
-
-        st.subheader("📋 Training Metrics Log") # MOVED DOWN, Title translated
+        st.divider() # Visual separator        st.subheader("📋 Training Metrics Log") # MOVED DOWN, Title translated
         latest_metrics = shared_manager.get_latest_metrics(50) 
         if latest_metrics:
             df_metrics = pd.DataFrame(latest_metrics) 
             df_metrics = df_metrics.sort_values('step', ascending=False)
 
+            # Convert global steps to session steps for display
+            initial_global_step = st.session_state.get('initial_global_step_of_session', 0)
+            if initial_global_step is None:
+                initial_global_step = 0
+            
+            # Add session step column
+            df_metrics['session_step'] = df_metrics['step'] - initial_global_step
+            df_metrics['session_step'] = df_metrics['session_step'].clip(lower=0)  # Ensure non-negative
+
             if 'portfolio_value' in df_metrics.columns:
                 df_metrics['portfolio_value_formatted'] = df_metrics['portfolio_value'].apply(lambda x: f"{ACCOUNT_CURRENCY} {x:,.2f}")
             
             metric_display_cols = {
-                'step': 'Step',
+                'session_step': 'Step',  # Use session_step instead of step
                 'reward': 'Reward',
                 'portfolio_value_formatted': 'Portfolio Value', # Use formatted column
                 'actor_loss': 'Actor Loss',
