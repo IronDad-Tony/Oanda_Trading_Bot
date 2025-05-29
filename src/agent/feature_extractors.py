@@ -88,14 +88,12 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         symbol_padding_mask = observations["padding_mask"]
         current_positions_ratio = observations["current_positions_nominal_ratio_ac"]
         unrealized_pnl_ratio = observations["unrealized_pnl_ratio_ac"]
-        margin_level = observations["margin_level"]
-
-        # 確定是否為此特定前向傳播啟用AMP
+        margin_level = observations["margin_level"]        # 確定是否為此特定前向傳播啟用AMP
         # 只有當 use_amp 為 True 且 CUDA 可用時才啟用
         amp_enabled_for_this_forward = self.use_amp and torch.cuda.is_available()
         
         # 使用 autocast 上下文僅包裹 Transformer 的調用
-        with torch.cuda.amp.autocast(enabled=amp_enabled_for_this_forward):
+        with torch.amp.autocast('cuda', enabled=amp_enabled_for_this_forward):
             # 確保輸入給 Transformer 的數據是 float32，autocast 會處理後續轉換
             transformer_output_internal = self.transformer(transformer_input_data.to(torch.float32), symbol_padding_mask)
             # transformer_output_internal 的 dtype 可能是 float16 (如果 amp_enabled) 或 float32

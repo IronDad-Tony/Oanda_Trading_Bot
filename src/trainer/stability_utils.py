@@ -205,7 +205,7 @@ class NumericalStabilityMonitor:
             "avg_grad_norm": total_norm / param_count if param_count > 0 else 0.0
         }
     
-    def check_amp_overflow(self, scaler: torch.cuda.amp.GradScaler) -> bool:
+    def check_amp_overflow(self, scaler: torch.amp.GradScaler) -> bool:
         """
         Check if AMP scaler has detected overflow.
         
@@ -316,7 +316,7 @@ def validate_model_health(model: nn.Module,
     return health_info
 
 
-def emergency_amp_disable(scaler: torch.cuda.amp.GradScaler, 
+def emergency_amp_disable(scaler: torch.amp.GradScaler, 
                          reason: str = "numerical instability") -> bool:
     """
     Emergency function to disable AMP training.

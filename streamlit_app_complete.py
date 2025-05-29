@@ -1806,9 +1806,8 @@ def main():
                 # Keep index as fallback but rename for clarity
                 trades_df_display = trades_df_display.rename(columns={'index': 'Record_Index'})
                 show_cols = ['Record_Index', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
-            
-            # Apply styling with enhanced font size and color coding
-            styled_df = trades_df_display[show_cols].style.applymap(color_pnl, subset=['Total_PnL'])
+              # Apply styling with enhanced font size and color coding
+            styled_df = trades_df_display[show_cols].style.map(color_pnl, subset=['Total_PnL'])
             
             # Apply 3x font size to all columns, not just P&L
             def apply_large_font(val):
@@ -1816,7 +1815,7 @@ def main():
             
             # Apply large font to all columns except Total_PnL (which already has styling)
             non_pnl_cols = [col for col in show_cols if col != 'Total_PnL']
-            styled_df = styled_df.applymap(apply_large_font, subset=non_pnl_cols)
+            styled_df = styled_df.map(apply_large_font, subset=non_pnl_cols)
             
             st.dataframe(
                 styled_df,
