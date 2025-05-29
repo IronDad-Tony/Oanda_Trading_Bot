@@ -228,13 +228,12 @@ class UniversalCheckpointCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         if self.verbose > 0 and self.n_calls % 50 == 0: # Log every 50 calls
-            print(f"Callback Checkpoint: n_calls={self.n_calls}, num_timesteps={self.num_timesteps}, save_freq={self.save_freq}")
-
-        # Check for stop request
+            print(f"Callback Checkpoint: n_calls={self.n_calls}, num_timesteps={self.num_timesteps}, save_freq={self.save_freq}")        # Check for stop request
         if self.shared_data_manager and self.shared_data_manager.is_stop_requested():
             if self.verbose > 0:
-                print(f"Stop requested at step {self.num_timesteps}. Stopping training and saving final model.")            # Save the model before stopping
-            final_model_path = os.path.join(self.save_path, f"{self.name_prefix}_final_step_{self.num_timesteps}.zip")
+                print(f"Stop requested at step {self.num_timesteps}. Stopping training and saving final model.")
+            # Save to the consistent model path instead of creating a timestamped file
+            final_model_path = os.path.join(self.save_path, f"{self.name_prefix}.zip")
             self.model.save(final_model_path)
             if self.verbose > 0:
                 print(f"Saved final model to {final_model_path}")
