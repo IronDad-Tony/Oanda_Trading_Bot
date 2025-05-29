@@ -113,24 +113,24 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         calculated_buffer_size = num_active_symbols * TIMESTEPS * buffer_size_factor
         self.buffer_size = min(max(calculated_buffer_size, batch_size * 200, 50000),200000)
         calculated_learning_starts = num_active_symbols * batch_size * learning_starts_factor
-        self.learning_starts = max(calculated_learning_starts, batch_size * 20, 2000)
-        
-        # 根據設備調整批次大小以優化GPU利用率
-        # if self.device.type == 'cuda':
-        #     # 如果使用GPU，可以適當增加批次大小，但更保守一些
-        #     gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        #     if gpu_memory_gb >= 12:  # 例如 12GB 以上 GPU
-        #         self.optimized_batch_size = min(batch_size * 2, 256) # 上限降低
-        #     elif gpu_memory_gb >= 8:  # 8-12GB GPU
-        #         self.optimized_batch_size = min(int(batch_size * 1.5), 192) # 上限降低
-        #     else:  # 小於 8GB GPU 或為了更安全
-        #         self.optimized_batch_size = batch_size # 不放大，或者設一個更小的值如 64
-        #     # 確保 optimized_batch_size 不會太小，至少為一個合理值，例如 32 或 64
-        #     self.optimized_batch_size = max(self.optimized_batch_size, 32) # 進一步減小批次大小下限
-        #     logger.info(f"GPU模式 ({gpu_memory_gb:.1f}GB)：原始批次大小 {batch_size}，優化後批次大小 {self.optimized_batch_size}")
-        # else:
-        #     self.optimized_batch_size = batch_size
-        self.optimized_batch_size = 64 # 強制設定為 64
+        self.learning_starts = max(calculated_learning_starts, batch_size * 20, 2000)          # 根據設備調整批次大小以優化GPU利用率 - 恢復動態調整
+        if self.device.type == 'cuda':
+            # 啟用動態批次大小調整，根據GPU內存自動優化
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            if gpu_memory_gb >= 16:  # 16GB以上GPU
+                self.optimized_batch_size = min(batch_size * 3, 384)
+            elif gpu_memory_gb >= 12:  # 12-16GB GPU
+                self.optimized_batch_size = min(batch_size * 2, 256)
+            elif gpu_memory_gb >= 8:  # 8-12GB GPU
+                self.optimized_batch_size = min(int(batch_size * 1.5), 192)
+            else:  # 小於8GB GPU
+                self.optimized_batch_size = batch_size
+            # 確保批次大小不會太小
+            self.optimized_batch_size = max(self.optimized_batch_size, 32)
+            logger.info(f"GPU模式 ({gpu_memory_gb:.1f}GB)：原始批次大小 {batch_size}，動態調整後批次大小 {self.optimized_batch_size}")
+        else:
+            self.optimized_batch_size = batch_size
+            logger.info(f"CPU模式：批次大小 {self.optimized_batch_size}")
         logger.info(f"強制設定優化後批次大小為: {self.optimized_batch_size}")
             
         logger.info(f"SAC Agent Wrapper: num_active_symbols={num_active_symbols}, BufferSize={self.buffer_size}, LearningStarts={self.learning_starts}, BatchSize={self.optimized_batch_size}")
@@ -196,14 +196,10 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
     
     def _optimize_gpu_settings(self):
         """優化GPU設置以提高訓練效率"""
-        try:
-            # 清理GPU內存
+        try:            # 清理GPU內存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 gc.collect()
-                
-                # 設置內存分配策略
-                # torch.cuda.set_per_process_memory_fraction(0.85)  # 暫時註釋掉，讓PyTorch更動態地管理內存
                 
                 # 啟用cuDNN基準模式以優化卷積操作
                 torch.backends.cudnn.benchmark = True
@@ -217,11 +213,9 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
                     torch.backends.cuda.matmul.allow_tf32 = True
                 if hasattr(torch.backends.cudnn, 'allow_tf32'):
                     torch.backends.cudnn.allow_tf32 = True
+                  # GPU內存配置已在config.py中統一設置
                 
-                # 設置GPU內存增長策略 - 依賴 config.py 中的設置
-                # os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128' # 移除此行，統一使用 config.py 的設置
-                
-                logger.info("GPU優化設置已啟用：cuDNN基準模式、TF32、內存優化 (部分設置已調整)")
+                logger.info("GPU優化設置已啟用：cuDNN基準模式、TF32、統一內存配置")
                 
         except Exception as e:
             logger.warning(f"GPU優化設置時發生錯誤: {e}")

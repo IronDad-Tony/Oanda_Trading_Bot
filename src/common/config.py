@@ -143,11 +143,9 @@ def setup_gpu_optimization():
             # 設置cuDNN基準測試以優化卷積性能
             torch.backends.cudnn.benchmark = True
             
-            # 設置內存分配策略
-            # 嘗試使用 expandable_segments:True 來減少碎片
-            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256,expandable_segments:True"
-            # logger 在文件末尾才定義，所以這裡使用 print
-            print(f"PYTORCH_CUDA_ALLOC_CONF set to: {os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
+            # 使用PyTorch預設的記憶體管理策略，讓CUDA自動管理
+            # 移除自定義的記憶體分配限制，讓系統動態調整
+            print("GPU優化：使用PyTorch預設記憶體管理策略")
             
             # 啟用混合精度訓練
             return True
@@ -210,10 +208,12 @@ MAX_TRADE_LOG_DISPLAY = 100     # UI中顯示最近交易的條數
 # KEY_FOREX_PAIRS_FOR_CONVERSION = ["AUD/USD", "EUR/USD", "GBP/USD", "USD/JPY", "USD/CAD", "USD/CHF"]
 
 # --- 環境設置 (PyTorch) ---
+# 統一的CUDA內存分配配置
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256,expandable_segments:True"
+
 # 這些在您的舊代碼中已有，可以保留或根據需要調整
 # os.environ['CUDA_LAUNCH_BLOCKING'] = '1' # 主要用於調試，生產環境中可考慮移除
 # os.environ['TORCH_USE_CUDA_DSA'] = '1'
-# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 # torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cudnn.allow_tf32 = True
 # torch.set_float32_matmul_precision('high') # PyTorch 1.12+

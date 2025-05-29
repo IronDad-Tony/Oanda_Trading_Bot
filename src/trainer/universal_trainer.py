@@ -240,13 +240,11 @@ class UniversalTrainer:
                 gpu_memory = torch.cuda.get_device_properties(current_device).total_memory / (1024**3)
                 
                 logger.info(f"檢測到 {gpu_count} 個GPU設備")
-                logger.info(f"當前使用GPU {current_device}: {gpu_name} ({gpu_memory:.1f}GB)")
-                
+                logger.info(f"當前使用GPU {current_device}: {gpu_name} ({gpu_memory:.1f}GB)")                # 清理GPU内存
                 torch.cuda.empty_cache()
                 gc.collect()
                 
-                torch.cuda.set_per_process_memory_fraction(0.85)
-                
+                # GPU性能优化设置
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cudnn.enabled = True
                 
@@ -254,8 +252,6 @@ class UniversalTrainer:
                     torch.backends.cuda.matmul.allow_tf32 = True
                 if hasattr(torch.backends.cudnn, 'allow_tf32'):
                     torch.backends.cudnn.allow_tf32 = True
-                
-                os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
                 
                 if USE_AMP:
                     logger.info("已啟用混合精度訓練")
