@@ -943,25 +943,39 @@ def create_real_time_charts():
             trades_df = pd.DataFrame(all_trades)
             if 'timestamp' in trades_df.columns:
                 trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
-            
-            # Create sub-tabs for different trading activity views
+              # Create sub-tabs for different trading activity views
             trade_tab1, trade_tab2, trade_tab3 = st.tabs([
                 "📈 Trades Over Time", "📊 P&L Distribution", "🎯 Symbol Activity"
             ])
             
             with trade_tab1:
                 st.subheader("Trades Over Training Steps")
-                  # Check if we have training_step data
+                # Check if we have training_step data
                 if 'training_step' in trades_df.columns and trades_df['training_step'].notna().any():
                     # Convert training steps to session-relative if needed
                     initial_global_step = st.session_state.get('initial_global_step_of_session')
-                    if initial_global_step is None:
+                    
+                    # Debug information
+                    st.write(f"Debug: initial_global_step from session_state: {initial_global_step}")
+                    st.write(f"Debug: training_step range in trades: {trades_df['training_step'].min()} - {trades_df['training_step'].max()}")
+                    
+                    if initial_global_step is None or initial_global_step == 0:
                         # Use the minimum training step from trades as session start
                         initial_global_step = trades_df['training_step'].min()
                         st.session_state['initial_global_step_of_session'] = initial_global_step
+                        st.write(f"Debug: Set initial_global_step to trades minimum: {initial_global_step}")
                     
+                    # Calculate session steps with proper handling of edge cases
                     trades_df['session_step'] = trades_df['training_step'] - initial_global_step
                     trades_df['session_step'] = trades_df['session_step'].clip(lower=0)
+                    
+                    # Additional debug information
+                    st.write(f"Debug: session_step range: {trades_df['session_step'].min()} - {trades_df['session_step'].max()}")
+                    
+                    # If all session_steps are still 0, use raw training steps
+                    if trades_df['session_step'].max() == 0 and trades_df['training_step'].max() > 0:
+                        st.warning("Session steps are all 0, using raw training steps instead")
+                        trades_df['session_step'] = trades_df['training_step']
                     
                     # Create scatter plot of trades over training steps
                     fig_trades_timeline = go.Figure()
