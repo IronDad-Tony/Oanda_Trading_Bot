@@ -1490,10 +1490,12 @@ def main():
             )
         else:
             st.info("No training logs available yet.")
+        
         latest_trades = shared_manager.get_latest_trades(20)
         if latest_trades:
             st.subheader("Recent Trades")
             trades_df = pd.DataFrame(latest_trades)
+            
             # Compute total P&L only for reduce/close actions, color-code
             def calc_total_pnl(row):
                 # Only show P&L for reduce/close, not open/add
@@ -1505,21 +1507,57 @@ def main():
                     total = pl * qty
                     return total
                 return None
+            
             trades_df['Total_PnL'] = trades_df.apply(calc_total_pnl, axis=1)
+            
+            # Enhanced color function with white for zero P&L and 3x font size
             def color_pnl(val):
                 if pd.isna(val):
-                    return ''
-                color = 'green' if val > 0 else 'red' if val < 0 else 'black'
-                return f'color: {color}; font-weight: bold;'
-            # Show step if available, else fallback to index
-            if 'step' in trades_df.columns:
+                    return 'font-size: 24px;'  # 3x larger font (8px * 3 = 24px)
+                
+                if val == 0:
+                    color = 'white'
+                elif val > 0:
+                    color = 'green'
+                else:
+                    color = 'red'
+                
+                return f'color: {color}; font-weight: bold; font-size: 24px;'
+            
+            # Prioritize training_step over step, then step, then fallback to index
+            # Sort by training step with latest at top (descending order)
+            if 'training_step' in trades_df.columns:
+                trades_df = trades_df.sort_values('training_step', ascending=False)
+                show_cols = ['training_step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
+                # Rename column for display
+                trades_df_display = trades_df.copy()
+                trades_df_display = trades_df_display.rename(columns={'training_step': 'Training_Step'})
+                show_cols = ['Training_Step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
+            elif 'step' in trades_df.columns:
                 trades_df = trades_df.sort_values('step', ascending=False)
-                show_cols = ['step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
+                trades_df_display = trades_df.copy()
+                trades_df_display = trades_df_display.rename(columns={'step': 'Training_Step'})
+                show_cols = ['Training_Step', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
             else:
                 trades_df = trades_df.reset_index()
-                show_cols = ['index', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
+                trades_df_display = trades_df.copy()
+                # Keep index as fallback but rename for clarity
+                trades_df_display = trades_df_display.rename(columns={'index': 'Record_Index'})
+                show_cols = ['Record_Index', 'symbol', 'action', 'price', 'quantity', 'Total_PnL']
+            
+            # Apply styling with enhanced font size and color coding
+            styled_df = trades_df_display[show_cols].style.applymap(color_pnl, subset=['Total_PnL'])
+            
+            # Apply 3x font size to all columns, not just P&L
+            def apply_large_font(val):
+                return 'font-size: 24px;'
+            
+            # Apply large font to all columns except Total_PnL (which already has styling)
+            non_pnl_cols = [col for col in show_cols if col != 'Total_PnL']
+            styled_df = styled_df.applymap(apply_large_font, subset=non_pnl_cols)
+            
             st.dataframe(
-                trades_df[show_cols].style.applymap(color_pnl, subset=['Total_PnL']),
+                styled_df,
                 use_container_width=True,
                 hide_index=True
             )
