@@ -233,14 +233,13 @@ class UniversalCheckpointCallback(BaseCallback):
         # Check for stop request
         if self.shared_data_manager and self.shared_data_manager.is_stop_requested():
             if self.verbose > 0:
-                print(f"Stop requested at step {self.num_timesteps}. Stopping training and saving final model.")
-            # Save the model before stopping
+                print(f"Stop requested at step {self.num_timesteps}. Stopping training and saving final model.")            # Save the model before stopping
             final_model_path = os.path.join(self.save_path, f"{self.name_prefix}_final_step_{self.num_timesteps}.zip")
             self.model.save(final_model_path)
             if self.verbose > 0:
                 print(f"Saved final model to {final_model_path}")
             self.shared_data_manager.update_training_status("Training stopped by user. Final model saved.")
-            self.shared_data_manager.reset_stop_request() # Reset the stop request
+            self.shared_data_manager.reset_stop_flag() # Reset the stop request
             self.interrupted = True # Mark as interrupted
             return False # Stop training
 

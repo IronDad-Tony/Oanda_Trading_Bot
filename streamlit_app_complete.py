@@ -1259,15 +1259,27 @@ def display_training_status():
         metrics_for_speed_calc = shared_manager.get_latest_metrics(20) 
         if len(metrics_for_speed_calc) >= 2:
             global_steps_from_deque = [m['step'] for m in metrics_for_speed_calc]
-            # Ensure timestamps are datetime objects            times_from_deque = [m['timestamp'] for m in metrics_for_speed_calc]
-            if isinstance(times_from_deque[0], str):
-                times_from_deque = [pd.to_datetime(t) for t in times_from_deque]
-            
-            dt = (times_from_deque[-1] - times_from_deque[0]).total_seconds()
-            d_global_steps = global_steps_from_deque[-1] - global_steps_from_deque[0]
-            
-            if dt > 0 and d_global_steps > 0:
-                steps_per_sec = d_global_steps / dt
+            # Ensure timestamps are datetime objects
+            times_from_deque = [] # Initialize to empty list
+            try:
+                times_from_deque = [m['timestamp'] for m in metrics_for_speed_calc]
+            except (KeyError, TypeError):
+                st.warning("Could not retrieve valid timestamps for speed calculation.") # Log or handle error appropriately
+
+            if len(times_from_deque) >= 2: # Check if populated successfully and has enough elements
+                if isinstance(times_from_deque[0], str):
+                    try:
+                        times_from_deque = [pd.to_datetime(t) for t in times_from_deque]
+                    except Exception as e:
+                        st.warning(f"Error converting timestamps to datetime: {e}")
+                        times_from_deque = [] # Reset if conversion fails
+
+            if len(times_from_deque) >= 2 and len(global_steps_from_deque) >=2: # Ensure both have enough data
+                dt = (times_from_deque[-1] - times_from_deque[0]).total_seconds()
+                d_global_steps = global_steps_from_deque[-1] - global_steps_from_deque[0]
+
+                if dt > 0 and d_global_steps > 0:
+                    steps_per_sec = d_global_steps / dt
                 
                 # Calculate session steps left based on current session progress
                 session_steps_left = session_target_steps - current_session_steps
@@ -1680,6 +1692,7 @@ def main():
             st.rerun()
     
     # Main content area
+
     display_training_status()
     
     # 添加性能監控指示器
