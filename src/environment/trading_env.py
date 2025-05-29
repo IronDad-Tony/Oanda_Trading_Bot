@@ -85,18 +85,30 @@ TIMESTEPS = _config_values_env_v5.get("TIMESTEPS", 128); MAX_SYMBOLS_ALLOWED = _
 
 class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
     metadata = {'render_modes': ['human', 'array'], 'render_fps': 10}
+    
     def __init__(self, dataset: UniversalMemoryMappedDataset, instrument_info_manager: InstrumentInfoManager, active_symbols_for_episode: List[str], # type: ignore
                  initial_capital: float = float(DEFAULT_INITIAL_CAPITAL), max_episode_steps: Optional[int] = None,
                  commission_percentage_override: Optional[float] = None, reward_config: Optional[Dict[str, Union[float, Decimal]]] = None,
                  max_account_risk_per_trade: float = float(MAX_ACCOUNT_RISK_PERCENTAGE),
                  stop_loss_atr_multiplier: float = float(STOP_LOSS_ATR_MULTIPLIER),
-                 atr_period: int = ATR_PERIOD, render_mode: Optional[str] = None):
-        super().__init__(); self.dataset = dataset; self.instrument_info_manager = instrument_info_manager
+                 atr_period: int = ATR_PERIOD, render_mode: Optional[str] = None,
+                 shared_data_manager=None, training_step_offset: int = 0):
+        super().__init__()
+        self.dataset = dataset
+        self.instrument_info_manager = instrument_info_manager
         self.initial_capital = Decimal(str(initial_capital))
-        if commission_percentage_override is not None: self.commission_percentage = Decimal(str(commission_percentage_override))
-        else: self.commission_percentage = Decimal(str(TRADE_COMMISSION_PERCENTAGE))
-        self.render_mode = render_mode; self.max_account_risk_per_trade = Decimal(str(max_account_risk_per_trade))
-        self.stop_loss_atr_multiplier = Decimal(str(stop_loss_atr_multiplier)); self.atr_period = atr_period
+        if commission_percentage_override is not None:
+            self.commission_percentage = Decimal(str(commission_percentage_override))
+        else:
+            self.commission_percentage = Decimal(str(TRADE_COMMISSION_PERCENTAGE))
+        self.render_mode = render_mode
+        self.max_account_risk_per_trade = Decimal(str(max_account_risk_per_trade))
+        self.stop_loss_atr_multiplier = Decimal(str(stop_loss_atr_multiplier))
+        self.atr_period = atr_period
+        
+        # Shared data manager integration for real-time monitoring
+        self.shared_data_manager = shared_data_manager
+        self.training_step_offset = training_step_offset  # Global training step offset for current episode
         self.instrument_details_map: Dict[str, InstrumentDetails] = {} # type: ignore
         for sym in self.dataset.symbols:
             details = self.instrument_info_manager.get_details(sym)
@@ -360,6 +372,29 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             "equity_after_trade": float(self.equity_ac + realized_pnl_ac - commission_ac) # 這裡的equity_after_trade是預估值，最終會在_update_portfolio_and_equity_value更新
         })
         self.last_trade_step_per_slot[slot_idx] = self.episode_step_count
+        
+        # Log trade to shared data manager for real-time monitoring
+        if self.shared_data_manager is not None:
+            # Calculate global training step
+            global_training_step = self.training_step_offset + self.episode_step_count
+            
+            # Determine action for shared data manager
+            action_str = "buy" if units_to_trade > 0 else "sell"
+            
+            # Convert price to account currency for consistency
+            trade_price_ac = float(trade_price_qc * exchange_rate_qc_to_ac)
+            
+            # Log trade with training step as primary time axis
+            self.shared_data_manager.add_trade_record(
+                symbol=symbol,
+                action=action_str,
+                price=trade_price_ac,  # Price in account currency
+                quantity=float(abs(units_to_trade)),
+                profit_loss=float(realized_pnl_ac),
+                training_step=global_training_step,  # Primary time axis
+                timestamp=current_timestamp.to_pydatetime()  # Auxiliary time information
+            )
+        
         logger.info(f"執行交易: {symbol}, 類型: {trade_type}, 單位: {units_to_trade:.2f}, 價格: {trade_price_qc:.5f} QC, 手續費: {commission_ac:.2f} AC, 實現盈虧: {realized_pnl_ac:.2f} AC, 現金: {self.cash:.2f} AC, 新倉位: {new_units:.2f}")
         return units_to_trade, commission_ac
 

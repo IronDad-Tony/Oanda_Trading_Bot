@@ -209,17 +209,25 @@ class SharedTrainingDataManager:
                 self.performance_stats['best_reward'] = float(reward)
             if portfolio_value > self.performance_stats['best_portfolio_value']:
                 self.performance_stats['best_portfolio_value'] = float(portfolio_value)
-            
-            # No more auto-save check
+              # No more auto-save check
             # if time.time() - self.last_save_time > self.auto_save_interval:
             #     self._auto_save() # This method will be removed
-
+    
     def add_trade_record(self, symbol: str, action: str, price: float, 
                         quantity: float, profit_loss: float, 
-                        timestamp: Optional[datetime] = None):
+                        training_step: int, timestamp: Optional[datetime] = None):
         """
         添加交易記錄 - 由訓練過程調用
         Puts data onto trades_mp_queue and updates symbol_stats.
+        
+        Args:
+            symbol: 交易品種
+            action: 交易動作 ('buy', 'sell')
+            price: 交易價格
+            quantity: 交易數量
+            profit_loss: 盈虧
+            training_step: 訓練步數 (主要時間軸)
+            timestamp: 實際時間戳 (輔助信息)
         """
         ts = timestamp or datetime.now(timezone.utc)
         trade = {
@@ -228,7 +236,8 @@ class SharedTrainingDataManager:
             'price': float(price),
             'quantity': float(quantity),
             'profit_loss': float(profit_loss),
-            'timestamp': ts.isoformat() # Store as ISO string for mp.Queue
+            'training_step': int(training_step),  # 新增：訓練步數作為主要時間軸
+            'timestamp': ts.isoformat()  # 保留實際時間戳作為輔助信息
         }
         
         try:

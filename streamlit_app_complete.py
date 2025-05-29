@@ -172,8 +172,7 @@ except ImportError as e:
                     'critic_loss': kwargs.get('critic_loss', 0.0),
                     'l2_norm': kwargs.get('l2_norm', 0.0),
                     'grad_norm': kwargs.get('grad_norm', 0.0),
-                    'timestamp': kwargs.get('timestamp', datetime.now())
-                }
+                    'timestamp': kwargs.get('timestamp', datetime.now())                }
                 self.metrics_data.append(metric)
                 self.current_metrics = metric
                 if len(self.metrics_data) > 1000:
@@ -186,6 +185,7 @@ except ImportError as e:
                     'price': kwargs.get('price', 1.0),
                     'quantity': kwargs.get('quantity', 1000),
                     'profit_loss': kwargs.get('profit_loss', 0.0),
+                    'training_step': kwargs.get('training_step', 0),  # 新增：訓練步數
                     'timestamp': kwargs.get('timestamp', datetime.now())
                 }
                 self.trades_data.append(trade)
@@ -466,11 +466,9 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
             portfolio_value=portfolio_value,
             actor_loss=actor_loss,
             critic_loss=critic_loss,
-            l2_norm=l2_norm,
-            grad_norm=grad_norm,
+            l2_norm=l2_norm,            grad_norm=grad_norm,
             
         )
-        
         if step % 25 == 0 and symbols:
             symbol = np.random.choice(symbols)
             profit_loss = np.random.normal(0.1, 1.5)
@@ -480,7 +478,7 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
                 price=np.random.uniform(1.0, 2.0),
                 quantity=np.random.uniform(1000, 10000),
                 profit_loss=profit_loss,
-                
+                training_step=step  # 添加訓練步數參數
             )
         
         if step % 100 == 0:
@@ -872,8 +870,7 @@ def create_real_time_charts():
             title="Portfolio Value Over Time",
             xaxis_title="Training Steps (Session)", # Updated X-axis label
             yaxis_title="Portfolio Value ($)",
-            hovermode='x unified',
-            height=400
+            hovermode='x unified',            height=400
         )
         st.plotly_chart(fig_portfolio, use_container_width=True)
         
@@ -904,39 +901,236 @@ def create_real_time_charts():
             if 'timestamp' in trades_df.columns:
                 trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
             
-            # Ensure profit_loss column exists for histogram
-            if 'profit_loss' in trades_df.columns and trades_df['profit_loss'].notna().any():
-                fig_pnl = go.Figure()
-                fig_pnl.add_trace(go.Histogram(
-                    x=trades_df['profit_loss'],
-                    nbinsx=30,
-                    name='P&L Distribution',
-                    marker_color='lightblue'
-                ))
-                fig_pnl.update_layout(
-                    title="Profit & Loss Distribution",
-                    xaxis_title="Profit/Loss",
-                    yaxis_title="Frequency",
-                    height=400
-                )
-                st.plotly_chart(fig_pnl, use_container_width=True)
-            else:
-                st.info("No profit and loss data to display for trades.")
+            # Create sub-tabs for different trading activity views
+            trade_tab1, trade_tab2, trade_tab3 = st.tabs([
+                "📈 Trades Over Time", "📊 P&L Distribution", "🎯 Symbol Activity"
+            ])
             
-            if 'symbol' in trades_df.columns and trades_df['symbol'].notna().any():
-                symbol_counts = trades_df['symbol'].value_counts()
+            with trade_tab1:
+                st.subheader("Trades Over Training Steps")
                 
-                fig_symbols = go.Figure(data=[
-                    go.Bar(x=symbol_counts.index, y=symbol_counts.values,
-                           marker_color='lightgreen')
-                ])
-                fig_symbols.update_layout(
-                    title="Trading Activity by Symbol",
-                    xaxis_title="Symbol",
-                    yaxis_title="Number of Trades",
-                    height=400
-                )
-                st.plotly_chart(fig_symbols, use_container_width=True)
+                # Check if we have training_step data
+                if 'training_step' in trades_df.columns and trades_df['training_step'].notna().any():
+                    # Convert training steps to session-relative if needed
+                    initial_global_step = st.session_state.get('initial_global_step_of_session', 0)
+                    trades_df['session_step'] = trades_df['training_step'] - initial_global_step
+                    trades_df['session_step'] = trades_df['session_step'].clip(lower=0)
+                    
+                    # Create scatter plot of trades over training steps
+                    fig_trades_timeline = go.Figure()
+                    
+                    # Color code by action type
+                    buy_trades = trades_df[trades_df['action'] == 'buy']
+                    sell_trades = trades_df[trades_df['action'] == 'sell']
+                    
+                    if not buy_trades.empty:
+                        fig_trades_timeline.add_trace(go.Scatter(
+                            x=buy_trades['session_step'],
+                            y=buy_trades['profit_loss'] if 'profit_loss' in buy_trades.columns else [0] * len(buy_trades),
+                            mode='markers',
+                            name='Buy Trades',
+                            marker=dict(
+                                color='green',
+                                size=8,
+                                symbol='triangle-up'
+                            ),
+                            text=buy_trades['symbol'] + '<br>Price: $' + buy_trades['price'].round(4).astype(str) + 
+                                 '<br>Quantity: ' + buy_trades['quantity'].round(2).astype(str),
+                            hovertemplate='<b>%{text}</b><br>' +
+                                        'Training Step: %{x}<br>' +
+                                        'P&L: $%{y:.2f}<extra></extra>'
+                        ))
+                    
+                    if not sell_trades.empty:
+                        fig_trades_timeline.add_trace(go.Scatter(
+                            x=sell_trades['session_step'],
+                            y=sell_trades['profit_loss'] if 'profit_loss' in sell_trades.columns else [0] * len(sell_trades),
+                            mode='markers',
+                            name='Sell Trades',
+                            marker=dict(
+                                color='red',
+                                size=8,
+                                symbol='triangle-down'
+                            ),
+                            text=sell_trades['symbol'] + '<br>Price: $' + sell_trades['price'].round(4).astype(str) + 
+                                 '<br>Quantity: ' + sell_trades['quantity'].round(2).astype(str),
+                            hovertemplate='<b>%{text}</b><br>' +
+                                        'Training Step: %{x}<br>' +
+                                        'P&L: $%{y:.2f}<extra></extra>'
+                        ))
+                    
+                    # Add horizontal line at zero P&L
+                    fig_trades_timeline.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                    
+                    fig_trades_timeline.update_layout(
+                        title="Trade Execution Timeline (by Training Steps)",
+                        xaxis_title="Training Steps (Session)",
+                        yaxis_title="Profit/Loss per Trade ($)",
+                        hovermode='closest',
+                        height=500,
+                        showlegend=True
+                    )
+                    st.plotly_chart(fig_trades_timeline, use_container_width=True)
+                    
+                    # Cumulative P&L over training steps
+                    if 'profit_loss' in trades_df.columns:
+                        trades_df_sorted = trades_df.sort_values('session_step')
+                        trades_df_sorted['cumulative_pnl'] = trades_df_sorted['profit_loss'].cumsum()
+                        
+                        fig_cumulative = go.Figure()
+                        fig_cumulative.add_trace(go.Scatter(
+                            x=trades_df_sorted['session_step'],
+                            y=trades_df_sorted['cumulative_pnl'],
+                            mode='lines+markers',
+                            name='Cumulative P&L',
+                            line=dict(color='blue', width=2),
+                            marker=dict(size=4),
+                            fill='tonexty'
+                        ))
+                        
+                        fig_cumulative.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                        
+                        fig_cumulative.update_layout(
+                            title="Cumulative Trading P&L Over Training Steps",
+                            xaxis_title="Training Steps (Session)",
+                            yaxis_title="Cumulative P&L ($)",
+                            hovermode='x unified',
+                            height=400
+                        )
+                        st.plotly_chart(fig_cumulative, use_container_width=True)
+                        
+                        # Trading activity frequency
+                        trade_frequency = trades_df_sorted.groupby('session_step').size()
+                        if len(trade_frequency) > 1:
+                            fig_frequency = go.Figure()
+                            fig_frequency.add_trace(go.Bar(
+                                x=trade_frequency.index,
+                                y=trade_frequency.values,
+                                name='Trades per Step',
+                                marker_color='orange',
+                                opacity=0.7
+                            ))
+                            
+                            fig_frequency.update_layout(
+                                title="Trading Activity Frequency",
+                                xaxis_title="Training Steps (Session)",
+                                yaxis_title="Number of Trades",
+                                height=350
+                            )
+                            st.plotly_chart(fig_frequency, use_container_width=True)
+                    
+                else:
+                    st.info("Training step information not available. Using timestamp-based timeline instead.")
+                    if 'timestamp' in trades_df.columns and trades_df['timestamp'].notna().any():
+                        # Fallback to timestamp-based visualization
+                        fig_trades_time = go.Figure()
+                        
+                        buy_trades = trades_df[trades_df['action'] == 'buy']
+                        sell_trades = trades_df[trades_df['action'] == 'sell']
+                        
+                        if not buy_trades.empty:
+                            fig_trades_time.add_trace(go.Scatter(
+                                x=buy_trades['timestamp'],
+                                y=buy_trades['profit_loss'] if 'profit_loss' in buy_trades.columns else [0] * len(buy_trades),
+                                mode='markers',
+                                name='Buy Trades',
+                                marker=dict(color='green', size=8, symbol='triangle-up')
+                            ))
+                        
+                        if not sell_trades.empty:
+                            fig_trades_time.add_trace(go.Scatter(
+                                x=sell_trades['timestamp'],
+                                y=sell_trades['profit_loss'] if 'profit_loss' in sell_trades.columns else [0] * len(sell_trades),
+                                mode='markers',
+                                name='Sell Trades',
+                                marker=dict(color='red', size=8, symbol='triangle-down')
+                            ))
+                        
+                        fig_trades_time.update_layout(
+                            title="Trade Execution Timeline (by Timestamp)",
+                            xaxis_title="Time",
+                            yaxis_title="Profit/Loss per Trade ($)",
+                            height=400
+                        )
+                        st.plotly_chart(fig_trades_time, use_container_width=True)
+                    else:
+                        st.info("No timestamp data available for timeline visualization.")
+            
+            with trade_tab2:
+                st.subheader("Profit & Loss Analysis")
+                
+                # Ensure profit_loss column exists for histogram
+                if 'profit_loss' in trades_df.columns and trades_df['profit_loss'].notna().any():
+                    fig_pnl = go.Figure()
+                    fig_pnl.add_trace(go.Histogram(
+                        x=trades_df['profit_loss'],
+                        nbinsx=30,
+                        name='P&L Distribution',
+                        marker_color='lightblue'
+                    ))
+                    fig_pnl.update_layout(
+                        title="Profit & Loss Distribution",
+                        xaxis_title="Profit/Loss ($)",
+                        yaxis_title="Frequency",
+                        height=400
+                    )
+                    st.plotly_chart(fig_pnl, use_container_width=True)
+                    
+                    # P&L statistics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total P&L", f"${trades_df['profit_loss'].sum():.2f}")
+                    with col2:
+                        st.metric("Average P&L", f"${trades_df['profit_loss'].mean():.2f}")
+                    with col3:
+                        winning_trades = len(trades_df[trades_df['profit_loss'] > 0])
+                        total_trades = len(trades_df)
+                        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+                        st.metric("Win Rate", f"{win_rate:.1f}%")
+                    with col4:
+                        st.metric("Total Trades", f"{total_trades}")
+                else:
+                    st.info("No profit and loss data to display for trades.")
+            
+            with trade_tab3:
+                st.subheader("Symbol Activity Analysis")
+                
+                if 'symbol' in trades_df.columns and trades_df['symbol'].notna().any():
+                    symbol_counts = trades_df['symbol'].value_counts()
+                    
+                    fig_symbols = go.Figure(data=[
+                        go.Bar(x=symbol_counts.index, y=symbol_counts.values,
+                               marker_color='lightgreen')
+                    ])
+                    fig_symbols.update_layout(
+                        title="Trading Activity by Symbol",
+                        xaxis_title="Symbol",
+                        yaxis_title="Number of Trades",
+                        height=400
+                    )
+                    st.plotly_chart(fig_symbols, use_container_width=True)
+                    
+                    # Symbol P&L breakdown if available
+                    if 'profit_loss' in trades_df.columns:
+                        symbol_pnl = trades_df.groupby('symbol')['profit_loss'].agg(['sum', 'mean', 'count']).round(2)
+                        symbol_pnl.columns = ['Total P&L', 'Avg P&L', 'Trade Count']
+                        symbol_pnl = symbol_pnl.sort_values('Total P&L', ascending=False)
+                        
+                        st.subheader("P&L by Symbol")
+                        st.dataframe(symbol_pnl, use_container_width=True)
+                        
+                        # Symbol P&L pie chart
+                        positive_pnl = symbol_pnl[symbol_pnl['Total P&L'] > 0]
+                        if not positive_pnl.empty:
+                            fig_symbol_pnl = go.Figure(data=[
+                                go.Pie(labels=positive_pnl.index, 
+                                       values=positive_pnl['Total P&L'],
+                                       title="Profitable Symbols Distribution")
+                            ])
+                            fig_symbol_pnl.update_layout(height=400)
+                            st.plotly_chart(fig_symbol_pnl, use_container_width=True)
+                else:
+                    st.info("No symbol data available for analysis.")
         else:
             st.info("No trading data available yet.")
 

@@ -386,8 +386,7 @@ class UniversalTrainer:
                 return False
             
             logger.info("設置交易環境...")
-            
-            # 創建交易環境
+              # 創建交易環境
             self.env = UniversalTradingEnvV4(
                 dataset=self.dataset,
                 instrument_info_manager=self.instrument_manager,
@@ -397,7 +396,9 @@ class UniversalTrainer:
                 commission_percentage_override=TRADE_COMMISSION_PERCENTAGE,
                 atr_period=self.custom_atr_period,
                 stop_loss_atr_multiplier=self.atr_stop_loss_multiplier,
-                max_account_risk_per_trade=self.risk_percentage
+                max_account_risk_per_trade=self.risk_percentage,
+                shared_data_manager=self.shared_data_manager,
+                training_step_offset=self.current_training_step
             )
             
             logger.info("交易環境設置成功。")
