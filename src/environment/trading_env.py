@@ -572,51 +572,149 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         _t_check_term = time.perf_counter()
         terminated, truncated = self._check_termination_truncation()
         logger.debug(f"Step {self.episode_step_count}: _check_termination_truncation took {time.perf_counter() - _t_check_term:.6f}s")
-        
-        # next_observation was already fetched, no need to call _get_observation() again here
+          # next_observation was already fetched, no need to call _get_observation() again here
         # _t_get_obs = time.perf_counter()
         # next_observation = self._get_observation() # THIS LINE IS REMOVED / COMMENTED OUT
         # logger.debug(f"Step {self.episode_step_count}: _get_observation took {time.perf_counter() - _t_get_obs:.6f}s")
-        
         info = self._get_info(); info["reward_this_step"] = reward
         logger.debug(f"--- Step {self.episode_step_count} End. Total time: {time.perf_counter() - _step_time_start:.6f}s ---")
         return next_observation, reward, terminated, truncated, info
-
+    
     def _calculate_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
+        """
+        計算強化學習獎勵函數，強調風險控制與穩定收益增長
+        
+        核心理念：
+        1. 風險控制優先：重視風險調整後的收益而非絕對收益
+        2. 穩定淨值增長：獎勵平穩的收益，懲罰過度波動
+        3. 讓利潤奔跑，快速止損：實現交易原則
+        4. 避免人為限制，讓模型探索更優策略
+        """
+        
+        # === 1. 基礎收益計算 ===
         log_return = Decimal('0.0')
-        if prev_portfolio_value_ac > Decimal('0'): log_return = (self.portfolio_value_ac / prev_portfolio_value_ac).ln()
+        if prev_portfolio_value_ac > Decimal('0'): 
+            log_return = (self.portfolio_value_ac / prev_portfolio_value_ac).ln()
         
-        reward_val = self.reward_config["portfolio_log_return_factor"] * log_return
+        # 更新收益歷史序列（用於風險調整計算）
+        self.returns_history.append(log_return)
+        if len(self.returns_history) > self.returns_window_size:
+            self.returns_history.pop(0)
         
-        # 手續費懲罰
+        # === 2. 風險調整後收益（改進的夏普比率） ===
+        risk_adjusted_reward = Decimal('0.0')
+        if len(self.returns_history) >= 5:  # 至少需要5個數據點
+            returns_array = [float(r) for r in self.returns_history]
+            mean_return = Decimal(str(sum(returns_array) / len(returns_array)))
+            
+            # 計算標準差
+            variance = sum([(Decimal(str(r)) - mean_return) ** 2 for r in returns_array]) / Decimal(str(len(returns_array)))
+            std_return = variance.sqrt() if variance > Decimal('0') else Decimal('1e-6')
+            
+            # 風險調整收益 = 平均收益 / 標準差（簡化夏普比率）
+            risk_adjusted_return = mean_return / (std_return + Decimal('1e-6'))
+            risk_adjusted_reward = self.reward_config["risk_adjusted_return_factor"] * risk_adjusted_return
+        else:
+            # 數據不足時使用基礎對數收益
+            risk_adjusted_reward = self.reward_config["portfolio_log_return_factor"] * log_return
+        
+        reward_val = risk_adjusted_reward
+        
+        # === 3. 手續費懲罰（鼓勵減少過度交易） ===
         commission_penalty = self.reward_config["commission_penalty_factor"] * (commission_this_step_ac / self.initial_capital)
         reward_val -= commission_penalty
-
-        # 最大回撤懲罰
+        
+        # === 4. 最大回撤懲罰（強化風險控制） ===
         self.peak_portfolio_value_episode = max(self.peak_portfolio_value_episode, self.portfolio_value_ac)
         current_dd = (self.peak_portfolio_value_episode - self.portfolio_value_ac) / (self.peak_portfolio_value_episode + Decimal('1e-9'))
-        if current_dd > self.max_drawdown_episode :
-            reward_val -= self.reward_config["max_drawdown_penalty_factor"] * (current_dd - self.max_drawdown_episode)
+        
+        if current_dd > self.max_drawdown_episode:
+            # 新的最大回撤發生時給予較重懲罰
+            dd_penalty = self.reward_config["max_drawdown_penalty_factor"] * (current_dd - self.max_drawdown_episode)
+            reward_val -= dd_penalty
             self.max_drawdown_episode = current_dd
         elif current_dd > Decimal('0'):
-            reward_val -= self.reward_config["max_drawdown_penalty_factor"] * current_dd * Decimal('0.1') # 對於持續回撤的輕微懲罰
-
-        # 風險調整後收益 (簡化夏普比率)
-        # 這裡可以考慮使用過去一段時間的收益標準差來計算，但為了簡化，先使用一個基於波動性的懲罰
-        # 假設我們希望獎勵平穩的收益，懲罰劇烈波動
-        # 這裡可以考慮使用 ATR 或其他波動性指標
-        # 暫時不引入複雜的風險調整，因為這需要歷史數據，而我們在 step 中只處理當前數據
-        # 如果要實現，可能需要在 info 中傳遞更多歷史數據，或者在環境中維護收益序列
-        # 這裡可以簡單地懲罰高波動性，或者獎勵低波動性
-        # 例如，如果 ATR 很高，可以給予輕微懲罰
-        # 為了實現更精確的風險調整後收益指標（如差分夏普比率的簡化版本），我們需要維護一個收益序列。
-        # 目前的 log_return 已經是收益的一部分。
-
-        # 其他可能的獎勵/懲罰項 (持倉時間、過度交易等)
-        # 持倉時間獎勵：如果一個倉位持有時間較長且盈利，可以給予獎勵
-        # 過度交易懲罰：已經通過 commission_penalty 實現了一部分，可以考慮額外懲罰頻繁交易
-        # 這裡暫時不引入，保持簡潔。
-
+            # 持續回撤時給予輕微懲罰
+            reward_val -= self.reward_config["max_drawdown_penalty_factor"] * current_dd * Decimal('0.1')
+        
+        # === 5. 持倉時間獎勵機制（讓利潤奔跑） ===
+        position_hold_reward = Decimal('0.0')
+        for slot_idx in self.current_episode_tradable_slot_indices:
+            units = self.current_positions_units[slot_idx]
+            if abs(units) > Decimal('1e-9'):  # 有持倉
+                unrealized_pnl = self.unrealized_pnl_ac[slot_idx]
+                last_trade_step = self.last_trade_step_per_slot[slot_idx]
+                
+                if last_trade_step >= 0:
+                    hold_duration = self.episode_step_count - last_trade_step
+                    
+                    # 如果持倉時間較長且盈利，給予獎勵（讓利潤奔跑）
+                    if unrealized_pnl > Decimal('0') and hold_duration > 5:
+                        duration_factor = min(Decimal(str(hold_duration)) / Decimal('20'), Decimal('2.0'))  # 最大2倍獎勵
+                        profit_ratio = unrealized_pnl / self.initial_capital
+                        position_hold_reward += self.reward_config["profit_target_bonus"] * profit_ratio * duration_factor
+                    
+                    # 如果持倉時間較短但虧損較大，輕微懲罰（快速止損相關）
+                    elif unrealized_pnl < Decimal('0') and hold_duration > 10:
+                        loss_ratio = abs(unrealized_pnl) / self.initial_capital
+                        if loss_ratio > Decimal('0.005'):  # 虧損超過0.5%
+                            position_hold_reward -= self.reward_config["hold_penalty_factor"] * loss_ratio
+        
+        reward_val += position_hold_reward
+        
+        # === 6. ATR波動性調整（控制過度風險） ===
+        volatility_penalty = Decimal('0.0')
+        active_positions = 0
+        total_atr_ratio = Decimal('0.0')
+        
+        for slot_idx in self.current_episode_tradable_slot_indices:
+            units = self.current_positions_units[slot_idx]
+            if abs(units) > Decimal('1e-9'):
+                active_positions += 1
+                symbol = self.slot_to_symbol_map.get(slot_idx)
+                if symbol:
+                    atr_qc = self.atr_values_qc[slot_idx]
+                    details = self.instrument_details_map[symbol]
+                    avg_entry = self.avg_entry_prices_qc[slot_idx]
+                    
+                    if atr_qc > Decimal('0') and avg_entry > Decimal('0'):
+                        atr_ratio = atr_qc / avg_entry  # ATR相對於入場價格的比例
+                        total_atr_ratio += atr_ratio
+        
+        if active_positions > 0:
+            avg_atr_ratio = total_atr_ratio / Decimal(str(active_positions))
+            if avg_atr_ratio > self.atr_penalty_threshold:
+                # 當平均ATR比例過高時（市場過於波動），給予懲罰
+                volatility_penalty = self.reward_config["risk_adjusted_return_factor"] * (avg_atr_ratio - self.atr_penalty_threshold) * Decimal('0.5')
+                reward_val -= volatility_penalty
+        
+        # === 7. 止損效果獎勵（鼓勵快速止損） ===
+        # 這部分通過持倉時間機制間接實現，避免重複計算
+        
+        # === 8. 保證金追繳懲罰（強化風險管理） ===
+        # 保證金追繳的懲罰在_handle_margin_call中處理，這裡檢查是否接近危險水平
+        if self.total_margin_used_ac > Decimal('0'):
+            margin_level = self.equity_ac / self.total_margin_used_ac
+            margin_warning_level = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) * Decimal('1.2')  # 60%水平開始警告
+            
+            if margin_level < margin_warning_level:
+                margin_risk_penalty = (margin_warning_level - margin_level) * Decimal('0.1')
+                reward_val -= margin_risk_penalty
+        
+        # === 記錄詳細信息用於監控 ===
+        if hasattr(self, 'reward_components_history'):
+            if not hasattr(self, 'reward_components_history'):
+                self.reward_components_history = []
+            
+            self.reward_components_history.append({
+                'step': self.episode_step_count,
+                'risk_adjusted_reward': float(risk_adjusted_reward),
+                'commission_penalty': float(commission_penalty),
+                'position_hold_reward': float(position_hold_reward),
+                'volatility_penalty': float(volatility_penalty),
+                'total_reward': float(reward_val)
+            })
+        
         return float(reward_val)
 
     def _apply_stop_loss(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], current_timestamp: pd.Timestamp) -> Decimal:
