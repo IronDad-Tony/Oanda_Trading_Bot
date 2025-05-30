@@ -83,7 +83,14 @@ def run_training_session(
     policy_kwargs_override: Optional[Dict[str, Any]] = None,
     save_freq_override: Optional[int] = None, eval_freq_override: Optional[int] = None,
     streamlit_status_text: Optional[Any] = None, streamlit_progress_bar: Optional[Any] = None,
+    timeframes: List[str] = ['S5', 'M1', 'H1']  # 新增多時間維度參數
 ):
+    """
+    多時間維度訓練流程
+    
+    參數:
+        timeframes: 要使用的時間維度列表 (默認['S5','M1','H1'])
+    """
     train_start_iso = train_start_iso or DEFAULT_TRAIN_START_ISO
     train_end_iso = train_end_iso or DEFAULT_TRAIN_END_ISO
     eval_start_iso = eval_start_iso or DEFAULT_EVAL_START_ISO
@@ -91,23 +98,43 @@ def run_training_session(
     total_timesteps = total_timesteps or TRAINER_DEFAULT_TOTAL_TIMESTEPS
     initial_capital_val = initial_capital if initial_capital is not None else float(DEFAULT_INITIAL_CAPITAL_CONFIG)
 
-    logger.info("="*60); logger.info(f"開始新的訓練會話 (Trainer V2.2)..."); # 更新版本號
-    # ... (後續的 run_training_session 日誌和步驟與 V2.1 版本相同，直到 checkpoint_callback 實例化) ...
-    logger.info(f"可交易對象: {symbols_to_trade}"); logger.info(f"數據集所需對象: {all_symbols_for_data}"); logger.info(f"訓練數據: {train_start_iso} to {train_end_iso}"); logger.info(f"評估數據: {eval_start_iso} to {eval_end_iso}"); logger.info(f"目標總步數: {total_timesteps}"); logger.info(f"初始資金: {initial_capital_val} {ACCOUNT_CURRENCY}");
+    logger.info("="*60); logger.info(f"開始新的訓練會話 (多時間維度系統)");
+    logger.info(f"使用時間維度: {timeframes}")
+    logger.info(f"可交易對象: {symbols_to_trade}"); logger.info(f"數據集所需對象: {all_symbols_for_data}");
+    logger.info(f"訓練數據: {train_start_iso} to {train_end_iso}");
+    logger.info(f"評估數據: {eval_start_iso} to {eval_end_iso}");
+    logger.info(f"目標總步數: {total_timesteps}");
+    logger.info(f"初始資金: {initial_capital_val} {ACCOUNT_CURRENCY}");
     if load_model_path: logger.info(f"嘗試從以下路徑加載模型: {load_model_path}")
     logger.info("="*60)
-    if streamlit_status_text: streamlit_status_text.info("步驟 0/6: 初始化交易品種信息管理器...")
+    if streamlit_status_text: streamlit_status_text.info("步驟 0/7: 初始化交易品種信息管理器...")
     instrument_manager = InstrumentInfoManager(force_refresh=False)
-    if streamlit_status_text: streamlit_status_text.info("步驟1/6: 準備訓練數據集...")
-    logger.info("準備訓練數據集 (檢查/下載)...")
-    manage_data_download_for_symbols(
-        all_symbols_for_data, train_start_iso, train_end_iso, granularity,
-        streamlit_progress_bar=streamlit_progress_bar, # <--- 傳遞
-        streamlit_status_text=streamlit_status_text     # <--- 傳遞
-    )
-    dataset_train = UniversalMemoryMappedDataset(
-        symbols=all_symbols_for_data, start_time_iso=train_start_iso, end_time_iso=train_end_iso,
-        granularity=granularity, timesteps_history=TIMESTEPS, force_reload=force_dataset_reload
+    
+    # 步驟1: 準備多時間維度數據集
+    if streamlit_status_text: streamlit_status_text.info("步驟1/7: 準備多時間維度數據集...")
+    logger.info("準備多時間維度數據集 (檢查/下載)...")
+    
+    # 下載所有時間維度數據
+    for tf in timeframes:
+        manage_data_download_for_symbols(
+            all_symbols_for_data, train_start_iso, train_end_iso, tf,
+            streamlit_progress_bar=streamlit_progress_bar,
+            streamlit_status_text=streamlit_status_text
+        )
+        if eval_start_iso and eval_end_iso:
+            manage_data_download_for_symbols(
+                all_symbols_for_data, eval_start_iso, eval_end_iso, tf,
+                streamlit_progress_bar=streamlit_progress_bar,
+                streamlit_status_text=streamlit_status_text
+            )
+    
+    # 創建多時間維度數據集
+    from data_manager.multi_timeframe_dataset import MultiTimeframeDataset
+    dataset_train = MultiTimeframeDataset(
+        symbols=all_symbols_for_data,
+        timeframes=timeframes,
+        start_iso=train_start_iso,
+        end_iso=train_end_iso
     )
     if len(dataset_train) == 0: logger.error("訓練數據集為空！訓練無法繼續。"); return
     eval_env_vec: Optional[DummyVecEnv] = None; dataset_eval = None
@@ -125,71 +152,102 @@ def run_training_session(
     if streamlit_status_text: streamlit_status_text.info("步驟 4/6: 初始化或加載SAC智能體...")
     current_policy_kwargs = get_default_policy_kwargs()
     if policy_kwargs_override: current_policy_kwargs.update(policy_kwargs_override)
-    agent_wrapper = SACAgentWrapper(env=train_env_vec, policy_class=CustomSACPolicy, policy_kwargs=current_policy_kwargs, learning_rate=learning_rate or SAC_LEARNING_RATE, batch_size=batch_size or SAC_BATCH_SIZE, buffer_size_factor=SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR, learning_starts_factor=SAC_LEARNING_STARTS_FACTOR, gamma=SAC_GAMMA, ent_coef=SAC_ENT_COEF, train_freq_steps=SAC_TRAIN_FREQ_STEPS, gradient_steps=SAC_GRADIENT_STEPS, tau=SAC_TAU, verbose=0, seed=int(time.time()))
-    session_id = f"{TRAINER_MODEL_NAME_PREFIX}{session_name_suffix}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    session_save_dir = WEIGHTS_DIR / session_id; session_save_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 添加梯度裁剪穩定訓練
+    current_policy_kwargs.setdefault('optimizer_kwargs', {})
+    current_policy_kwargs['optimizer_kwargs']['max_grad_norm'] = 0.5
+    
+    # 添加波動率適應型學習率
+    if learning_rate is None:
+        dynamic_lr = lambda progress: SAC_LEARNING_RATE * (0.5 if progress < 0.3 else 1.0)
+    else:
+        dynamic_lr = learning_rate
+        
+    agent_wrapper = SACAgentWrapper(env=train_env_vec, policy_class=CustomSACPolicy, policy_kwargs=current_policy_kwargs, learning_rate=dynamic_lr, batch_size=batch_size or SAC_BATCH_SIZE, buffer_size_factor=SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR, learning_starts_factor=SAC_LEARNING_STARTS_FACTOR, gamma=SAC_GAMMA, ent_coef=SAC_ENT_COEF, train_freq_steps=SAC_TRAIN_FREQ_STEPS, gradient_steps=SAC_GRADIENT_STEPS, tau=SAC_TAU, verbose=0, seed=int(time.time()))
+    session_id = f"multi_tf_{TRAINER_MODEL_NAME_PREFIX}{session_name_suffix}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    session_save_dir = WEIGHTS_DIR / session_id
+    session_save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"本次訓練會話的模型將保存到: {session_save_dir}")
+    
+    # 步驟5: 加載現有模型或從頭開始
     latest_model_checkpoint_path = WEIGHTS_DIR / f"{TRAINER_MODEL_NAME_PREFIX}_latest.zip"
     path_to_load_from: Optional[Path] = None
     if load_model_path:
         path_to_load_from = Path(load_model_path)
-        if not path_to_load_from.exists(): logger.warning(f"指定的模型路徑 {path_to_load_from} 不存在，將從頭訓練。"); path_to_load_from = None
+        if not path_to_load_from.exists():
+            logger.warning(f"指定的模型路徑 {path_to_load_from} 不存在，將從頭訓練。")
+            path_to_load_from = None
     elif latest_model_checkpoint_path.exists():
-        logger.info(f"檢測到最新的模型 checkpoint: {latest_model_checkpoint_path}"); path_to_load_from = latest_model_checkpoint_path
+        logger.info(f"檢測到最新的模型 checkpoint: {latest_model_checkpoint_path}")
+        path_to_load_from = latest_model_checkpoint_path
+    
     if path_to_load_from:
         logger.info(f"正在從 {path_to_load_from} 加載預訓練模型...")
-        try: agent_wrapper.load(path_to_load_from, env=train_env_vec)
-        except Exception as e_load: logger.error(f"加載模型 {path_to_load_from} 失敗: {e_load}。將從頭訓練。", exc_info=True); path_to_load_from = None
-    else: logger.info("沒有指定或有效的預訓練模型路徑，將從頭開始訓練。")
-    if streamlit_status_text: streamlit_status_text.info("步驟 5/6: 設置訓練回調...")
+        try:
+            agent_wrapper.load(path_to_load_from, env=train_env_vec)
+        except Exception as e_load:
+            logger.error(f"加載模型 {path_to_load_from} 失敗: {e_load}。將從頭訓練。", exc_info=True)
+            path_to_load_from = None
+    else:
+        logger.info("沒有指定或有效的預訓練模型路徑，將從頭開始訓練。")
+    
+    # 步驟6: 設置訓練回調
+    if streamlit_status_text: streamlit_status_text.info("步驟 5/7: 設置訓練回調...")
     best_model_in_session_path = session_save_dir / BEST_MODEL_SUBDIR
     
-    # --- 修正 early_stopping_min_delta_abs 的計算 ---
-    es_min_delta_percent_decimal = Decimal(str(EARLY_STOPPING_MIN_DELTA_PERCENT))
-    initial_capital_decimal = Decimal(str(initial_capital_val))
+    # 修正早期停止閾值計算
     min_delta_abs_val_for_callback: float
-    if es_min_delta_percent_decimal > Decimal('0'):
-        min_delta_abs_val_for_callback = float(initial_capital_decimal * (es_min_delta_percent_decimal / Decimal('100.0')))
+    if EARLY_STOPPING_MIN_DELTA_PERCENT > 0:
+        min_delta_abs_val_for_callback = initial_capital_val * (EARLY_STOPPING_MIN_DELTA_PERCENT / 100.0)
     else:
-        min_delta_abs_val_for_callback = float(Decimal('100.0')) # 默認絕對值，例如100 AUD
+        min_delta_abs_val_for_callback = 100.0  # 默認絕對值
 
     checkpoint_callback = UniversalCheckpointCallback(
         save_freq=save_freq_override or TRAINER_SAVE_FREQ_STEPS,
         save_path=session_save_dir,
-        name_prefix=TRAINER_MODEL_NAME_PREFIX,
+        name_prefix=f"multi_tf_{TRAINER_MODEL_NAME_PREFIX}",
         eval_env=eval_env_vec,
         eval_freq=eval_freq_override or TRAINER_EVAL_FREQ_STEPS,
         n_eval_episodes=TRAINER_N_EVAL_EPISODES,
         deterministic_eval=TRAINER_DETERMINISTIC_EVAL,
         best_model_save_path=best_model_in_session_path,
         early_stopping_patience=EARLY_STOPPING_PATIENCE,
-        early_stopping_min_delta_abs=min_delta_abs_val_for_callback, # <--- 使用修正後的值
+        early_stopping_min_delta_abs=min_delta_abs_val_for_callback,
         early_stopping_metric="eval/mean_final_portfolio_value",
         early_stopping_min_evals=EARLY_STOPPING_MIN_EVALS,
         log_transformer_norm_freq=LOG_TRANSFORMER_NORM_FREQ_STEPS,
         verbose=1
     )
-    # --- 結束修正 ---
 
-    if streamlit_status_text: streamlit_status_text.info("步驟 6/6: 開始訓練循環...")
+    # 步驟7: 開始訓練循環
+    if streamlit_status_text: streamlit_status_text.info("步驟 6/7: 開始訓練循環...")
     try:
-        agent_wrapper.train(total_timesteps=total_timesteps, callback=[checkpoint_callback], reset_num_timesteps= (path_to_load_from is None))
-        logger.info("訓練會話正常完成。");
+        agent_wrapper.train(
+            total_timesteps=total_timesteps,
+            callback=[checkpoint_callback],
+            reset_num_timesteps=(path_to_load_from is None)
+        )
+        logger.info("多時間維度訓練會話正常完成。")
         if streamlit_status_text: streamlit_status_text.success("訓練完成！")
-    except KeyboardInterrupt: 
+    except KeyboardInterrupt:
         logger.warning("訓練被用戶手動中斷 (KeyboardInterrupt)。")
         if streamlit_status_text: streamlit_status_text.warning("訓練已手動停止。")
-    except Exception as e_train_main: 
+    except Exception as e_train_main:
         logger.error(f"訓練過程中發生嚴重錯誤: {e_train_main}", exc_info=True)
         if streamlit_status_text: streamlit_status_text.error(f"訓練出錯: {e_train_main}")
     finally:
         logger.info("訓練循環結束。正在關閉環境和數據集...")
-        if hasattr(train_env_vec, 'close'): train_env_vec.close()
-        if hasattr(eval_env_vec, 'close') and eval_env_vec is not None : eval_env_vec.close()
-        if hasattr(dataset_train, 'close'): dataset_train.close()
-        if 'dataset_eval' in locals() and hasattr(dataset_eval, 'close') and dataset_eval is not None: dataset_eval.close()
+        if hasattr(train_env_vec, 'close'):
+            train_env_vec.close()
+        if hasattr(eval_env_vec, 'close') and eval_env_vec is not None:
+            eval_env_vec.close()
+        if hasattr(dataset_train, 'close'):
+            dataset_train.close()
+        if 'dataset_eval' in locals() and hasattr(dataset_eval, 'close') and dataset_eval is not None:
+            dataset_eval.close()
         logger.info("所有資源已關閉。")
-        if streamlit_status_text: streamlit_status_text.info("所有資源已釋放。")
+        if streamlit_status_text:
+            streamlit_status_text.info("所有資源已釋放。")
 
 
 # --- if __name__ == "__main__": 測試塊 (與V2.1版本相同) ---

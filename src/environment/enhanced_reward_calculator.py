@@ -356,24 +356,27 @@ class EnhancedRewardCalculator:
         return Decimal('0.0')
     
     def _calculate_trend_slope(self, prices: List[float]) -> float:
-        """計算價格序列的趨勢斜率"""
+        """計算標準化價格趨勢斜率 (每1000單位時間)"""
         if len(prices) < 2:
             return 0.0
         
-        n = len(prices)
-        x_values = list(range(n))
-        
-        # 線性回歸計算斜率
-        x_mean = sum(x_values) / n
-        y_mean = sum(prices) / n
-        
-        numerator = sum((x_values[i] - x_mean) * (prices[i] - y_mean) for i in range(n))
-        denominator = sum((x_values[i] - x_mean) ** 2 for i in range(n))
-        
-        if denominator == 0:
-            return 0.0
-        
-        return numerator / denominator
+        try:
+            import numpy as np
+        except ImportError:
+            # 簡化實現備選方案
+            n = len(prices)
+            x = list(range(n))
+            x_mean = sum(x) / n
+            y_mean = sum(prices) / n
+            numerator = sum((x[i] - x_mean) * (prices[i] - y_mean) for i in range(n))
+            denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
+            slope = numerator / denominator if denominator != 0 else 0.0
+            return slope * 1000  # 標準化到1000單位時間尺度
+        else:
+            x = np.arange(len(prices))
+            y = np.array(prices)
+            slope = (np.mean(x*y) - np.mean(x)*np.mean(y)) / (np.mean(x**2) - np.mean(x)**2)
+            return slope * 1000  # 標準化到1000單位時間尺度
     
     def _calculate_market_trend_awareness_reward(self, 
                                                  positions_data: Dict[str, Any],

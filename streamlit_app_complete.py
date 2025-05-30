@@ -891,33 +891,31 @@ def create_real_time_charts():
         )
         st.plotly_chart(fig_loss, use_container_width=True)
         
-        fig_norms = go.Figure()
+        # 添加Transformer範數圖表
+        fig_transformer_norms = go.Figure()
         if 'l2_norm' in df.columns and df['l2_norm'].notna().any():
-            fig_norms.add_trace(go.Scatter(
+            fig_transformer_norms.add_trace(go.Scatter(
                 x=df[x_axis_column], # Use determined x-axis column
                 y=df['l2_norm'],
                 mode='lines',
-                name='L2 Norm',
-                line=dict(color='purple', width=2),
-                yaxis='y'
+                name='Transformer L2 Norm',
+                line=dict(color='purple', width=2)
             ))
         if 'grad_norm' in df.columns and df['grad_norm'].notna().any():
-            fig_norms.add_trace(go.Scatter(
+            fig_transformer_norms.add_trace(go.Scatter(
                 x=df[x_axis_column], # Use determined x-axis column
                 y=df['grad_norm'],
                 mode='lines',
-                name='Gradient Norm',
-                line=dict(color='red', width=2),
-                yaxis='y2'
+                name='Transformer Gradient Norm',
+                line=dict(color='red', width=2)
             ))
-        fig_norms.update_layout(
-            title="Model Parameter Norms",
+        fig_transformer_norms.update_layout(
+            title="Transformer Model Norms",
             xaxis_title="Training Steps (Session)", # X-axis label updated
-            yaxis=dict(title="L2 Norm", side="left"),
-            yaxis2=dict(title="Gradient Norm", side="right", overlaying="y"),
+            yaxis_title="Norm Value",
             height=400
         )
-        st.plotly_chart(fig_norms, use_container_width=True)
+        st.plotly_chart(fig_transformer_norms, use_container_width=True)
     
     with chart_tab3:
         st.subheader("Portfolio Performance")
@@ -1008,8 +1006,12 @@ def create_real_time_charts():
                         # st.warning("Session steps are all 0, using raw training steps instead")
                         trades_df['session_step'] = trades_df['training_step']
                     
-                    # Create scatter plot of trades over training steps
-                    fig_trades_timeline = go.Figure()
+                    # 檢查是否有足夠的數據繪製圖表
+                    if len(trades_df) < 2:
+                        st.info("⏳ Waiting for more trade data to display timeline...")
+                    else:
+                        # Create scatter plot of trades over training steps
+                        fig_trades_timeline = go.Figure()
                     
                     # Color code by action type
                     buy_trades = trades_df[trades_df['action'].str.startswith('Long', na=False)]
@@ -1026,7 +1028,7 @@ def create_real_time_charts():
                                 size=8,
                                 symbol='triangle-up'
                             ),
-                            text=buy_trades['symbol'] + '<br>Price: $' + buy_trades['price'].round(4).astype(str) + 
+                            text=buy_trades['symbol'] + '<br>Price: $' + buy_trades['price'].round(4).astype(str) +
                                  '<br>Quantity: ' + buy_trades['quantity'].round(2).astype(str),
                             hovertemplate='<b>%{text}</b><br>' +
                                         'Training Step: %{x}<br>' +
@@ -1044,25 +1046,25 @@ def create_real_time_charts():
                                 size=8,
                                 symbol='triangle-down'
                             ),
-                            text=sell_trades['symbol'] + '<br>Price: $' + sell_trades['price'].round(4).astype(str) + 
+                            text=sell_trades['symbol'] + '<br>Price: $' + sell_trades['price'].round(4).astype(str) +
                                  '<br>Quantity: ' + sell_trades['quantity'].round(2).astype(str),
                             hovertemplate='<b>%{text}</b><br>' +
                                         'Training Step: %{x}<br>' +
                                         f'P&L: {ACCOUNT_CURRENCY} %{{y:.2f}}<extra></extra>' # Using ACCOUNT_CURRENCY
                         ))
-                    
-                    # Add horizontal line at zero P&L
-                    fig_trades_timeline.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-                    
-                    fig_trades_timeline.update_layout(
-                        title="Trade Execution Timeline (by Training Steps)",
-                        xaxis_title="Training Steps (Session)",
-                        yaxis_title=f"Profit/Loss per Trade ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
-                        hovermode='closest',
-                        height=500,
-                        showlegend=True
-                    )
-                    st.plotly_chart(fig_trades_timeline, use_container_width=True)
+                        
+                        # Add horizontal line at zero P&L
+                        fig_trades_timeline.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                        
+                        fig_trades_timeline.update_layout(
+                            title="Trade Execution Timeline (by Training Steps)",
+                            xaxis_title="Training Steps (Session)",
+                            yaxis_title=f"Profit/Loss per Trade ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
+                            hovermode='closest',
+                            height=500,
+                            showlegend=True
+                        )
+                        st.plotly_chart(fig_trades_timeline, use_container_width=True)
                     
                     # Cumulative P&L over training steps
                     if 'profit_loss' in trades_df.columns:
@@ -1351,7 +1353,7 @@ def display_training_status():
         
         if current_metrics and current_global_step >= initial_global_step: # Check if current_metrics is populated
             # Display key metrics in columns with clear distinction
-            col1, col2, col3, col4, col5 = st.columns(5)
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
 
             with col1:
                 # 模型總步數（累積里程）- 模型自創建以來的總訓練步數
@@ -1369,8 +1371,14 @@ def display_training_status():
                 st.metric("Portfolio Value", f"{ACCOUNT_CURRENCY} {current_metrics['portfolio_value']:,.2f}") # Using ACCOUNT_CURRENCY
             
             with col5:
-                actor_loss_val = current_metrics.get('actor_loss', float('nan'))
-                st.metric("Actor Loss", f"{actor_loss_val:.4f}")
+                # 顯示Transformer L2範數
+                l2_norm_val = current_metrics.get('l2_norm', float('nan'))
+                st.metric("Transformer L2 Norm", f"{l2_norm_val:.4f}")
+            
+            with col6:
+                # 顯示梯度範數
+                grad_norm_val = current_metrics.get('grad_norm', float('nan'))
+                st.metric("Gradient Norm", f"{grad_norm_val:.4f}")
         
         if steps_per_sec:
             st.info(f"Training Speed: {steps_per_sec:.2f} steps/sec")
