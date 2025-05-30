@@ -1854,10 +1854,8 @@ def main():
                     pass # If float conversion fails, color remains black
                 style_rules.append(f'color: {color}')
                 style_rules.append(f'background-color: {background_color}')
-                return '; '.join(style_rules)
-
-            # Helper function for general column styling (font size only)
-            def general_font_style(_): # Value not used, but applymap expects a function taking one arg
+                return '; '.join(style_rules)            # Helper function for general column styling (font size only)
+            def general_font_style(_): # Value not used, but map expects a function taking one arg
                 return f'font-size: {TARGET_FONT_SIZE_PX};'
 
             # Check if trades_df_display is not empty before styling
@@ -1866,14 +1864,14 @@ def main():
 
                 # Apply PnL specific styling if the column exists
                 if 'Total_PnL' in trades_df_display.columns:
-                    styled_df = styled_df.applymap(
+                    styled_df = styled_df.map(
                         format_and_color_pnl, subset=['Total_PnL']
                     )
 
                 # Apply general font styling to all other columns
                 for col_name in trades_df_display.columns:
                     if col_name != 'Total_PnL': # Only apply general style if not the P&L column (or if P&L doesn't exist)
-                        styled_df = styled_df.applymap(general_font_style, subset=[col_name])
+                        styled_df = styled_df.map(general_font_style, subset=[col_name])
                 
                 st.dataframe(styled_df, height=600, use_container_width=True)
             elif 'trades_df' in locals() and trades_df.empty: # If original df was empty
