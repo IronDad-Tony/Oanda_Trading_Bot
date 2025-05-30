@@ -23,14 +23,14 @@ _logger_initialized_by_common_ut = False
 _import_logged = False
 
 try:
-    from common.logger_setup import logger as common_configured_logger
+    from src.common.logger_setup import logger as common_configured_logger
     logger = common_configured_logger
     _logger_initialized_by_common_ut = True
     if not _import_logged:
         logger.debug("universal_trainer.py: Successfully imported logger from common.logger_setup.")
         _import_logged = True
     
-    from common.config import (
+    from src.common.config import (
         TIMESTEPS, MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY, INITIAL_CAPITAL,
         OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY,
                 WEIGHTS_DIR, LOGS_DIR, DEVICE, USE_AMP,
@@ -41,7 +41,7 @@ try:
         logger.info("universal_trainer.py: Successfully imported common.config values.")
         _import_logged = True
     
-    from common.shared_data_manager import get_shared_data_manager
+    from src.common.shared_data_manager import get_shared_data_manager
     if not _import_logged:
         logger.info("universal_trainer.py: Successfully imported shared data manager.")
     
@@ -50,7 +50,7 @@ try:
     from data_manager.instrument_info_manager import InstrumentInfoManager
     from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
     from environment.trading_env import UniversalTradingEnvV4
-    from agent.sac_agent_wrapper import SACAgentWrapper
+    from src.agent.sac_agent_wrapper import QuantumEnhancedSAC
     from trainer.callbacks import UniversalCheckpointCallback # 假設這個Callback已經存在並被正確實作
     if not _import_logged:
         logger.info("universal_trainer.py: Successfully imported other dependencies.")
@@ -92,7 +92,7 @@ except ImportError as e_initial_import_ut:
         from src.data_manager.instrument_info_manager import InstrumentInfoManager
         from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
         from src.environment.trading_env import UniversalTradingEnvV4
-        from src.agent.sac_agent_wrapper import SACAgentWrapper
+        from src.agent.sac_agent_wrapper import QuantumEnhancedSAC
         from src.trainer.callbacks import UniversalCheckpointCallback
         if not _import_logged:
             logger.info("universal_trainer.py: Successfully re-imported other dependencies after path adjustment.")
@@ -103,9 +103,12 @@ except ImportError as e_initial_import_ut:
         logger.warning("universal_trainer.py: Using fallback mode - some features may not work.")
         # Fallback classes for critical imports
         class CurrencyDependencyManager:
-            def __init__(self, **kwargs): pass
-            def download_required_currency_data(self, *args, **kwargs): return True
-        def ensure_currency_data_for_trading(*args, **kwargs): return True
+            def __init__(self, account_currency=None, **kwargs):
+                pass
+            def download_required_currency_data(self, *args, **kwargs):
+                return True
+        def ensure_currency_data_for_trading(*args, **kwargs):
+            return True
         class UniversalMemoryMappedDataset:
             def __init__(self, **kwargs): pass
             def is_valid(self): return True
@@ -431,7 +434,7 @@ class UniversalTrainer:
             model_path_to_load = load_model_path or self.existing_model_path
             
             # 創建SAC代理
-            self.agent = SACAgentWrapper(
+            self.agent = QuantumEnhancedSAC(
                 env=self.env,
                 device=DEVICE,
                 use_amp=USE_AMP,

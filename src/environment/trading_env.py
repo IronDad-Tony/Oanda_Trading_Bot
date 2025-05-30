@@ -50,10 +50,10 @@ _logger_initialized_by_common_env_v5 = False
 _import_logged = False
 
 try:
-    from common.logger_setup import logger as common_configured_logger; logger = common_configured_logger; _logger_initialized_by_common_env_v5 = True
+    from src.common.logger_setup import logger as common_configured_logger; logger = common_configured_logger; _logger_initialized_by_common_env_v5 = True
     if not _import_logged:
         logger.debug("trading_env.py (V5.0): Successfully imported logger from common.logger_setup.")
-    from common.config import (TIMESTEPS as _TIMESTEPS, MAX_SYMBOLS_ALLOWED as _MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _DEFAULT_INITIAL_CAPITAL, OANDA_MARGIN_CLOSEOUT_LEVEL as _OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE as _TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY as _OANDA_API_KEY, ATR_PERIOD as _ATR_PERIOD, STOP_LOSS_ATR_MULTIPLIER as _STOP_LOSS_ATR_MULTIPLIER, MAX_ACCOUNT_RISK_PERCENTAGE as _MAX_ACCOUNT_RISK_PERCENTAGE)
+    from src.common.config import (TIMESTEPS as _TIMESTEPS, MAX_SYMBOLS_ALLOWED as _MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY, INITIAL_CAPITAL as _DEFAULT_INITIAL_CAPITAL, OANDA_MARGIN_CLOSEOUT_LEVEL as _OANDA_MARGIN_CLOSEOUT_LEVEL, TRADE_COMMISSION_PERCENTAGE as _TRADE_COMMISSION_PERCENTAGE, OANDA_API_KEY as _OANDA_API_KEY, ATR_PERIOD as _ATR_PERIOD, STOP_LOSS_ATR_MULTIPLIER as _STOP_LOSS_ATR_MULTIPLIER, MAX_ACCOUNT_RISK_PERCENTAGE as _MAX_ACCOUNT_RISK_PERCENTAGE)
     _config_values_env_v5 = {"TIMESTEPS": _TIMESTEPS, "MAX_SYMBOLS_ALLOWED": _MAX_SYMBOLS_ALLOWED, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY, "DEFAULT_INITIAL_CAPITAL": _DEFAULT_INITIAL_CAPITAL, "OANDA_MARGIN_CLOSEOUT_LEVEL": _OANDA_MARGIN_CLOSEOUT_LEVEL, "TRADE_COMMISSION_PERCENTAGE": _TRADE_COMMISSION_PERCENTAGE, "OANDA_API_KEY": _OANDA_API_KEY, "ATR_PERIOD": _ATR_PERIOD, "STOP_LOSS_ATR_MULTIPLIER": _STOP_LOSS_ATR_MULTIPLIER, "MAX_ACCOUNT_RISK_PERCENTAGE": _MAX_ACCOUNT_RISK_PERCENTAGE}
     if not _import_logged:
         logger.info("trading_env.py (V5.0): Successfully imported and stored common.config values.")
@@ -159,7 +159,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         # 風險調整後收益計算所需的歷史數據
         self.returns_history: List[Decimal] = []  # 收益序列，用於計算標準差
         self.returns_window_size: int = 20  # 滾動窗口大小
-        self.atr_penalty_threshold: Decimal = Decimal('0.02')  # ATR懲罰閾值（2%）</search>        # 獎勵配置
+        self.atr_penalty_threshold: Decimal = Decimal('0.02')  # ATR懲罰閾值（2%）        # 獎勵配置        # 獎勵配置
         default_reward_config_decimal = {"portfolio_log_return_factor": Decimal('1.0'), "risk_adjusted_return_factor": Decimal('0.5'), "max_drawdown_penalty_factor": Decimal('2.0'), "commission_penalty_factor": Decimal('1.0'), "margin_call_penalty": Decimal('-100.0'), "profit_target_bonus": Decimal('0.1'), "hold_penalty_factor": Decimal('0.001')}
         if reward_config:
             for key, value in reward_config.items():
@@ -214,11 +214,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             "unrealized_pnl_ratio_ac": spaces.Box(low=-1.0, high=5.0, shape=(self.num_env_slots,), dtype=np.float32),
             "margin_level": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
             "time_since_last_trade_ratio": spaces.Box(low=0.0, high=1.0, shape=(self.num_env_slots,), dtype=np.float32),
+            "volatility": spaces.Box(low=0.0, high=1.0, shape=(self.num_env_slots,), dtype=np.float32),  # 新增波動率特徵
             "padding_mask": spaces.Box(low=0, high=1, shape=(self.num_env_slots,), dtype=np.bool_)}
         self.observation_space = spaces.Dict(obs_spaces)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_env_slots,), dtype=np.float32)
         if self.render_mode == 'human': self._init_render_figure()
-        logger.info(f"UniversalTradingEnvV4 (Detailed Step - V5.0) 初始化完成。")
+        logger.info(f"UniversalTradingEnvV4 (整合量子策略層) 初始化完成。")
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         super().reset(seed=seed); self.current_step_in_dataset = 0; self.episode_step_count = 0
@@ -233,11 +234,19 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.total_margin_used_ac = Decimal('0.0')
         self.equity_ac = self.initial_capital; self.portfolio_value_ac = self.initial_capital
         self.portfolio_value_history = [float(self.initial_capital)]; self.reward_history = []; self.trade_log = []
-# 重置收益歷史
+        # 初始化價格歷史記錄
+        self.price_history = {symbol: deque(maxlen=20) for symbol in self.active_symbols_for_episode}  # 20步波動率窗口
+        # 重置收益歷史
         self.returns_history = []
         self.peak_portfolio_value_episode = self.initial_capital; self.max_drawdown_episode = Decimal('0.0')
         logger.debug(f"Env reset. Initial capital: {self.cash} {ACCOUNT_CURRENCY}. Start step: {self.current_step_in_dataset}")
         all_prices_map, _ = self._get_current_raw_prices_for_all_dataset_symbols()
+        # 初始化價格歷史
+        for symbol in self.active_symbols_for_episode:
+            if symbol in all_prices_map:
+                bid, ask = all_prices_map[symbol]
+                mid_price = (bid + ask) / Decimal('2')
+                self.price_history[symbol].append(mid_price)
         self._update_atr_values(all_prices_map); self._update_portfolio_and_equity_value(all_prices_map)
         return self._get_observation(), self._get_info()
 
@@ -474,6 +483,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         _t_get_prices = time.perf_counter()
         all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
         logger.debug(f"Step {self.episode_step_count}: _get_current_raw_prices_for_all_dataset_symbols took {time.perf_counter() - _t_get_prices:.6f}s")
+        
+        # 更新價格歷史
+        for symbol in self.active_symbols_for_episode:
+            if symbol in all_prices_map:
+                bid, ask = all_prices_map[symbol]
+                mid_price = (bid + ask) / Decimal('2')
+                self.price_history[symbol].append(mid_price)
         
         prev_portfolio_value_ac = self.portfolio_value_ac
         

@@ -1,17 +1,19 @@
 # src/agent/sac_agent_wrapper.py
 """
-SAC智能體包裝器。
+SAC智能體包裝器 (整合量子策略層)。
 封裝Stable Baselines3的SAC智能體，提供簡化的接口，並集成TensorBoard日誌。
-支援GPU加速訓練和混合精度訓練。
+支援GPU加速訓練、混合精度訓練和量子策略層。
 """
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.logger import configure as sb3_logger_configure # 重命名以避免衝突
 from gymnasium import spaces # <-- gymnasium.spaces
+from .quantum_policy_v2 import QuantumPolicyLayer  # 導入新版本量子策略層
 import gymnasium as gym # <-- 導入 gymnasium as gym 以便MockEnv使用
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # 導入 functional 模組解決 F 未定義問題
 from typing import Optional, Dict, Any, Type, Callable, Union, List, Tuple # <--- 添加 Tuple
 from pathlib import Path
 import time
@@ -61,7 +63,7 @@ except ImportError:
         LOGS_DIR=Path("./logs_fallback"); MAX_SYMBOLS_ALLOWED=20; USE_AMP=False
 
 
-class SACAgentWrapper:
+class QuantumEnhancedSAC:
     def __init__(self,
                  env: DummyVecEnv,
                  policy_class: Type[CustomSACPolicy] = CustomSACPolicy, # type: ignore
@@ -97,7 +99,22 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         
         # 優化設備配置
         self.device = self._setup_device(device)
-        logger.info(f"SAC Agent Wrapper: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
+        logger.info(f"量子增強SAC: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
+        
+        # 初始化量子策略層 (新版本)
+        # 獲取觀察空間的形狀
+        obs_space = env.observation_space
+        if hasattr(obs_space, 'spaces'):
+            state_dim = obs_space['features_from_dataset'].shape[2]  # 特徵維度
+        else:
+            state_dim = obs_space.shape[0]
+            
+        action_dim = env.action_space.shape[0]
+        self.quantum_policy = QuantumPolicyLayer(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            num_strategies=3
+        ).to(self.device)
         
         # num_active_symbols = getattr(self.env.envs[0], 'num_active_symbols_in_slots', 1) # Removed this line
         # Check if env is a list of environments (VecEnv) or a single environment
@@ -141,13 +158,25 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             logger.info(f"TensorBoard日誌將保存到: {self.tensorboard_log_path}")
         else:
             self.tensorboard_log_path = tensorboard_log_path
+        # 配置自定義策略網絡
+        policy_kwargs = dict(
+            net_arch=dict(pi=[256, 256], qf=[256, 256]),
+            features_extractor_class=None,
+            features_extractor_kwargs=None
+        )
+        
+        # 創建SAC代理
         self.agent = SAC(
             policy=self.policy_class, env=self.env, learning_rate=learning_rate,
             buffer_size=self.buffer_size, learning_starts=self.learning_starts, batch_size=self.optimized_batch_size,
             tau=tau, gamma=gamma, train_freq=(train_freq_steps, "step"), gradient_steps=gradient_steps,
-            ent_coef=ent_coef, policy_kwargs=self.policy_kwargs, verbose=verbose, seed=seed,
+            ent_coef=ent_coef, policy_kwargs=policy_kwargs, verbose=verbose, seed=seed,
             device=self.device, tensorboard_log=self.tensorboard_log_path
         )
+        
+        # 替換原始策略網絡為量子策略層
+        self.agent.policy.actor = self.quantum_policy
+        self.agent.actor = self.quantum_policy
         self.custom_objects = custom_objects if custom_objects is not None else {}
         self.custom_objects["policy_class"] = self.policy_class
         if "features_extractor_class" in self.policy_kwargs:
@@ -306,9 +335,58 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         except Exception as e:
             logger.warning(f"AMP健康檢查過程中發生錯誤: {e}")
 
-    def predict(self, observation: np.ndarray, state: Optional[Tuple[np.ndarray, ...]] = None, # np, Tuple 已導入
+    def predict(self, observation: np.ndarray, state: Optional[Tuple[np.ndarray, ...]] = None,
                 episode_start: Optional[np.ndarray] = None, deterministic: bool = True) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
         return self.agent.predict(observation, state=state, episode_start=episode_start, deterministic=deterministic)
+    
+    def select_action(self, state_dict: Dict[str, np.ndarray], market_volatility: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        使用量子策略層選擇動作 (處理多維度輸入)
+        
+        Args:
+            state_dict: 狀態字典 (包含時間序列特徵)
+            market_volatility: 市場波動率數組 (每個交易對)
+            
+        Returns:
+            action: 選擇的動作
+            amplitudes: 策略振幅分布
+        """
+        # 將狀態字典轉換為張量
+        features = torch.FloatTensor(state_dict['features_from_dataset']).to(self.device)
+        batch_size, num_symbols, timesteps, features_dim = features.shape
+        
+        # 展平時間序列特徵
+        flat_features = features.view(batch_size * num_symbols, timesteps * features_dim)
+        
+        # 創建波動率張量
+        volatility_tensor = torch.FloatTensor(market_volatility).to(self.device).view(-1, 1)
+        
+        with torch.no_grad():
+            action_tensor, amplitudes = self.quantum_policy(flat_features, volatility_tensor)
+        
+        # 重塑動作張量
+        action = action_tensor.view(batch_size, num_symbols, -1).cpu().numpy()
+        amplitudes = amplitudes.view(batch_size, num_symbols, -1).cpu().numpy()
+        
+        return action, amplitudes
+    
+    def update_amplitudes(self, rewards: np.ndarray):
+        """
+        根據策略表現更新振幅 (批量處理)
+        
+        Args:
+            rewards: 各策略在最近episode的累積獎勵 (形狀: [batch_size, num_strategies])
+        """
+        rewards_tensor = torch.FloatTensor(rewards).to(self.device)
+        probs = F.softmax(self.quantum_policy.amplitudes, dim=0)
+        
+        # 計算策略損失
+        loss = -torch.mean(torch.sum(torch.log(probs) * rewards_tensor, dim=1))
+        
+        # 優化振幅參數
+        self.quantum_policy.optimizer.zero_grad()
+        loss.backward()
+        self.quantum_policy.optimizer.step()
 
     def save(self, path: Union[str, Path]):
         try: self.agent.save(path); logger.info(f"智能體模型已保存到: {path}")
@@ -380,7 +458,7 @@ if __name__ == "__main__":
     }
     try:
         logger.info("初始化 SACAgentWrapper...")
-        agent_wrapper = SACAgentWrapper(env=dummy_vec_env_main, policy_kwargs=test_policy_kwargs_main, batch_size=32, buffer_size_factor=10, learning_starts_factor=2, verbose=0)
+        agent_wrapper = QuantumEnhancedSAC(env=dummy_vec_env_main, policy_kwargs=test_policy_kwargs_main, batch_size=32, buffer_size_factor=10, learning_starts_factor=2, verbose=0)
         logger.info("SACAgentWrapper 初始化成功。")
         model_save_path_main = LOGS_DIR / "test_sac_agent.zip"
         logger.info(f"測試保存模型到: {model_save_path_main}")
