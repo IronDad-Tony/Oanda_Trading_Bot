@@ -502,9 +502,9 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
             step=step,
             reward=reward,
             portfolio_value=portfolio_value,
-            actor_loss=actor_loss,
-            critic_loss=critic_loss,
-            l2_norm=l2_norm,            grad_norm=grad_norm,
+            actor_loss=actor_loss,            critic_loss=critic_loss,
+            l2_norm=l2_norm,
+            grad_norm=grad_norm,
             
         )
         if step % 25 == 0 and symbols:
@@ -535,6 +535,7 @@ def training_worker(trainer_instance, shared_manager, symbols, total_timesteps):
     try:
         logger.info(f"Training worker thread started. Trainer instance: {trainer_instance}, Symbols: {symbols}, Steps: {total_timesteps}")
         
+        success = False  # 初始化 success 變量
         if trainer_instance and TRAINER_AVAILABLE:
             logger.info("Starting real training process with trainer instance.")
             # Ensure the trainer uses the correct shared manager

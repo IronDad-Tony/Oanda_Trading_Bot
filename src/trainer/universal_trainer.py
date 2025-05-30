@@ -626,14 +626,14 @@ class UniversalTrainer:
         
         Args:
             load_model_path: 可選的模型加載路徑 (用於恢復檢查點)
-            
-        返回:
+              返回:
             整個管道是否成功完成
         """
         logger.info("=" * 60)
         logger.info("開始完整的訓練管道")
         logger.info("=" * 60)
         
+        success = False  # 初始化 success 變量
         try:
             self.shared_data_manager.clear_data() # 開始新訓練前清除舊數據
             self.shared_data_manager.update_training_status('running', 0)

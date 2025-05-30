@@ -22,13 +22,13 @@ try:
         AMP_CONVERSION_LOG_INTERVAL # <--- 導入新的日誌間隔配置
     )
     from common.logger_setup import logger
-except ImportError:
-    # project_root_fe = Path(__file__).resolve().parent.parent.parent # 移除
+except ImportError:    # project_root_fe = Path(__file__).resolve().parent.parent.parent # 移除
     # src_path_fe = project_root_fe / "src" # 移除
     # if str(project_root_fe) not in sys.path: # 移除
     #     sys.path.insert(0, str(project_root_fe)) # 移除
     try:
-        # 假設 PYTHONPATH 已設定，這些導入應該能工作        from src.models.transformer_model import UniversalTradingTransformer
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作
+        from src.models.transformer_model import UniversalTradingTransformer
         from src.common.config import (
             TIMESTEPS, MAX_SYMBOLS_ALLOWED,
             TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS, TRANSFORMER_NUM_HEADS,
@@ -40,7 +40,8 @@ except ImportError:
         logger.info("Direct run FeatureExtractor: Successfully re-imported common modules.")
     except ImportError as e_retry_fe:
         import logging
-        logger = logging.getLogger("feature_extractor_fallback") # type: ignore        logger.error(f"Direct run FeatureExtractor: Critical import error: {e_retry_fe}", exc_info=True)
+        logger = logging.getLogger("feature_extractor_fallback") # type: ignore
+        logger.error(f"Direct run FeatureExtractor: Critical import error: {e_retry_fe}", exc_info=True)
         UniversalTradingTransformer = None # type: ignore
         TIMESTEPS=128; MAX_SYMBOLS_ALLOWED=20; TRANSFORMER_OUTPUT_DIM_PER_SYMBOL=64
         DEVICE = torch.device("cpu") # <--- 後備 DEVICE 定義
