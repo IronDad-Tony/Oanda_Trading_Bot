@@ -1011,8 +1011,8 @@ def create_real_time_charts():
                     fig_trades_timeline = go.Figure()
                     
                     # Color code by action type
-                    buy_trades = trades_df[trades_df['action'] == 'buy']
-                    sell_trades = trades_df[trades_df['action'] == 'sell']
+                    buy_trades = trades_df[trades_df['action'].str.startswith('Long', na=False)]
+                    sell_trades = trades_df[trades_df['action'].str.startswith('Short', na=False)]
                     
                     if not buy_trades.empty:
                         fig_trades_timeline.add_trace(go.Scatter(
