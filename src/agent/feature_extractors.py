@@ -18,7 +18,8 @@ try:
         TIMESTEPS, MAX_SYMBOLS_ALLOWED,
         TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS, TRANSFORMER_NUM_HEADS,
         TRANSFORMER_FFN_DIM, TRANSFORMER_DROPOUT_RATE,
-        TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, DEVICE # <--- 確保 DEVICE 從 config 導入
+        TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, DEVICE, # <--- 確保 DEVICE 從 config 導入
+        AMP_CONVERSION_LOG_INTERVAL # <--- 導入新的日誌間隔配置
     )
     from common.logger_setup import logger
 except ImportError:
@@ -27,23 +28,23 @@ except ImportError:
     # if str(project_root_fe) not in sys.path: # 移除
     #     sys.path.insert(0, str(project_root_fe)) # 移除
     try:
-        # 假設 PYTHONPATH 已設定，這些導入應該能工作
-        from src.models.transformer_model import UniversalTradingTransformer
+        # 假設 PYTHONPATH 已設定，這些導入應該能工作        from src.models.transformer_model import UniversalTradingTransformer
         from src.common.config import (
             TIMESTEPS, MAX_SYMBOLS_ALLOWED,
             TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS, TRANSFORMER_NUM_HEADS,
             TRANSFORMER_FFN_DIM, TRANSFORMER_DROPOUT_RATE,
-            TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, DEVICE # <--- 確保 DEVICE 從 config 導入
+            TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, DEVICE, # <--- 確保 DEVICE 從 config 導入
+            AMP_CONVERSION_LOG_INTERVAL # <--- 導入新的日誌間隔配置
         )
         from src.common.logger_setup import logger
         logger.info("Direct run FeatureExtractor: Successfully re-imported common modules.")
     except ImportError as e_retry_fe:
         import logging
-        logger = logging.getLogger("feature_extractor_fallback") # type: ignore
-        logger.error(f"Direct run FeatureExtractor: Critical import error: {e_retry_fe}", exc_info=True)
+        logger = logging.getLogger("feature_extractor_fallback") # type: ignore        logger.error(f"Direct run FeatureExtractor: Critical import error: {e_retry_fe}", exc_info=True)
         UniversalTradingTransformer = None # type: ignore
         TIMESTEPS=128; MAX_SYMBOLS_ALLOWED=20; TRANSFORMER_OUTPUT_DIM_PER_SYMBOL=64
         DEVICE = torch.device("cpu") # <--- 後備 DEVICE 定義
+        AMP_CONVERSION_LOG_INTERVAL = 100 # <--- 後備日誌間隔定義
 
 
 class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
@@ -65,6 +66,9 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, _features_dim)
         
         self.use_amp = use_amp
+        # 添加日誌頻率控制變量
+        self.amp_conversion_log_counter = 0
+        self.amp_conversion_log_interval = AMP_CONVERSION_LOG_INTERVAL  # 使用配置文件中的設定
         # 考慮從 common.config 導入 USE_AMP 作為 self.use_amp 的預設值
         # from common.config import USE_AMP as global_use_amp
         # self.use_amp = use_amp if use_amp is not None else global_use_amp # 如果參數未提供則使用全局配置
@@ -102,8 +106,11 @@ class AdvancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         # 並且確保後續網絡接收的是 float32
         transformer_output_float32 = transformer_output_internal.to(torch.float32)
         
+        # 控制 AMP 轉換日誌的頻率，避免過多的日誌訊息
         if amp_enabled_for_this_forward and transformer_output_internal.dtype == torch.float16:
-            logger.debug(f"Transformer output was float16 (due to AMP), converted to float32 before concatenation.")
+            self.amp_conversion_log_counter += 1
+            if self.amp_conversion_log_counter % self.amp_conversion_log_interval == 0:
+                logger.debug(f"Transformer output was float16 (due to AMP), converted to float32 before concatenation. (This message is logged every {self.amp_conversion_log_interval} conversions, total count: {self.amp_conversion_log_counter})")
 
         batch_size = transformer_output_float32.size(0)
         flattened_transformer_output = transformer_output_float32.reshape(batch_size, -1)

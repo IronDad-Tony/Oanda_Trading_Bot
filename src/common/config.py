@@ -174,6 +174,10 @@ AUTO_DISABLE_AMP_ON_INSTABILITY = True
 # 早期停止容忍的NaN檢測次數
 MAX_NAN_TOLERANCE = 10
 
+# --- 日誌配置 ---
+# AMP 轉換日誌控制 - 減少重複的 DEBUG 訊息頻率
+AMP_CONVERSION_LOG_INTERVAL = 100   # 每 N 次 AMP 轉換才記錄一次日誌訊息
+
 # --- 風險管理參數 ---
 MAX_ACCOUNT_RISK_PERCENTAGE = 0.02  # 單筆交易最大可承受賬戶風險百分比 (例如 2%)
 MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY = 0.10 # 單個倉位最大名義價值佔總淨值的百分比 (例如 10%)
