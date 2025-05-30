@@ -232,10 +232,14 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Note: The 'Others' category has been renamed to 'Bonds' as requested by the user
+# since all symbols in that category were identified as bond instruments.
+
 def get_categorized_symbols_and_details():
     """Fetch all OANDA symbols, categorize, and return dict: {category: [(symbol, display_name, type)]}"""
     iim = InstrumentInfoManager(force_refresh=False)
     all_symbols = iim.get_all_available_symbols()
+    
     categorized = {
         'Major Pairs': [],
         'Minor Pairs': [],
@@ -244,16 +248,36 @@ def get_categorized_symbols_and_details():
         'Energy': [],
         'Commodities': [],
         'Crypto': [],
-        'Others': []
+        'Bonds': []
     }
     # Major pairs list (OANDA standard)
     major_pairs = {
         'EUR_USD', 'USD_JPY', 'GBP_USD', 'AUD_USD', 'USD_CHF', 'USD_CAD', 'NZD_USD'
     }
+    
+    # 特定符号的明确分类映射 (根据用户要求调整)
+    # 以下符号按照用户指定分类：
+    # - 指数类：NL25_EUR(荷兰AEX), CH20_CHF(瑞士SMI), ESPIX_EUR(西班牙IBEX), 
+    #          US2000_USD(美国小盘股), CHINAH_HKD(中国H股), SG30_SGD(新加坡海峡时报), FR40_EUR(法国CAC40)
+    # - 能源类：BCO_USD(布伦特原油)
+    # - 贵金属类：XCU_USD(铜)
+    specific_classifications = {
+        'NL25_EUR': 'Indices',      # 荷兰AEX指数
+        'CH20_CHF': 'Indices',      # 瑞士SMI指数
+        'ESPIX_EUR': 'Indices',     # 西班牙IBEX指数
+        'BCO_USD': 'Energy',        # 布伦特原油
+        'XCU_USD': 'Precious Metals', # 铜 - 归类到贵金属
+        'US2000_USD': 'Indices',    # 美国小盘股指数
+        'CHINAH_HKD': 'Indices',    # 中国H股指数
+        'SG30_SGD': 'Indices',      # 新加坡海峡时报指数
+        'FR40_EUR': 'Indices'       # 法国CAC40指数
+    }
+    
     # Indices, Energy, Metals, Commodities keywords
-    index_keywords = ["SPX", "NAS", "US30", "UK100", "DE30", "JP225", "HK33", "AU200", "FRA40", "EU50", "CN50"]
-    energy_keywords = ["OIL", "WTICO", "BRENT", "NATGAS", "GAS"]
-    metal_keywords = ["XAU", "XAG", "GOLD", "SILVER", "PLAT", "PALL"]
+    index_keywords = ["SPX", "NAS", "US30", "UK100", "DE30", "JP225", "HK33", "AU200", "FRA40", "EU50", "CN50", 
+                     "NL25", "CH20", "ESPIX", "US2000", "CHINAH", "SG30", "FR40"]
+    energy_keywords = ["OIL", "WTICO", "BRENT", "NATGAS", "GAS", "BCO"]
+    metal_keywords = ["XAU", "XAG", "GOLD", "SILVER", "PLAT", "PALL", "XCU"]
     commodity_keywords = ["CORN", "WHEAT", "SOYBN", "SUGAR", "COFFEE", "COCOA", "COTTON"]
     crypto_keywords = ["BTC", "ETH", "LTC", "BCH", "XRP", "ADA", "DOGE", "CRYPTO"]
 
@@ -264,8 +288,13 @@ def get_categorized_symbols_and_details():
         symbol = details.symbol
         display = details.display_name if hasattr(details, 'display_name') else sym
         t = details.type.upper() if details.type else ''
+        
         # --- Classification logic ---
-        if symbol in major_pairs:
+        # 首先检查特定符号的明确分类
+        if symbol in specific_classifications:
+            category = specific_classifications[symbol]
+            categorized[category].append((symbol, display, t))
+        elif symbol in major_pairs:
             categorized['Major Pairs'].append((symbol, display, t))
         elif t == 'CURRENCY' and '_' in symbol:
             # Minor pairs: CURRENCY type, not in major_pairs, not precious metals
@@ -283,8 +312,8 @@ def get_categorized_symbols_and_details():
         elif t == 'CRYPTO' or any(crypto in symbol or crypto in display.upper() for crypto in crypto_keywords):
             categorized['Crypto'].append((symbol, display, t))
         else:
-            categorized['Others'].append((symbol, display, t))
-    # Remove empty categories, but always keep 'Others' if any uncategorized
+            categorized['Bonds'].append((symbol, display, t))
+    # Remove empty categories, but always keep 'Bonds' if any uncategorized
     categorized = {k: v for k, v in categorized.items() if v}
     return categorized
 
