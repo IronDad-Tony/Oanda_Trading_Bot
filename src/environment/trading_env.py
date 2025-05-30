@@ -14,6 +14,19 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, ROUND_CEILING, ROUND_FLOOR
 import sys
 import os
+import warnings
+import traceback
+import time
+import logging
+from pathlib import Path
+
+# Add matplotlib import with backend setting for headless environments
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 # Correctly adjust sys.path when the script is run directly
 # This ensures that imports like 'from src.common import ...' work.
@@ -26,12 +39,7 @@ if __name__ == "__main__": # Only run this when script is executed directly
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
-from pathlib import Path
-import logging
-import time # <--- 導入 time 模組
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.figure import Figure
+from collections import deque, defaultdict
 
 getcontext().prec = 30
 logger: logging.Logger = logging.getLogger("trading_env_module_init") # type: ignore
@@ -64,7 +72,15 @@ except ImportError as e_initial_import_v5:
         from src.common.config import (TIMESTEPS as _TIMESTEPS_R, MAX_SYMBOLS_ALLOWED as _MAX_SYMBOLS_ALLOWED_R, ACCOUNT_CURRENCY as _ACCOUNT_CURRENCY_R, INITIAL_CAPITAL as _DEFAULT_INITIAL_CAPITAL_R, OANDA_MARGIN_CLOSEOUT_LEVEL as _OANDA_MARGIN_CLOSEOUT_LEVEL_R, TRADE_COMMISSION_PERCENTAGE as _TRADE_COMMISSION_PERCENTAGE_R, OANDA_API_KEY as _OANDA_API_KEY_R, ATR_PERIOD as _ATR_PERIOD_R, STOP_LOSS_ATR_MULTIPLIER as _STOP_LOSS_ATR_MULTIPLIER_R, MAX_ACCOUNT_RISK_PERCENTAGE as _MAX_ACCOUNT_RISK_PERCENTAGE_R)
         _config_values_env_v5 = {"TIMESTEPS": _TIMESTEPS_R, "MAX_SYMBOLS_ALLOWED": _MAX_SYMBOLS_ALLOWED_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R, "DEFAULT_INITIAL_CAPITAL": _DEFAULT_INITIAL_CAPITAL_R, "OANDA_MARGIN_CLOSEOUT_LEVEL": _OANDA_MARGIN_CLOSEOUT_LEVEL_R, "TRADE_COMMISSION_PERCENTAGE": _TRADE_COMMISSION_PERCENTAGE_R, "OANDA_API_KEY": _OANDA_API_KEY_R, "ATR_PERIOD": _ATR_PERIOD_R, "STOP_LOSS_ATR_MULTIPLIER": _STOP_LOSS_ATR_MULTIPLIER_R, "MAX_ACCOUNT_RISK_PERCENTAGE": _MAX_ACCOUNT_RISK_PERCENTAGE_R}
         logger.info("trading_env.py (V5.0): Successfully re-imported and stored common.config after path adjustment.")
-        from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from src.data_manager.instrument_info_manager import InstrumentDetails, InstrumentInfoManager; logger.info("trading_env.py (V5.0): Successfully re-imported other dependencies after path adjustment.")
+        from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from src.data_manager.instrument_info_manager import InstrumentDetails, InstrumentInfoManager; 
+        # Import enhanced reward calculator
+        try:
+            from src.environment.enhanced_reward_calculator import EnhancedRewardCalculator
+            logger.info("trading_env.py (V5.0): Successfully imported EnhancedRewardCalculator")
+        except ImportError as e_reward_calc:
+            logger.warning(f"trading_env.py (V5.0): Failed to import EnhancedRewardCalculator: {e_reward_calc}")
+            EnhancedRewardCalculator = None
+        logger.info("trading_env.py (V5.0): Successfully re-imported other dependencies after path adjustment.")
     except ImportError as e_retry_critical_v5:
         logger.error(f"trading_env.py (V5.0): Critical import error after path adjustment: {e_retry_critical_v5}", exc_info=True); logger.warning("trading_env.py (V5.0): Using fallback values for config (critical error during import).")
         _config_values_env_v5 = {"TIMESTEPS": 128, "MAX_SYMBOLS_ALLOWED": 20, "ACCOUNT_CURRENCY": "AUD", "DEFAULT_INITIAL_CAPITAL": 100000.0, "OANDA_MARGIN_CLOSEOUT_LEVEL": Decimal('0.50'), "TRADE_COMMISSION_PERCENTAGE": Decimal('0.0001'), "OANDA_API_KEY": None, "ATR_PERIOD": 14, "STOP_LOSS_ATR_MULTIPLIER": Decimal('2.0'), "MAX_ACCOUNT_RISK_PERCENTAGE": Decimal('0.01')}
@@ -143,14 +159,54 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         # 風險調整後收益計算所需的歷史數據
         self.returns_history: List[Decimal] = []  # 收益序列，用於計算標準差
         self.returns_window_size: int = 20  # 滾動窗口大小
-        self.atr_penalty_threshold: Decimal = Decimal('0.02')  # ATR懲罰閾值（2%）</search>
-# 獎勵配置
-
+        self.atr_penalty_threshold: Decimal = Decimal('0.02')  # ATR懲罰閾值（2%）</search>        # 獎勵配置
         default_reward_config_decimal = {"portfolio_log_return_factor": Decimal('1.0'), "risk_adjusted_return_factor": Decimal('0.5'), "max_drawdown_penalty_factor": Decimal('2.0'), "commission_penalty_factor": Decimal('1.0'), "margin_call_penalty": Decimal('-100.0'), "profit_target_bonus": Decimal('0.1'), "hold_penalty_factor": Decimal('0.001')}
         if reward_config:
             for key, value in reward_config.items():
                 if key in default_reward_config_decimal: default_reward_config_decimal[key] = Decimal(str(value))
         self.reward_config = default_reward_config_decimal
+        
+        # Initialize Enhanced Reward Calculator if available
+        self.enhanced_reward_calculator = None
+        self.use_enhanced_rewards = False
+        if 'EnhancedRewardCalculator' in globals() and EnhancedRewardCalculator is not None:
+            try:
+                # Enhanced reward configuration with improved parameters
+                enhanced_config = {
+                    "portfolio_log_return_factor": Decimal('0.8'),
+                    "risk_adjusted_return_factor": Decimal('1.2'),  # Increased from 0.5
+                    "max_drawdown_penalty_factor": Decimal('1.5'),  # Decreased from 2.0
+                    "commission_penalty_factor": Decimal('0.8'),    # Decreased from 1.0
+                    "margin_call_penalty": Decimal('-50.0'),         # Less harsh than -100
+                    "profit_target_bonus": Decimal('0.3'),          # Increased from 0.1
+                    "hold_penalty_factor": Decimal('0.0005'),       # Reduced from 0.001
+                    "win_rate_incentive_factor": Decimal('1.0'),    # New parameter
+                    "trend_following_bonus": Decimal('0.5'),        # New parameter
+                    "quick_stop_loss_bonus": Decimal('0.1'),        # New parameter
+                    "compound_holding_factor": Decimal('0.2'),      # New parameter
+                }
+                
+                # Override with any user-provided config
+                if reward_config:
+                    for key, value in reward_config.items():
+                        if key in enhanced_config:
+                            enhanced_config[key] = Decimal(str(value))
+                        elif key == "use_enhanced_rewards":
+                            self.use_enhanced_rewards = bool(value)
+                
+                self.enhanced_reward_calculator = EnhancedRewardCalculator(
+                    initial_capital=self.initial_capital,
+                    config=enhanced_config
+                )
+                self.use_enhanced_rewards = True
+                logger.info("EnhancedRewardCalculator successfully initialized with improved parameters")
+            except Exception as e:
+                logger.warning(f"Failed to initialize EnhancedRewardCalculator: {e}. Falling back to standard rewards.")
+                self.enhanced_reward_calculator = None
+                self.use_enhanced_rewards = False
+        else:
+            logger.info("EnhancedRewardCalculator not available. Using standard reward calculation.")
+        
         self.peak_portfolio_value_episode: Decimal = self.initial_capital; self.max_drawdown_episode: Decimal = Decimal('0.0')
         obs_spaces = {
             "features_from_dataset": spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32),
@@ -446,7 +502,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             symbol = self.slot_to_symbol_map.get(slot_idx)
             if not symbol: continue
 
-            details = self.instrument_details_map[symbol]
+            details = self.instrument_info_manager.get_details(symbol)
             current_units = self.current_positions_units[slot_idx]
             current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
             
@@ -576,13 +632,67 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         # _t_get_obs = time.perf_counter()
         # next_observation = self._get_observation() # THIS LINE IS REMOVED / COMMENTED OUT
         # logger.debug(f"Step {self.episode_step_count}: _get_observation took {time.perf_counter() - _t_get_obs:.6f}s")
-        info = self._get_info(); info["reward_this_step"] = reward
+        info = self._get_info()
+        info["reward_this_step"] = reward
         logger.debug(f"--- Step {self.episode_step_count} End. Total time: {time.perf_counter() - _step_time_start:.6f}s ---")
         return next_observation, reward, terminated, truncated, info
     
     def _calculate_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
         """
-        計算強化學習獎勵函數，強調風險控制與穩定收益增長
+        計算強化學習獎勵函數，支援傳統與增強版獎勵計算
+        
+        如果啟用增強版獎勵計算器，則使用更先進的獎勵機制；
+        否則使用傳統的風險調整獎勵計算
+        """
+        
+        # 使用增強版獎勵計算器（如果可用且啟用）
+        if self.use_enhanced_rewards and self.enhanced_reward_calculator is not None:
+            try:
+                # 準備增強版獎勵計算所需的數據
+                reward_data = {
+                    'current_portfolio_value': self.portfolio_value_ac,
+                    'previous_portfolio_value': prev_portfolio_value_ac,
+                    'commission_this_step': commission_this_step_ac,
+                    'returns_history': self.returns_history,
+                    'unrealized_pnl_per_slot': self.unrealized_pnl_ac,
+                    'current_positions': self.current_positions_units,
+                    'last_trade_steps': self.last_trade_step_per_slot,
+                    'current_step': self.episode_step_count,
+                    'max_episode_steps': self.max_episode_steps,
+                    'peak_portfolio_value': self.peak_portfolio_value_episode,
+                    'max_drawdown': self.max_drawdown_episode,
+                    'equity': self.equity_ac,
+                    'total_margin_used': self.total_margin_used_ac,
+                    'trade_log': self.trade_log,
+                    'active_slot_indices': self.current_episode_tradable_slot_indices,
+                    'atr_values': self.atr_values_qc,
+                    'atr_penalty_threshold': self.atr_penalty_threshold
+                }
+                
+                enhanced_reward = self.enhanced_reward_calculator.calculate_reward(reward_data)
+                
+                # 記錄增強版獎勵組件（如果有的話）
+                if hasattr(self.enhanced_reward_calculator, 'last_reward_components'):
+                    if not hasattr(self, 'enhanced_reward_components_history'):
+                        self.enhanced_reward_components_history = []
+                    
+                    self.enhanced_reward_components_history.append({
+                        'step': self.episode_step_count,
+                        **self.enhanced_reward_calculator.last_reward_components
+                    })
+                
+                return enhanced_reward
+                
+            except Exception as e:
+                logger.error(f"Enhanced reward calculation failed: {e}. Falling back to standard calculation.")
+                # 如果增強版計算失敗，回退到傳統計算
+                self.use_enhanced_rewards = False
+          # 傳統獎勵計算（改進版）
+        return self._calculate_standard_reward(prev_portfolio_value_ac, commission_this_step_ac)
+    
+    def _calculate_standard_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
+        """
+        傳統獎勵計算方法，包含一些改進的參數調整
         
         核心理念：
         1. 風險控制優先：重視風險調整後的收益而非絕對收益
@@ -596,14 +706,15 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         if prev_portfolio_value_ac > Decimal('0'): 
             log_return = (self.portfolio_value_ac / prev_portfolio_value_ac).ln()
         
-        # 更新收益歷史序列（用於風險調整計算）
+        # 更新收益歷史序列（用於風險調整計算）- 使用更大的窗口
         self.returns_history.append(log_return)
-        if len(self.returns_history) > self.returns_window_size:
+        enhanced_window_size = 50  # 增加窗口大小以提高穩定性
+        if len(self.returns_history) > enhanced_window_size:
             self.returns_history.pop(0)
         
         # === 2. 風險調整後收益（改進的夏普比率） ===
         risk_adjusted_reward = Decimal('0.0')
-        if len(self.returns_history) >= 5:  # 至少需要5個數據點
+        if len(self.returns_history) >= 10:  # 減少最小數據點要求
             returns_array = [float(r) for r in self.returns_history]
             mean_return = Decimal(str(sum(returns_array) / len(returns_array)))
             
@@ -613,31 +724,41 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             
             # 風險調整收益 = 平均收益 / 標準差（簡化夏普比率）
             risk_adjusted_return = mean_return / (std_return + Decimal('1e-6'))
-            risk_adjusted_reward = self.reward_config["risk_adjusted_return_factor"] * risk_adjusted_return
+            # 使用更積極的風險調整因子
+            enhanced_risk_factor = Decimal('1.2')  # 從0.5提升到1.2
+            risk_adjusted_reward = enhanced_risk_factor * risk_adjusted_return
         else:
             # 數據不足時使用基礎對數收益
             risk_adjusted_reward = self.reward_config["portfolio_log_return_factor"] * log_return
         
         reward_val = risk_adjusted_reward
         
-        # === 3. 手續費懲罰（鼓勵減少過度交易） ===
-        commission_penalty = self.reward_config["commission_penalty_factor"] * (commission_this_step_ac / self.initial_capital)
+        # === 3. 手續費懲罰（鼓勵減少過度交易） - 調整為動態懲罰 ===
+        # 根據近期收益調整手續費懲罰強度
+        recent_performance = Decimal('1.0')
+        if len(self.returns_history) >= 5:
+            recent_returns = self.returns_history[-5:]
+            recent_performance = max(Decimal('0.5'), sum(recent_returns) / Decimal('5') + Decimal('1.0'))
+        
+        dynamic_commission_factor = self.reward_config["commission_penalty_factor"] / recent_performance
+        commission_penalty = dynamic_commission_factor * (commission_this_step_ac / self.initial_capital)
         reward_val -= commission_penalty
         
-        # === 4. 最大回撤懲罰（強化風險控制） ===
+        # === 4. 最大回撤懲罰（強化風險控制） - 調整懲罰強度 ===
         self.peak_portfolio_value_episode = max(self.peak_portfolio_value_episode, self.portfolio_value_ac)
         current_dd = (self.peak_portfolio_value_episode - self.portfolio_value_ac) / (self.peak_portfolio_value_episode + Decimal('1e-9'))
         
+        enhanced_dd_factor = Decimal('1.5')  # 從2.0降低到1.5，減少過度懲罰
         if current_dd > self.max_drawdown_episode:
             # 新的最大回撤發生時給予較重懲罰
-            dd_penalty = self.reward_config["max_drawdown_penalty_factor"] * (current_dd - self.max_drawdown_episode)
+            dd_penalty = enhanced_dd_factor * (current_dd - self.max_drawdown_episode)
             reward_val -= dd_penalty
             self.max_drawdown_episode = current_dd
         elif current_dd > Decimal('0'):
             # 持續回撤時給予輕微懲罰
-            reward_val -= self.reward_config["max_drawdown_penalty_factor"] * current_dd * Decimal('0.1')
+            reward_val -= enhanced_dd_factor * current_dd * Decimal('0.05')  # 從0.1降低到0.05
         
-        # === 5. 持倉時間獎勵機制（讓利潤奔跑） ===
+        # === 5. 持倉時間獎勵機制（讓利潤奔跑） - 增強獎勵 ===
         position_hold_reward = Decimal('0.0')
         for slot_idx in self.current_episode_tradable_slot_indices:
             units = self.current_positions_units[slot_idx]
@@ -649,16 +770,18 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                     hold_duration = self.episode_step_count - last_trade_step
                     
                     # 如果持倉時間較長且盈利，給予獎勵（讓利潤奔跑）
-                    if unrealized_pnl > Decimal('0') and hold_duration > 5:
-                        duration_factor = min(Decimal(str(hold_duration)) / Decimal('20'), Decimal('2.0'))  # 最大2倍獎勵
+                    if unrealized_pnl > Decimal('0') and hold_duration > 3:  # 降低持倉要求
+                        duration_factor = min(Decimal(str(hold_duration)) / Decimal('15'), Decimal('3.0'))  # 調整因子
                         profit_ratio = unrealized_pnl / self.initial_capital
-                        position_hold_reward += self.reward_config["profit_target_bonus"] * profit_ratio * duration_factor
+                        enhanced_profit_bonus = Decimal('0.3')  # 從0.1提升到0.3
+                        position_hold_reward += enhanced_profit_bonus * profit_ratio * duration_factor
                     
                     # 如果持倉時間較短但虧損較大，輕微懲罰（快速止損相關）
-                    elif unrealized_pnl < Decimal('0') and hold_duration > 10:
+                    elif unrealized_pnl < Decimal('0') and hold_duration > 8:  # 稍微降低止損要求
                         loss_ratio = abs(unrealized_pnl) / self.initial_capital
-                        if loss_ratio > Decimal('0.005'):  # 虧損超過0.5%
-                            position_hold_reward -= self.reward_config["hold_penalty_factor"] * loss_ratio
+                        if loss_ratio > Decimal('0.003'):  # 從0.005降低到0.003
+                            reduced_hold_penalty = Decimal('0.0005')  # 從0.001減半
+                            position_hold_reward -= reduced_hold_penalty * loss_ratio
         
         reward_val += position_hold_reward
         
@@ -685,35 +808,31 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             avg_atr_ratio = total_atr_ratio / Decimal(str(active_positions))
             if avg_atr_ratio > self.atr_penalty_threshold:
                 # 當平均ATR比例過高時（市場過於波動），給予懲罰
-                volatility_penalty = self.reward_config["risk_adjusted_return_factor"] * (avg_atr_ratio - self.atr_penalty_threshold) * Decimal('0.5')
+                volatility_penalty = enhanced_risk_factor * (avg_atr_ratio - self.atr_penalty_threshold) * Decimal('0.3')  # 從0.5降低到0.3
                 reward_val -= volatility_penalty
         
-        # === 7. 止損效果獎勵（鼓勵快速止損） ===
-        # 這部分通過持倉時間機制間接實現，避免重複計算
-        
-        # === 8. 保證金追繳懲罰（強化風險管理） ===
-        # 保證金追繳的懲罰在_handle_margin_call中處理，這裡檢查是否接近危險水平
+        # === 7. 保證金追繳懲罰（強化風險管理） ===
         if self.total_margin_used_ac > Decimal('0'):
             margin_level = self.equity_ac / self.total_margin_used_ac
             margin_warning_level = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) * Decimal('1.2')  # 60%水平開始警告
             
             if margin_level < margin_warning_level:
-                margin_risk_penalty = (margin_warning_level - margin_level) * Decimal('0.1')
+                margin_risk_penalty = (margin_warning_level - margin_level) * Decimal('0.05')  # 從0.1降低到0.05
                 reward_val -= margin_risk_penalty
         
         # === 記錄詳細信息用於監控 ===
-        if hasattr(self, 'reward_components_history'):
-            if not hasattr(self, 'reward_components_history'):
-                self.reward_components_history = []
-            
-            self.reward_components_history.append({
-                'step': self.episode_step_count,
-                'risk_adjusted_reward': float(risk_adjusted_reward),
-                'commission_penalty': float(commission_penalty),
-                'position_hold_reward': float(position_hold_reward),
-                'volatility_penalty': float(volatility_penalty),
-                'total_reward': float(reward_val)
-            })
+        if not hasattr(self, 'reward_components_history'):
+            self.reward_components_history = []
+        
+        self.reward_components_history.append({
+            'step': self.episode_step_count,
+            'risk_adjusted_reward': float(risk_adjusted_reward),
+            'commission_penalty': float(commission_penalty),
+            'position_hold_reward': float(position_hold_reward),
+            'volatility_penalty': float(volatility_penalty),
+            'total_reward': float(reward_val),
+            'reward_type': 'standard_enhanced'
+        })
         
         return float(reward_val)
 
