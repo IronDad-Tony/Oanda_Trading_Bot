@@ -342,7 +342,8 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 return rate_to_intermediate * rate_from_intermediate
         
         # 7. 安全後備
-        logger.warning(f"Oanda標準轉換失敗: {from_currency}→{ACCOUNT_CURRENCY}，使用安全值1.0")
+        available_pairs = ", ".join(current_prices_map.keys())
+        logger.warning(f"Oanda標準轉換失敗: {from_currency}→{ACCOUNT_CURRENCY}，可用的貨幣對: [{available_pairs}]，使用安全值1.0")
         return Decimal('1.0')
     
     def _update_atr_values(self, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
@@ -390,11 +391,8 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 total_pnl_qc = pnl_per_unit_qc * abs(units) - spread_cost
                 pnl_in_ac = total_pnl_qc
                 if details.quote_currency != ACCOUNT_CURRENCY:
-                    exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, current_prices_map)
-                    if exchange_rate_qc_to_ac > 0:
-                        pnl_in_ac = total_pnl_qc * exchange_rate_qc_to_ac
-                    else:
-                        pnl_in_ac = Decimal('0.0')  # 轉換失敗
+                    exchange_rate_qc_to_ac = self.currency_manager.convert_to_account_currency(details.quote_currency, current_prices_map)
+                    pnl_in_ac = total_pnl_qc * exchange_rate_qc_to_ac
                 self.unrealized_pnl_ac[slot_idx] = pnl_in_ac
                 self.equity_ac += pnl_in_ac
         self.portfolio_value_ac = self.equity_ac # 淨值等於權益
@@ -646,6 +644,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 logger.info(f"交易單位 {units_to_trade} 超過最大值 {max_size}，自動調整")
                 units_to_trade = max_size.copy_sign(units_to_trade)
                 
+            # 確定交易價格（用於保證金計算）
+            trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
+            if trade_price_qc <= Decimal('0'):
+                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid trade price.")
+                continue
+
             # 精確保證金檢查（Oanda實時風控）
             # 使用Oanda實際合約大小計算保證金
             contract_size = Decimal('100000')  # Oanda標準合約大小
@@ -658,11 +662,6 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             
             if margin_required_ac > self.cash * Decimal('0.9'):  # 保留10%現金緩衝
                 logger.warning(f"保證金不足: 需要{margin_required_ac:.2f} AC, 可用{self.cash:.2f} AC")
-                continue
-
-            trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
-            if trade_price_qc <= Decimal('0'):
-                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid trade price.")
                 continue
             
             _t_margin_check_start = time.perf_counter()
