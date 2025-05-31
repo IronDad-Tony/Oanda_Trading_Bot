@@ -200,10 +200,12 @@ class UniversalMemoryMappedDataset(Dataset):
         self.metadata_file_path = self.dataset_mmap_dir / "dataset_metadata.json"
         # 确保所有必要的货币对数据已下载
         try:
+            from src.common.config import ACCOUNT_CURRENCY
             from src.data_manager.currency_manager import ensure_currency_data_for_trading
+            
             success, all_symbols = ensure_currency_data_for_trading(
                 trading_symbols=self.symbols,
-                account_currency=self.account_currency,
+                account_currency=ACCOUNT_CURRENCY,  # 使用配置中的账户货币
                 start_time_iso=self.start_time_iso,
                 end_time_iso=self.end_time_iso,
                 granularity=self.granularity
@@ -215,7 +217,7 @@ class UniversalMemoryMappedDataset(Dataset):
             else:
                 logger.warning("确保货币数据失败，使用原始symbols列表")
         except ImportError as e:
-            logger.warning(f"无法导入currency_manager: {e}, 使用原始symbols列表")
+            logger.warning(f"无法导入currency_manager或config: {e}, 使用原始symbols列表")
         
         if not force_reload and self.metadata_file_path.exists():
             self._load_from_existing_mmap()

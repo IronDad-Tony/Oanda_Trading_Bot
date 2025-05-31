@@ -54,15 +54,26 @@ class InstrumentDetails:
                  max_trade_units: Optional[Decimal] = None,
                  financing_long_rate: Optional[Decimal] = None,
                  financing_short_rate: Optional[Decimal] = None,
-                 is_forex: bool = True): # is_forex 已添加
+                 is_forex: bool = True):
         self.symbol = symbol; self.display_name = display_name; self.type = type
         self.margin_rate = margin_rate; self.minimum_trade_size = minimum_trade_size
         self.trade_units_precision = trade_units_precision; self.pip_location = pip_location
         self.quote_currency = quote_currency.upper(); self.base_currency = base_currency.upper()
         self.tags = tags if tags is not None else []; self.max_trade_units = max_trade_units
         self.financing_long_rate = financing_long_rate; self.financing_short_rate = financing_short_rate
-        self.is_forex = is_forex # 存儲 is_forex
+        self.is_forex = is_forex
         self.pip_value_in_quote_currency_per_unit = Decimal(str(10**pip_location))
+        
+        # 根據品種類型設置合約大小
+        if type == "METAL":
+            # 黃金白銀等貴金屬 (XAU, XAG)
+            self.contract_size = Decimal('100')  # 100盎司
+        elif type == "CFD":
+            # 指數CFD
+            self.contract_size = Decimal('1')
+        else:
+            # 外匯貨幣對
+            self.contract_size = Decimal('100000')  # 標準合約大小
 
     def round_units(self, units: Union[float, Decimal, str]) -> Decimal: # Union 已導入
         units_decimal = Decimal(str(units)); min_unit_d = self.minimum_trade_size

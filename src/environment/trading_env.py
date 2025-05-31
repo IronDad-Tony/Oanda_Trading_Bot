@@ -498,11 +498,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         
         # 修復：使用實際交易價格而非中間價計算保證金
         if abs(new_units) > Decimal('1e-9') and trade_price_qc > Decimal('0'):
-            # Oanda標準保證金計算: 單位數 * 合約大小 * 市場價格 * 保證金率
-            contract_size = Decimal('100000')  # Oanda標準合約大小
-            margin_required_qc = abs(new_units) * contract_size * trade_price_qc * Decimal(str(details.margin_rate))
+            # 使用從API獲取的合約大小和保證金率計算保證金 (保證金率已反映槓桿比例)
+            # 公式: 保證金 = 單位數 * 合約大小 * 價格 * 保證金率
+            # 其中保證金率 = 1 / 槓桿比例 (例如0.02對應50倍槓桿)
+            margin_required_qc = abs(new_units) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
             
-            # 根據波動性增加額外保證金要求
+            # 根據波動性增加額外保證金要求 (Oanda會根據市場波動動態調整)
             volatility_factor = Decimal('1.0') + (self.atr_values_qc[slot_idx] / trade_price_qc) * Decimal('5.0')
             margin_required_qc *= volatility_factor
             
@@ -678,10 +679,9 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 continue
 
             # 精確保證金檢查（Oanda實時風控）
-            # 使用Oanda實際合約大小計算保證金
-            contract_size = Decimal('100000')  # Oanda標準合約大小
-            margin_required_qc = abs(units_to_trade) * contract_size * trade_price_qc * Decimal(str(details.margin_rate))
-            # 根據波動性增加額外保證金要求
+            # 使用從API獲取的合約大小和保證金率計算保證金 (保證金率已反映槓桿比例)
+            margin_required_qc = abs(units_to_trade) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
+            # 根據波動性增加額外保證金要求 (Oanda會根據市場波動動態調整)
             volatility_factor = Decimal('1.0') + (self.atr_values_qc[slot_idx] / trade_price_qc) * Decimal('5.0')
             margin_required_qc *= volatility_factor
             # 轉換為賬戶貨幣
