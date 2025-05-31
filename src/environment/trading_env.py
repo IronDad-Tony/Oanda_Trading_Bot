@@ -267,9 +267,14 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         if base_curr_upper == quote_curr_upper: return Decimal('1.0')
         pair1 = f"{base_curr_upper}_{quote_curr_upper}"; pair2 = f"{quote_curr_upper}_{base_curr_upper}"
         price_pair1_tuple = current_prices_map.get(pair1)
-        if price_pair1_tuple and price_pair1_tuple[1] > 0: return price_pair1_tuple[1]
+        if price_pair1_tuple and price_pair1_tuple[1] > 0:
+            logger.debug(f"找到直接匯率 {pair1}: {price_pair1_tuple[1]}")
+            return price_pair1_tuple[1]
         price_pair2_tuple = current_prices_map.get(pair2)
-        if price_pair2_tuple and price_pair2_tuple[0] > 0: return Decimal('1.0') / price_pair2_tuple[0]
+        if price_pair2_tuple and price_pair2_tuple[0] > 0:
+            rate = Decimal('1.0') / price_pair2_tuple[0]
+            logger.debug(f"找到反向匯率 {pair2}: {price_pair2_tuple[0]} -> {rate}")
+            return rate
         return None
 
     def _get_exchange_rate_to_account_currency(self, from_currency: str, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Decimal:
@@ -299,21 +304,27 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             return Decimal('1.0') / reverse_rate
         
         # 4. 標準Oanda轉換：通過USD中轉
-        # 符合Oanda實際結算規則
-        if from_currency_upper != "USD":
-            # 源貨幣→USD
-            rate_from_usd = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
-        else:
-            rate_from_usd = Decimal('1.0')
-            
-        if account_currency_upper != "USD":
-            # USD→目標貨幣
+        # 修正USD中轉邏輯錯誤
+        if from_currency_upper != "USD" and account_currency_upper != "USD":
+            # 源貨幣→USD→目標貨幣
+            rate_from_to_usd = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
             rate_usd_to_ac = self._get_specific_rate("USD", account_currency_upper, current_prices_map)
-        else:
-            rate_usd_to_ac = Decimal('1.0')
-            
-        if rate_from_usd and rate_usd_to_ac and rate_from_usd > 0 and rate_usd_to_ac > 0:
-            return rate_from_usd * rate_usd_to_ac
+            if rate_from_to_usd and rate_usd_to_ac and rate_from_to_usd > 0 and rate_usd_to_ac > 0:
+                rate = rate_from_to_usd * rate_usd_to_ac
+                logger.debug(f"通過USD中轉成功: {from_currency}→USD→{ACCOUNT_CURRENCY} = {rate}")
+                return rate
+        elif from_currency_upper != "USD":
+            # 源貨幣→USD (目標貨幣是USD)
+            rate = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
+            if rate and rate > 0:
+                logger.debug(f"源貨幣→USD成功: {from_currency}→USD = {rate}")
+                return rate
+        elif account_currency_upper != "USD":
+            # USD→目標貨幣 (源貨幣是USD)
+            rate = self._get_specific_rate("USD", account_currency_upper, current_prices_map)
+            if rate and rate > 0:
+                logger.debug(f"USD→目標貨幣成功: USD→{ACCOUNT_CURRENCY} = {rate}")
+                return rate
         
         # 5. 加強版：非標準貨幣對通過EUR中轉
         if from_currency_upper != "EUR":
@@ -341,9 +352,24 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             if rate_to_intermediate and rate_from_intermediate and rate_to_intermediate > 0 and rate_from_intermediate > 0:
                 return rate_to_intermediate * rate_from_intermediate
         
-        # 7. 安全後備
+        # 7. 安全後備 - 添加更詳細的調試信息
         available_pairs = ", ".join(current_prices_map.keys())
-        logger.warning(f"Oanda標準轉換失敗: {from_currency}→{ACCOUNT_CURRENCY}，可用的貨幣對: [{available_pairs}]，使用安全值1.0")
+        logger.error(f"Oanda標準轉換失敗: {from_currency}→{ACCOUNT_CURRENCY}，所有路徑均失敗:")
+        logger.error(f"  嘗試的直接匯率: {direct_pair} 和 {reverse_pair}")
+        logger.error(f"  嘗試的USD中轉路徑: {from_currency}→USD→{ACCOUNT_CURRENCY}")
+        logger.error(f"  嘗試的EUR中轉路徑: {from_currency}→EUR→{ACCOUNT_CURRENCY}")
+        
+        # 記錄中間貨幣轉換狀態
+        for intermediate in ["USD", "EUR", "GBP", "JPY"]:
+            if from_currency_upper != intermediate:
+                rate_from_inter = self._get_specific_rate(from_currency_upper, intermediate, current_prices_map)
+                logger.error(f"    {from_currency}→{intermediate}: {'可用' if rate_from_inter else '不可用'}")
+            if account_currency_upper != intermediate:
+                rate_inter_to_ac = self._get_specific_rate(intermediate, account_currency_upper, current_prices_map)
+                logger.error(f"    {intermediate}→{ACCOUNT_CURRENCY}: {'可用' if rate_inter_to_ac else '不可用'}")
+        
+        logger.error(f"當前可用的貨幣對: [{available_pairs}]")
+        logger.error("使用安全值1.0進行轉換，這可能導致計算錯誤!")
         return Decimal('1.0')
     
     def _update_atr_values(self, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
@@ -391,7 +417,8 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 total_pnl_qc = pnl_per_unit_qc * abs(units) - spread_cost
                 pnl_in_ac = total_pnl_qc
                 if details.quote_currency != ACCOUNT_CURRENCY:
-                    exchange_rate_qc_to_ac = self.currency_manager.convert_to_account_currency(details.quote_currency, current_prices_map)
+                    # 修正：使用内部方法獲取匯率
+                    exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, current_prices_map)
                     pnl_in_ac = total_pnl_qc * exchange_rate_qc_to_ac
                 self.unrealized_pnl_ac[slot_idx] = pnl_in_ac
                 self.equity_ac += pnl_in_ac

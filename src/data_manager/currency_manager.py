@@ -4,7 +4,7 @@
 """
 import logging
 from decimal import Decimal
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Set
 
 logger = logging.getLogger("CurrencyManager")
 
@@ -149,15 +149,102 @@ class CurrencyDependencyManager:
         logger.warning(f"無法轉換 {from_currency} 到 {self.account_currency}，可用貨幣對: [{available_pairs}]，使用安全值1.0")
         return Decimal('1.0')
         
+def get_required_conversion_pairs(symbols: List[str], account_currency: str, available_instruments: Set[str]) -> Set[str]:
+    """获取进行货币转换所需的额外货币对，只生成有效的货币对"""
+    required_pairs = set()
+    account_currency = account_currency.upper()
+    
+    # 始终包含基础货币对（如果存在）
+    if f"USD_{account_currency}" in available_instruments:
+        required_pairs.add(f"USD_{account_currency}")
+    if f"{account_currency}_USD" in available_instruments:
+        required_pairs.add(f"{account_currency}_USD")
+    
+    # 收集所有涉及的货币
+    currencies = set()
+    for symbol in symbols:
+        parts = symbol.split("_")
+        if len(parts) == 2:
+            currencies.add(parts[0])
+            currencies.add(parts[1])
+    
+    # 添加账户货币相关的货币对
+    for currency in currencies:
+        if currency == account_currency:
+            continue
+            
+        # 直接货币对
+        direct_pair = f"{currency}_{account_currency}"
+        inverse_pair = f"{account_currency}_{currency}"
+        
+        # 只添加有效的货币对
+        if direct_pair in available_instruments:
+            required_pairs.add(direct_pair)
+        if inverse_pair in available_instruments:
+            required_pairs.add(inverse_pair)
+        
+        # 添加通过USD中转的货币对（如果有效）
+        if currency != "USD" and account_currency != "USD":
+            usd_pair1 = f"{currency}_USD"
+            usd_pair2 = f"USD_{currency}"
+            if usd_pair1 in available_instruments:
+                required_pairs.add(usd_pair1)
+            if usd_pair2 in available_instruments:
+                required_pairs.add(usd_pair2)
+    
+    # 添加常见中转货币对（如果有效）
+    for intermediate in ["EUR", "GBP", "JPY"]:
+        if intermediate != account_currency:
+            pair1 = f"{intermediate}_{account_currency}"
+            pair2 = f"{account_currency}_{intermediate}"
+            if pair1 in available_instruments:
+                required_pairs.add(pair1)
+            if pair2 in available_instruments:
+                required_pairs.add(pair2)
+    
+    return required_pairs - set(symbols)
+
 def ensure_currency_data_for_trading(trading_symbols: List[str], account_currency: str,
                                     start_time_iso: str, end_time_iso: str, granularity: str) -> tuple:
     """
-    确保交易所需的所有货币数据已下载
+    确保交易所需的所有货币数据已下载，包括汇率转换所需的额外货币对
+    
+    所有额外货币对将按照训练symbols的标准下载完整的价量信息（包括开盘价、最高价、最低价、收盘价、成交量等），
+    并存储到数据库中。这样如果这些货币对后续被选为训练symbol，就不需要重新下载。
     
     返回:
         (success: bool, all_symbols: set)
     """
-    # 在实际实现中，这里需要包含货币数据下载逻辑
-    # 为简化示例，我们直接返回成功和交易品种
-    logger.info(f"确保货币数据可用: trading_symbols={trading_symbols}, account_currency={account_currency}")
-    return True, set(trading_symbols)
+    # 获取所有可用的交易品种
+    from src.data_manager.instrument_info_manager import InstrumentInfoManager
+    instrument_info_manager = InstrumentInfoManager()
+    available_instruments = set(instrument_info_manager.get_all_available_symbols())
+    
+    # 获取所有需要的货币对
+    required_pairs = get_required_conversion_pairs(trading_symbols, account_currency, available_instruments)
+    all_symbols = set(trading_symbols) | required_pairs
+    
+    # 记录详细信息
+    logger.info(f"确保货币数据可用: 交易品种={trading_symbols}, 账户货币={account_currency}")
+    if required_pairs:
+        logger.info(f"额外添加 {len(required_pairs)} 个汇率转换货币对: {required_pairs}")
+        logger.info("这些货币对将按照训练symbols标准下载完整的价量信息并存储到数据库")
+        logger.info("如果这些货币对后续被选为训练symbol，将直接使用已下载数据，无需重新下载")
+    
+    # 实际实现中调用数据下载器
+    try:
+        from src.data_manager.oanda_downloader import manage_data_download_for_symbols
+        manage_data_download_for_symbols(
+            symbols=list(all_symbols),
+            overall_start_str=start_time_iso,
+            overall_end_str=end_time_iso,
+            granularity=granularity
+        )
+        logger.info(f"已确保所有 {len(all_symbols)} 个货币对数据下载完成")
+        return True, all_symbols
+    except ImportError as e:
+        logger.error(f"无法导入数据下载器: {e}")
+        return False, set(trading_symbols)
+    except Exception as e:
+        logger.error(f"下载货币数据时出错: {e}")
+        return False, set(trading_symbols)
