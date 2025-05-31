@@ -199,7 +199,7 @@ class UniversalTrainer:
         
         # 初始化共享數據管理器
         self.shared_data_manager = get_shared_data_manager()
-        logger.info("已連接到共享數據管理器")
+        logger.info("Connected to shared data manager")
         
         # 設置GPU優化
         self._setup_gpu_optimization()
@@ -242,12 +242,12 @@ class UniversalTrainer:
                 gpu_name = torch.cuda.get_device_name(current_device)
                 gpu_memory = torch.cuda.get_device_properties(current_device).total_memory / (1024**3)
                 
-                logger.info(f"檢測到 {gpu_count} 個GPU設備")
-                logger.info(f"當前使用GPU {current_device}: {gpu_name} ({gpu_memory:.1f}GB)")                # 清理GPU内存
+                logger.info(f"Detected {gpu_count} GPU devices")
+                logger.info(f"Using GPU {current_device}: {gpu_name} ({gpu_memory:.1f}GB)")
                 torch.cuda.empty_cache()
                 gc.collect()
                 
-                # GPU性能优化设置
+                # GPU optimization settings
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cudnn.enabled = True
                 
@@ -257,21 +257,21 @@ class UniversalTrainer:
                     torch.backends.cudnn.allow_tf32 = True
                 
                 if USE_AMP:
-                    logger.info("已啟用混合精度訓練")
+                    logger.info("Mixed precision training enabled")
                     if torch.cuda.get_device_capability(current_device)[0] >= 7:
-                        logger.info("GPU支持混合精度訓練")
+                        logger.info("GPU supports mixed precision training")
                     else:
-                        logger.warning("GPU可能不完全支持混合精度訓練，但仍將嘗試使用它")
+                        logger.warning("GPU may not fully support mixed precision, but will try to use it")
                 
-                logger.info("GPU優化設置完成")
+                logger.info("GPU optimization settings applied")
                 
             else:
-                logger.info("未檢測到CUDA，將使用CPU訓練")
+                logger.info("CUDA not detected, using CPU for training")
                 torch.set_num_threads(min(8, torch.get_num_threads()))
-                logger.info(f"CPU線程數設置為: {torch.get_num_threads()}")
+                logger.info(f"CPU threads set to: {torch.get_num_threads()}")
                 
         except Exception as e:
-            logger.warning(f"GPU優化設置過程中發生錯誤: {e}")
+            logger.warning(f"GPU optimization setup error: {e}")
     
     def _generate_model_identifier(self) -> str:
         """
@@ -509,7 +509,7 @@ class UniversalTrainer:
         """
         try:
             if self.agent is None or self.callback is None:
-                logger.error("代理或回調未設置。")
+                logger.error("Agent or callback not configured.")
                 return False
             
             logger.info("=" * 60)

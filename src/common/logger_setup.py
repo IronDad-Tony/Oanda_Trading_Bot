@@ -82,15 +82,15 @@ try:
 
     # 日誌目錄已在上面創建
 
-    if os.name == 'nt':  # Windows 系統
-        logger.info("檢測到 Windows 系統，將使用標準的 TimedRotatingFileHandler (無 fcntl 文件鎖)。")
+    if os.name == 'nt':  # Windows system
+        logger.info("Windows environment detected. Using TimedRotatingFileHandler with UTF-8 encoding.")
         file_handler = TimedRotatingFileHandler(
-            LOG_FILE_PATH, # 確保這裡使用更新後的 LOG_FILE_PATH
-            when='midnight',      # 每天午夜輪轉
-            interval=1,           # 每1天輪轉一次
-            backupCount=7,        # 保留7天的備份文件
-            encoding='utf-8',     # 確保支持中文等字符
-            delay=True            # 延遲創建文件，直到第一次寫入
+            LOG_FILE_PATH,
+            when='midnight',
+            interval=1,
+            backupCount=7,
+            encoding='utf-8',
+            delay=True
         )
     else:  # 非 Windows 系統 (Unix/Linux/MacOS等)
         try:

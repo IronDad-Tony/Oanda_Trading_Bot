@@ -42,7 +42,8 @@ class QuantumPolicyLayer(nn.Module):
         # 量子振幅參數
         self.amplitudes = nn.Parameter(torch.ones(num_strategies) / num_strategies)
         self.time_pool = nn.AdaptiveAvgPool1d(1)
-        self.quantum_optimizer = torch.optim.Adam([self.amplitudes], lr=1e-3)
+        # 將優化器重命名為optimizer以符合SB3要求
+        self.optimizer = torch.optim.Adam([self.amplitudes], lr=1e-3)
         self.temperature = nn.Parameter(torch.tensor(1.0))
         
     def set_training_mode(self, mode: bool):
@@ -75,8 +76,8 @@ class QuantumPolicyLayer(nn.Module):
         probs = F.softmax(self.amplitudes, dim=0)
         loss = -torch.mean(torch.sum(torch.log(probs) * rewards, dim=1))
         
-        self.quantum_optimizer.zero_grad()
+        self.optimizer.zero_grad()  # 使用重命名後的優化器
         loss.backward()
-        self.quantum_optimizer.step()
+        self.optimizer.step()  # 使用重命名後的優化器
         
         self.temperature.data = torch.clamp(self.temperature * 0.99, min=0.1)

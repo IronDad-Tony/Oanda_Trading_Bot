@@ -76,7 +76,7 @@ class CustomSACPolicy(SACPolicy):
         # 確保 features_extractor_class 不是 None (在後備導入情況下可能發生)
         actual_feat_ext_class = features_extractor_class
         if actual_feat_ext_class is None and 'AdvancedTransformerFeatureExtractor' in globals() and AdvancedTransformerFeatureExtractor is not None:
-            logger.warning("CustomSACPolicy: features_extractor_class was None, using globally available AdvancedTransformerFeatureExtractor.")
+            logger.info("Using default feature extractor: AdvancedTransformerFeatureExtractor")
             actual_feat_ext_class = AdvancedTransformerFeatureExtractor # type: ignore
         elif actual_feat_ext_class is None:
             logger.error("CustomSACPolicy: features_extractor_class is None and fallback AdvancedTransformerFeatureExtractor not available!")

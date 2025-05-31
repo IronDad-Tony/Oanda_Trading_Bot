@@ -389,8 +389,21 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         self.quantum_policy.optimizer.step()
 
     def save(self, path: Union[str, Path]):
-        try: self.agent.save(path); logger.info(f"智能體模型已保存到: {path}")
-        except Exception as e: logger.error(f"保存智能體模型失敗: {e}", exc_info=True); raise
+        """保存智能體模型"""
+        try:
+            # 為量子策略層添加臨時優化器屬性
+            if hasattr(self.agent.policy, 'quantum_policy_layer'):
+                self.agent.policy.quantum_policy_layer.optimizer = self.agent.policy.quantum_policy_layer.quant极um_optimizer
+                
+            self.agent.save(path)
+            logger.info(f"智能體模型已保存到: {path}")
+        except Exception as e:
+            logger.error(f"保存智能體模型失敗: {e}", exc_info=True)
+            raise
+        finally:
+            # 移除臨時優化器屬性
+            if hasattr(self.agent.policy, 'quantum_policy_layer') and hasattr(self.agent.policy.quantum_policy_layer, 'optimizer'):
+                del self.agent.policy.quantum_policy_layer.optimizer
 
     def load(self, path: Union[str, Path], env: Optional[DummyVecEnv] = None):
         try:

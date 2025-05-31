@@ -57,7 +57,7 @@ try:
     _config_values_env_v5 = {"TIMESTEPS": _TIMESTEPS, "MAX_SYMBOLS_ALLOWED": _MAX_SYMBOLS_ALLOWED, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY, "DEFAULT_INITIAL_CAPITAL": _DEFAULT_INITIAL_CAPITAL, "OANDA_MARGIN_CLOSEOUT_LEVEL": _OANDA_MARGIN_CLOSEOUT_LEVEL, "TRADE_COMMISSION_PERCENTAGE": _TRADE_COMMISSION_PERCENTAGE, "OANDA_API_KEY": _OANDA_API_KEY, "ATR_PERIOD": _ATR_PERIOD, "STOP_LOSS_ATR_MULTIPLIER": _STOP_LOSS_ATR_MULTIPLIER, "MAX_ACCOUNT_RISK_PERCENTAGE": _MAX_ACCOUNT_RISK_PERCENTAGE}
     if not _import_logged:
         logger.info("trading_env.py (V5.0): Successfully imported and stored common.config values.")
-    from data_manager.mmap_dataset import UniversalMemoryMappedDataset; from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from data_manager.instrument_info_manager import InstrumentDetails, InstrumentInfoManager; 
+    from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from src.data_manager.instrument_info_manager import InstrumentDetails, InstrumentInfoManager;
     if not _import_logged:
         logger.info("trading_env.py (V5.0): Successfully imported other dependencies.")
         _import_logged = True
@@ -141,7 +141,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             if i < self.num_env_slots: self.symbol_to_slot_map[sym] = i; self.slot_to_symbol_map[i] = sym; self.current_episode_tradable_slot_indices.append(i)
             else: logger.warning(f"本次episode的活躍交易對象 {sym} 超過最大槽位數，將被忽略。")
         self.num_tradable_symbols_this_episode = len(self.current_episode_tradable_slot_indices)
-        logger.info(f"環境初始化: {self.num_tradable_symbols_this_episode} 個可交易對象映射到 {self.num_env_slots} 個槽位。")
+        logger.info(f"Environment initialized: {self.num_tradable_symbols_this_episode} trading symbols mapped to {self.num_env_slots} slots.")
         self.current_step_in_dataset = 0; self.episode_step_count = 0
         if max_episode_steps is None: self.max_episode_steps = len(self.dataset)
         else: self.max_episode_steps = min(max_episode_steps, len(self.dataset))
@@ -273,22 +273,77 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         return None
 
     def _get_exchange_rate_to_account_currency(self, from_currency: str, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Decimal:
-        from_currency_upper = from_currency.upper(); account_currency_upper = ACCOUNT_CURRENCY.upper()
-        if from_currency_upper == account_currency_upper: return Decimal('1.0')
+        """
+        根據Oanda實際轉換規則實現的匯率轉換邏輯：
+        1. 優先使用直接貨幣對報價
+        2. 次選通過USD中轉（Oanda標準做法）
+        3. 最後嘗試其他主要貨幣中轉
+        """
+        from_currency_upper = from_currency.upper()
+        account_currency_upper = ACCOUNT_CURRENCY.upper()
+        
+        # 1. 相同貨幣直接返回1.0
+        if from_currency_upper == account_currency_upper:
+            return Decimal('1.0')
+        
+        # 2. 嘗試直接匯率 (AUD_CAD)
+        direct_pair = f"{from_currency_upper}_{account_currency_upper}"
         direct_rate = self._get_specific_rate(from_currency_upper, account_currency_upper, current_prices_map)
-        if direct_rate is not None and direct_rate > 0 : return direct_rate
-        if from_currency_upper != "USD" and account_currency_upper != "USD":
-            rate_from_per_usd = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
-            rate_usd_per_ac = self._get_specific_rate("USD", account_currency_upper, current_prices_map)
-            if rate_from_per_usd is not None and rate_usd_per_ac is not None and rate_from_per_usd > 0 and rate_usd_per_ac > 0: return rate_from_per_usd * rate_usd_per_ac
-        if from_currency_upper == "USD" and account_currency_upper != "USD":
-            rate_usd_per_ac = self._get_specific_rate("USD", account_currency_upper, current_prices_map)
-            if rate_usd_per_ac is not None and rate_usd_per_ac > 0: return rate_usd_per_ac
-        if account_currency_upper == "USD" and from_currency_upper != "USD":
-            rate_from_per_usd = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
-            if rate_from_per_usd is not None and rate_from_per_usd > 0: return rate_from_per_usd
-        logger.warning(f"無法找到匯率將 {from_currency} 轉換到 {ACCOUNT_CURRENCY}。使用後備值 0.0。")
-        return Decimal('0.0')
+        if direct_rate and direct_rate > 0:
+            return direct_rate
+        
+        # 3. 嘗試反向匯率 (CAD_AUD)
+        reverse_pair = f"{account_currency_upper}_{from_currency_upper}"
+        reverse_rate = self._get_specific_rate(account_currency_upper, from_currency_upper, current_prices_map)
+        if reverse_rate and reverse_rate > 0:
+            return Decimal('1.0') / reverse_rate
+        
+        # 4. 標準Oanda轉換：通過USD中轉
+        # 符合Oanda實際結算規則
+        if from_currency_upper != "USD":
+            # 源貨幣→USD
+            rate_from_usd = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
+        else:
+            rate_from_usd = Decimal('1.0')
+            
+        if account_currency_upper != "USD":
+            # USD→目標貨幣
+            rate_usd_to_ac = self._get_specific_rate("USD", account_currency_upper, current_prices_map)
+        else:
+            rate_usd_to_ac = Decimal('1.0')
+            
+        if rate_from_usd and rate_usd_to_ac and rate_from_usd > 0 and rate_usd_to_ac > 0:
+            return rate_from_usd * rate_usd_to_ac
+        
+        # 5. 加強版：非標準貨幣對通過EUR中轉
+        if from_currency_upper != "EUR":
+            rate_from_eur = self._get_specific_rate(from_currency_upper, "EUR", current_prices_map)
+        else:
+            rate_from_eur = Decimal('1.0')
+            
+        if account_currency_upper != "EUR":
+            rate_eur_to_ac = self._get_specific_rate("EUR", account_currency_upper, current_prices_map)
+        else:
+            rate_eur_to_ac = Decimal('1.0')
+            
+        if rate_from_eur and rate_eur_to_ac and rate_from_eur > 0 and rate_eur_to_ac > 0:
+            return rate_from_eur * rate_eur_to_ac
+        
+        # 6. 終極備援：嘗試其他主要貨幣中轉
+        for intermediate in ["GBP", "JPY", "CHF", "CAD", "AUD"]:
+            if intermediate == from_currency_upper or intermediate == account_currency_upper:
+                continue
+                
+            # 獲取中轉匯率
+            rate_to_intermediate = self._get_specific_rate(from_currency_upper, intermediate, current_prices_map)
+            rate_from_intermediate = self._get_specific_rate(intermediate, account_currency_upper, current_prices_map)
+                
+            if rate_to_intermediate and rate_from_intermediate and rate_to_intermediate > 0 and rate_from_intermediate > 0:
+                return rate_to_intermediate * rate_from_intermediate
+        
+        # 7. 安全後備
+        logger.warning(f"Oanda標準轉換失敗: {from_currency}→{ACCOUNT_CURRENCY}，使用安全值1.0")
+        return Decimal('1.0')
     
     def _update_atr_values(self, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
         for slot_idx in range(self.num_env_slots):
@@ -321,15 +376,27 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 if not symbol or not avg_entry_qc or avg_entry_qc <= Decimal('0'): continue # avg_entry_qc 在平倉後為0
                 details = self.instrument_details_map[symbol]; price_tuple = current_prices_map.get(symbol)
                 if not price_tuple: continue
-                current_price_qc = price_tuple[0] if units > 0 else price_tuple[1] # Bid for long, Ask for short
+                current_bid_qc, current_ask_qc = price_tuple   # 提取買價和賣價
+                current_price_qc = current_bid_qc if units > 0 else current_ask_qc # Bid for long, Ask for short
                 if current_price_qc <= Decimal('0'): continue
-                pnl_per_unit_qc = (current_price_qc - avg_entry_qc) if units > 0 else (avg_entry_qc - current_price_qc)
-                total_pnl_qc = pnl_per_unit_qc * abs(units); pnl_in_ac = total_pnl_qc
+                # Oanda精確損益計算（考慮點差成本）
+                if units > 0:  # 多頭倉位
+                    pnl_per_unit_qc = current_bid_qc - avg_entry_qc  # 平倉用Bid價
+                else:  # 空頭倉位
+                    pnl_per_unit_qc = avg_entry_qc - current_ask_qc  # 平倉用Ask價
+                
+                # 點差成本（Oanda實際收取） - 使用已定義的變量
+                spread_cost = (current_ask_qc - current_bid_qc) * abs(units) * Decimal('0.5')  # 50%點差成本
+                total_pnl_qc = pnl_per_unit_qc * abs(units) - spread_cost
+                pnl_in_ac = total_pnl_qc
                 if details.quote_currency != ACCOUNT_CURRENCY:
                     exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, current_prices_map)
-                    if exchange_rate_qc_to_ac > 0: pnl_in_ac = total_pnl_qc * exchange_rate_qc_to_ac
-                    else: pnl_in_ac = Decimal('0.0') # 轉換失敗
-                self.unrealized_pnl_ac[slot_idx] = pnl_in_ac; self.equity_ac += pnl_in_ac
+                    if exchange_rate_qc_to_ac > 0:
+                        pnl_in_ac = total_pnl_qc * exchange_rate_qc_to_ac
+                    else:
+                        pnl_in_ac = Decimal('0.0')  # 轉換失敗
+                self.unrealized_pnl_ac[slot_idx] = pnl_in_ac
+                self.equity_ac += pnl_in_ac
         self.portfolio_value_ac = self.equity_ac # 淨值等於權益
 
     def _execute_trade(self, slot_idx: int, units_to_trade: Decimal, trade_price_qc: Decimal, current_timestamp: pd.Timestamp, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Tuple[Decimal, Decimal]:
@@ -406,11 +473,19 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         
         # 修復：使用實際交易價格而非中間價計算保證金
         if abs(new_units) > Decimal('1e-9') and trade_price_qc > Decimal('0'):
-            margin_required_qc = abs(new_units) * trade_price_qc * Decimal(str(details.margin_rate))
+            # Oanda標準保證金計算: 單位數 * 合約大小 * 市場價格 * 保證金率
+            contract_size = Decimal('100000')  # Oanda標準合約大小
+            margin_required_qc = abs(new_units) * contract_size * trade_price_qc * Decimal(str(details.margin_rate))
+            
+            # 根據波動性增加額外保證金要求
+            volatility_factor = Decimal('1.0') + (self.atr_values_qc[slot_idx] / trade_price_qc) * Decimal('5.0')
+            margin_required_qc *= volatility_factor
+            
+            # 轉換為賬戶貨幣
             self.margin_used_per_position_ac[slot_idx] = margin_required_qc * exchange_rate_qc_to_ac
             
-            # 添加保證金緩衝區機制，避免邊界情況下的保證金不足
-            margin_buffer = Decimal('0.02')  # 2% 緩衝區
+            # 添加2%緩衝區（Oanda實際會根據波動性動態調整）
+            margin_buffer = Decimal('0.02')
             self.margin_used_per_position_ac[slot_idx] *= (Decimal('1.0') + margin_buffer)
         else:
             self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
@@ -559,8 +634,30 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             target_units = details.round_units(target_units_final)
             units_to_trade = target_units - current_units
             
-            if abs(units_to_trade) < details.minimum_trade_size:
-                # logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Units to trade {units_to_trade:.2f} is less than min trade size {details.minimum_trade_size:.2f}.")
+            # Oanda倉位控制規則
+            min_size = details.minimum_trade_size
+            max_size = details.max_trade_units if details.max_trade_units is not None else Decimal('1000000')  # 修正屬性名並處理None情況
+            
+            if abs(units_to_trade) < min_size:
+                logger.debug(f"交易單位 {units_to_trade} 低於最小值 {min_size}，取消交易")
+                continue
+                
+            if abs(units_to_trade) > max_size:
+                logger.info(f"交易單位 {units_to_trade} 超過最大值 {max_size}，自動調整")
+                units_to_trade = max_size.copy_sign(units_to_trade)
+                
+            # 精確保證金檢查（Oanda實時風控）
+            # 使用Oanda實際合約大小計算保證金
+            contract_size = Decimal('100000')  # Oanda標準合約大小
+            margin_required_qc = abs(units_to_trade) * contract_size * trade_price_qc * Decimal(str(details.margin_rate))
+            # 根據波動性增加額外保證金要求
+            volatility_factor = Decimal('1.0') + (self.atr_values_qc[slot_idx] / trade_price_qc) * Decimal('5.0')
+            margin_required_qc *= volatility_factor
+            # 轉換為賬戶貨幣
+            margin_required_ac = margin_required_qc * exchange_rate_qc_to_ac
+            
+            if margin_required_ac > self.cash * Decimal('0.9'):  # 保留10%現金緩衝
+                logger.warning(f"保證金不足: 需要{margin_required_ac:.2f} AC, 可用{self.cash:.2f} AC")
                 continue
 
             trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
@@ -994,12 +1091,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         return terminated, truncated
 
     def _get_observation(self) -> Dict[str, np.ndarray]:
-        # (與V4.8版本相同)
         dataset_sample = self.dataset[min(self.current_step_in_dataset, len(self.dataset)-1)]
         features_raw = dataset_sample["features"].numpy()
         obs_f = np.zeros((self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32)
         obs_pr = np.zeros(self.num_env_slots, dtype=np.float32); obs_upl_r = np.zeros(self.num_env_slots, dtype=np.float32)
         obs_tslt_ratio = np.zeros(self.num_env_slots, dtype=np.float32); obs_pm = np.ones(self.num_env_slots, dtype=np.bool_)
+        obs_volatility = np.zeros(self.num_env_slots, dtype=np.float32)   # 新增波動率特徵
         current_prices_map, _ = self._get_current_raw_prices_for_all_dataset_symbols()
         for slot_idx in range(self.num_env_slots):
             symbol = self.slot_to_symbol_map.get(slot_idx)
@@ -1007,22 +1104,17 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 if symbol in self.dataset.symbols:
                     try: dataset_symbol_idx = self.dataset.symbols.index(symbol)
                     except ValueError: logger.error(f"Symbol {symbol} in slot_map but not in dataset.symbols for observation."); continue
-                    # 修復維度不匹配錯誤：確保維度一致
                     feature_slice = features_raw[dataset_symbol_idx, :, :]
                     expected_shape = (self.dataset.timesteps_history, self.dataset.num_features_per_symbol)
                     if feature_slice.shape != expected_shape:
                         logger.warning(f"維度不匹配修復: Symbol {symbol} 特徵維度 {feature_slice.shape} != 預期 {expected_shape}")
-                        # 如果時間步長不匹配，截取或填充
                         if feature_slice.shape[0] != self.dataset.timesteps_history:
                             if feature_slice.shape[0] > self.dataset.timesteps_history:
-                                # 截取最後的時間步
                                 feature_slice = feature_slice[-self.dataset.timesteps_history:, :]
                             else:
-                                # 用零填充
                                 padded_slice = np.zeros(expected_shape, dtype=np.float32)
                                 padded_slice[-feature_slice.shape[0]:, :] = feature_slice
                                 feature_slice = padded_slice
-                        # 如果特徵數量不匹配，截取或填充
                         if feature_slice.shape[1] != self.dataset.num_features_per_symbol:
                             if feature_slice.shape[1] > self.dataset.num_features_per_symbol:
                                 feature_slice = feature_slice[:, :self.dataset.num_features_per_symbol]
@@ -1033,6 +1125,16 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                     obs_f[slot_idx, :, :] = feature_slice
                 units = self.current_positions_units[slot_idx]; details = self.instrument_details_map[symbol]
                 current_bid_qc, current_ask_qc = current_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+                # 新增波動率計算
+                current_mid_price = (current_bid_qc + current_ask_qc) / Decimal('2')
+                atr_value = self.atr_values_qc[slot_idx]
+                if current_mid_price > Decimal('0') and atr_value > Decimal('0'):
+                    rel_volatility = atr_value / current_mid_price
+                    normalized_vol = min(1.0, float(rel_volatility / Decimal('0.1')))   # 假設0.1是最大波動閾值
+                else:
+                    normalized_vol = 0.0
+                obs_volatility[slot_idx] = normalized_vol
+                # 原特徵計算
                 price_for_value_calc_qc = (current_bid_qc + current_ask_qc) / Decimal('2') if current_bid_qc > 0 and current_ask_qc > 0 else Decimal('0.0')
                 nominal_value_qc = abs(units) * price_for_value_calc_qc; nominal_value_ac = nominal_value_qc
                 if details.quote_currency != ACCOUNT_CURRENCY:
@@ -1044,8 +1146,10 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 obs_pm[slot_idx] = False
                 if self.last_trade_step_per_slot[slot_idx] == -1 or self.episode_step_count == 0 : obs_tslt_ratio[slot_idx] = 1.0
                 else: steps_since_last = self.episode_step_count - self.last_trade_step_per_slot[slot_idx]; obs_tslt_ratio[slot_idx] = min(1.0, steps_since_last / (self.max_episode_steps / 10.0 if self.max_episode_steps > 0 else 100.0) )
+            else:
+                obs_volatility[slot_idx] = 0.0   # 無交易品種，波動率設為0
         margin_level_val = float(self.equity_ac / (self.total_margin_used_ac + Decimal('1e-9')))
-        return {"features_from_dataset": obs_f, "current_positions_nominal_ratio_ac": np.clip(obs_pr, -5.0, 5.0).astype(np.float32), "unrealized_pnl_ratio_ac": np.clip(obs_upl_r, -1.0, 5.0).astype(np.float32), "margin_level": np.clip(np.array([margin_level_val]), 0.0, 100.0).astype(np.float32), "time_since_last_trade_ratio": obs_tslt_ratio.astype(np.float32), "padding_mask": obs_pm}
+        return {"features_from_dataset": obs_f, "current_positions_nominal_ratio_ac": np.clip(obs_pr, -5.0, 5.0).astype(np.float32), "unrealized_pnl_ratio_ac": np.clip(obs_upl_r, -1.0, 5.0).astype(np.float32), "margin_level": np.clip(np.array([margin_level_val]), 0.0, 100.0).astype(np.float32), "time_since_last_trade_ratio": obs_tslt_ratio.astype(np.float32), "volatility": obs_volatility.astype(np.float32), "padding_mask": obs_pm}   # 添加波動率特徵
 
     def _init_render_figure(self):
         """初始化matplotlib圖表用於渲染"""

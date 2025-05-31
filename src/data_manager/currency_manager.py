@@ -28,8 +28,8 @@ try:
     if not _import_logged:
         logger.info("currency_manager.py: Successfully imported common.config values.")
     
-    from data_manager.oanda_downloader import manage_data_download_for_symbols, format_datetime_for_oanda
-    from data_manager.instrument_info_manager import InstrumentInfoManager
+    from .oanda_downloader import manage_data_download_for_symbols, format_datetime_for_oanda
+    from .instrument_info_manager import InstrumentInfoManager
     if not _import_logged:
         logger.info("currency_manager.py: Successfully imported other dependencies.")
         _import_logged = True
