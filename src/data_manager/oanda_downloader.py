@@ -1,4 +1,11 @@
 # src/data_manager/oanda_downloader.py
+from datetime import datetime
+
+def format_datetime_for_oanda(dt: datetime) -> str:
+    """
+    将datetime对象格式化为OANDA API要求的字符串格式 (YYYY-MM-DDTHH:MM:SS.000000000Z)
+    """
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.000000000Z')
 """
 OANDA數據下載器模組
 負責從OANDA API下載歷史蠟燭圖數據，並將其存儲到數據庫。

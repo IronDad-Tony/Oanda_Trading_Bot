@@ -52,17 +52,22 @@ def main():
     # 修復 PyTorch 兼容性
     fix_torch_classes()
     
-    # 檢查依賴
+    # 檢查依賴（使用pkg_resources避免導入streamlit）
     print("檢查依賴套件...")
     try:
-        import streamlit
-        import torch
-        import pandas
-        import numpy
-        print("✓ 所有必要套件已安裝")
-    except ImportError as e:
-        print(f"✗ 缺少必要套件: {e}")
-        print("請運行: pip install -r docs/requirements.txt")
+        import pkg_resources
+        required_packages = {'streamlit', 'torch', 'pandas', 'numpy'}
+        installed_packages = {pkg.key for pkg in pkg_resources.working_set}
+        missing = required_packages - installed_packages
+        
+        if missing:
+            print(f"✗ 缺少必要套件: {', '.join(missing)}")
+            print("請運行: pip install -r docs/requirements.txt")
+            return
+        else:
+            print("✓ 所有必要套件已安裝")
+    except Exception as e:
+        print(f"✗ 檢查依賴時出錯: {e}")
         return
     
     # 導入並啟動 Streamlit

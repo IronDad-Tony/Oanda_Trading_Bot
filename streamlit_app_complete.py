@@ -55,17 +55,7 @@ project_root = setup_project_path()
 from src.common.logger_setup import logger # This will run logger_setup.py
 
 # --- Session State Initialization Flag ---
-# This helps ensure that expensive or critical one-time initializations
-# for the session are managed correctly.
-try:
-    # Check if we're running in Streamlit context
-    if hasattr(st, 'session_state') and 'app_initialized' not in st.session_state:
-        logger.info("Streamlit App: First time initialization of session state flag.")
-        st.session_state.app_initialized = True
-        # Other truly one-time initializations for the entire session can go here.
-except Exception:
-    # Running outside Streamlit context, ignore session state
-    pass
+# Moved to init_session_state() function
 
 # Disable file watcher to prevent high CPU usage on file change
 import pandas as pd
@@ -319,13 +309,24 @@ def get_categorized_symbols_and_details():
 
 def init_session_state():
     """Initialize all session state variables if they don't exist."""
+    # Only initialize if we're running in Streamlit context
+    if not hasattr(st, 'session_state'):
+        return
+    
+    # Set app_initialized flag for first-time initialization
+    if 'app_initialized' not in st.session_state:
+        logger.info("Streamlit App: First time initialization of session state.")
+        st.session_state.app_initialized = True
+        # Other truly one-time initializations for the entire session can go here.
+    
+    # Initialize shared data manager
     if 'shared_data_manager' not in st.session_state:
         st.session_state.shared_data_manager = get_shared_data_manager()
         logger.info("Initialized shared_data_manager in session state.")
     
     # training_status should reflect the source of truth, which is shared_data_manager
     # Set a default if shared_data_manager hasn't populated it yet.
-    if 'training_status' not in st.session_state: 
+    if 'training_status' not in st.session_state:
         if hasattr(st.session_state, 'shared_data_manager') and st.session_state.shared_data_manager:
             st.session_state.training_status = st.session_state.shared_data_manager.get_current_status().get('status', 'idle')
         else:

@@ -45,10 +45,10 @@ try:
     if not _import_logged:
         logger.info("universal_trainer.py: Successfully imported shared data manager.")
     
-    from data_manager.currency_manager import CurrencyDependencyManager, ensure_currency_data_for_trading
-    from data_manager.mmap_dataset import UniversalMemoryMappedDataset
-    from data_manager.instrument_info_manager import InstrumentInfoManager
-    from data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
+    from src.data_manager.currency_manager import CurrencyDependencyManager, ensure_currency_data_for_trading
+    from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset
+    from src.data_manager.instrument_info_manager import InstrumentInfoManager
+    from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
     from environment.trading_env import UniversalTradingEnvV4
     from src.agent.sac_agent_wrapper import QuantumEnhancedSAC
     from trainer.callbacks import UniversalCheckpointCallback # 假設這個Callback已經存在並被正確實作
@@ -722,7 +722,7 @@ if __name__ == "__main__":
     symbols_for_test = ["EUR_USD", "USD_JPY", "GBP_USD"]
     start_time_test, end_time_test = create_training_time_range(7) # 測試用7天數據
     
-    print(f"運行 UniversalTrainer 測試 (只進行數據準備和環境設置):")
+    print(f"Running UniversalTrainer test (only data preparation and environment setup):")
     print(f"  Symbols: {symbols_for_test}")
     print(f"  Time Range: {start_time_test.isoformat()} to {end_time_test.isoformat()}")
 
@@ -732,7 +732,7 @@ if __name__ == "__main__":
             self.progress_val = 0.0
         def progress(self, value):
             self.progress_val = value
-            print(f"\r下載進度: {value*100:.1f}%", end="")
+            print(f"\rDownload progress: {value*100:.1f}%", end="")
     
     class MockStatusText:
         def info(self, text):
@@ -767,6 +767,6 @@ if __name__ == "__main__":
     success = trainer.run_full_training_pipeline()
     
     if success:
-        print("\nUniversalTrainer 測試成功完成！")
+        print("\nUniversalTrainer test completed successfully!")
     else:
-        print("\nUniversalTrainer 測試失敗！")
+        print("\nUniversalTrainer test failed!")
