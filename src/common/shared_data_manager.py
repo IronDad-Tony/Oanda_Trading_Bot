@@ -179,8 +179,8 @@ class SharedTrainingDataManager:
             'portfolio_value': float(portfolio_value),
             'actor_loss': float(actor_loss) if actor_loss is not None and not np.isnan(actor_loss) else np.nan,
             'critic_loss': float(critic_loss) if critic_loss is not None and not np.isnan(critic_loss) else np.nan,
-            'l2_norm': float(l2_norm) if l2_norm is not None and not np.isnan(l2_norm) and l2_norm > 0 else np.nan,
-            'grad_norm': float(grad_norm) if grad_norm is not None and not np.isnan(grad_norm) and grad_norm > 0 else np.nan,
+            'l2_norm': float(l2_norm) if l2_norm is not None and not np.isnan(l2_norm) else np.nan,
+            'grad_norm': float(grad_norm) if grad_norm is not None and not np.isnan(grad_norm) else np.nan,
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
         
@@ -197,8 +197,8 @@ class SharedTrainingDataManager:
                 'portfolio_value': float(portfolio_value),
                 'actor_loss': float(actor_loss) if actor_loss is not None and not np.isnan(actor_loss) else np.nan,
                 'critic_loss': float(critic_loss) if critic_loss is not None and not np.isnan(critic_loss) else np.nan,
-                'l2_norm': float(l2_norm) if l2_norm is not None and not np.isnan(l2_norm) and l2_norm > 0 else np.nan,
-                'grad_norm': float(grad_norm) if grad_norm is not None and not np.isnan(grad_norm) and grad_norm > 0 else np.nan,
+                'l2_norm': float(l2_norm) if l2_norm is not None and not np.isnan(l2_norm) else np.nan,
+                'grad_norm': float(grad_norm) if grad_norm is not None and not np.isnan(grad_norm) else np.nan,
                 'timestamp': metric['timestamp'] # Use the same timestamp
             }
             self.performance_stats['total_steps'] = step

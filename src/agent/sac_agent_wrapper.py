@@ -90,10 +90,11 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         _policy_kwargs = policy_kwargs if policy_kwargs is not None else {}
         self.use_amp = use_amp # This is the USE_AMP from common.config
 
-        # Ensure features_extractor_kwargs exists and add use_amp to it
+        # Ensure features_extractor_kwargs exists
         if "features_extractor_kwargs" not in _policy_kwargs:
             _policy_kwargs["features_extractor_kwargs"] = {}
-        _policy_kwargs["features_extractor_kwargs"]["use_amp"] = self.use_amp
+        # The line below caused the TypeError and has been removed:
+        # _policy_kwargs["features_extractor_kwargs"]["use_amp"] = self.use_amp 
         
         self.policy_kwargs = _policy_kwargs
         
@@ -170,13 +171,32 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             policy=self.policy_class, env=self.env, learning_rate=learning_rate,
             buffer_size=self.buffer_size, learning_starts=self.learning_starts, batch_size=self.optimized_batch_size,
             tau=tau, gamma=gamma, train_freq=(train_freq_steps, "step"), gradient_steps=gradient_steps,
-            ent_coef=ent_coef, policy_kwargs=policy_kwargs, verbose=verbose, seed=seed,
+            ent_coef=ent_coef, policy_kwargs=_policy_kwargs, verbose=verbose, seed=seed, # Corrected to use _policy_kwargs
             device=self.device, tensorboard_log=self.tensorboard_log_path
         )
         
         # 替換原始策略網絡為量子策略層
         self.agent.policy.actor = self.quantum_policy
         self.agent.actor = self.quantum_policy
+
+        # 重要：重新創建 actor_optimizer 以優化新的量子策略層的參數
+        if hasattr(self.agent, 'optimizer_class') and hasattr(self.agent, 'optimizer_kwargs') and hasattr(self.agent, 'lr_schedule'):
+            # SAC agent stores optimizer_class and optimizer_kwargs.
+            # lr_schedule is a callable (float) -> float, where input is progress_remaining (1.0 -> 0.0)
+            initial_lr = self.agent.lr_schedule(1.0) # Get initial learning rate for the optimizer
+            
+            # Ensure optimizer_kwargs is a dictionary
+            actor_optimizer_kwargs = self.agent.optimizer_kwargs.copy() if self.agent.optimizer_kwargs is not None else {} # type: ignore
+            
+            self.agent.actor_optimizer = self.agent.optimizer_class( # type: ignore
+                self.agent.actor.parameters(),  # Parameters of self.quantum_policy
+                lr=initial_lr, 
+                **actor_optimizer_kwargs
+            )
+            logger.info("Recreated actor_optimizer for QuantumPolicyLayer.")
+        else:
+            logger.warning("Could not find optimizer_class, optimizer_kwargs, or lr_schedule on SAC agent to recreate actor_optimizer. QuantumPolicyLayer may not train properly.")
+
         self.custom_objects = custom_objects if custom_objects is not None else {}
         self.custom_objects["policy_class"] = self.policy_class
         if "features_extractor_class" in self.policy_kwargs:
