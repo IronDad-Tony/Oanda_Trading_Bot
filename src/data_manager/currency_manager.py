@@ -16,7 +16,10 @@ class CurrencyDependencyManager:
     
     def get_midpoint_rate(self, bid: Decimal, ask: Decimal) -> Decimal:
         """計算中間價格"""
-        return (bid + ask) / 2
+        # 確保輸入是 Decimal 類型
+        bid_decimal = Decimal(str(bid))
+        ask_decimal = Decimal(str(ask))
+        return (bid_decimal + ask_decimal) / Decimal('2')
     
     def apply_conversion_fee(self, midpoint: Decimal, is_credit: bool = True) -> Decimal:
         """
@@ -161,14 +164,14 @@ class CurrencyDependencyManager:
             quote_curr: 報價貨幣
             current_prices_map: 當前價格映射
             is_buy: True為買入base貨幣，False為賣出base貨幣
-            
-        Returns:
+              Returns:
             交易匯率，如果無法獲取則返回None
         """
         return self.get_specific_rate(
             base_curr, quote_curr, current_prices_map,
             visited=None, depth=0, is_for_conversion=False
         )
+
 
 def get_required_conversion_pairs(symbols: List[str], account_currency: str, available_instruments: Set[str]) -> Set[str]:
     """获取进行货币转换所需的额外货币对，只生成有效的货币对"""
