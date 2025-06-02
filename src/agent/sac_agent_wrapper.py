@@ -9,7 +9,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.logger import configure as sb3_logger_configure # 重命名以避免衝突
 from gymnasium import spaces # <-- gymnasium.spaces
-from .quantum_policy_v2 import QuantumPolicyLayer  # 導入新版本量子策略層
+from .quantum_strategy_layer import QuantumTradingLayer  # 導入完整量子策略層
 import gymnasium as gym # <-- 導入 gymnasium as gym 以便MockEnv使用
 import torch
 import torch.nn as nn
@@ -101,18 +101,16 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         # 優化設備配置
         self.device = self._setup_device(device)
         logger.info(f"量子增強SAC: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
-        
-        # 初始化量子策略層 (新版本)
+          # 初始化量子策略層 (新版本)
         # 獲取觀察空間的形狀
         obs_space = env.observation_space
         if hasattr(obs_space, 'spaces'):
             state_dim = obs_space['features_from_dataset'].shape[2]  # 特徵維度
         else:
             state_dim = obs_space.shape[0]
-            
         action_dim = env.action_space.shape[0]
-        self.quantum_policy = QuantumPolicyLayer(
-            state_dim=state_dim,
+        self.quantum_policy = QuantumTradingLayer(
+            input_dim=state_dim,
             action_dim=action_dim,
             num_strategies=3
         ).to(self.device)
@@ -193,9 +191,9 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
                 lr=initial_lr, 
                 **actor_optimizer_kwargs
             )
-            logger.info("Recreated actor_optimizer for QuantumPolicyLayer.")
+            logger.info("Recreated actor_optimizer for QuantumTradingLayer.")
         else:
-            logger.warning("Could not find optimizer_class, optimizer_kwargs, or lr_schedule on SAC agent to recreate actor_optimizer. QuantumPolicyLayer may not train properly.")
+            logger.warning("Could not find optimizer_class, optimizer_kwargs, or lr_schedule on SAC agent to recreate actor_optimizer. QuantumTradingLayer may not train properly.")
 
         self.custom_objects = custom_objects if custom_objects is not None else {}
         self.custom_objects["policy_class"] = self.policy_class
@@ -377,12 +375,11 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         
         # 展平時間序列特徵
         flat_features = features.view(batch_size * num_symbols, timesteps * features_dim)
-        
-        # 創建波動率張量
+          # 創建波動率張量
         volatility_tensor = torch.FloatTensor(market_volatility).to(self.device).view(-1, 1)
         
         with torch.no_grad():
-            action_tensor, amplitudes = self.quantum_policy(flat_features, volatility_tensor)
+            action_tensor, amplitudes = self.quantum_policy.forward_compatible(flat_features, volatility_tensor)
         
         # 重塑動作張量
         action = action_tensor.view(batch_size, num_symbols, -1).cpu().numpy()
@@ -399,21 +396,17 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         """
         rewards_tensor = torch.FloatTensor(rewards).to(self.device)
         probs = F.softmax(self.quantum_policy.amplitudes, dim=0)
-        
-        # 計算策略損失
+          # 計算策略損失
         loss = -torch.mean(torch.sum(torch.log(probs) * rewards_tensor, dim=1))
         
         # 優化振幅參數
-        self.quantum_policy.optimizer.zero_grad()
-        loss.backward()
-        self.quantum_policy.optimizer.step()
+        self.quantum_policy.quantum_annealing_step(rewards_tensor)
 
     def save(self, path: Union[str, Path]):
         """保存智能體模型"""
-        try:
-            # 為量子策略層添加臨時優化器屬性
+        try:            # 為量子策略層添加臨時優化器屬性
             if hasattr(self.agent.policy, 'quantum_policy_layer'):
-                self.agent.policy.quantum_policy_layer.optimizer = self.agent.policy.quantum_policy_layer.quant极um_optimizer
+                self.agent.policy.quantum_policy_layer.optimizer = self.agent.policy.quantum_policy_layer.quantum_optimizer
                 
             self.agent.save(path)
             logger.info(f"智能體模型已保存到: {path}")

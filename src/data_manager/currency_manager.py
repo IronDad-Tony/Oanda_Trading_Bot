@@ -148,7 +148,28 @@ class CurrencyDependencyManager:
         available_pairs = ", ".join(current_prices_map.keys())
         logger.warning(f"無法轉換 {from_currency} 到 {self.account_currency}，可用貨幣對: [{available_pairs}]，使用安全值1.0")
         return Decimal('1.0')
+    
+    def get_trading_rate(self, base_curr: str, quote_curr: str,
+                        current_prices_map: Dict[str, Tuple[Decimal, Decimal]],
+                        is_buy: bool = True) -> Optional[Decimal]:
+        """
+        獲取交易匯率（不含轉換費用）
+        專用於交易執行時的匯率計算
         
+        Args:
+            base_curr: 基礎貨幣
+            quote_curr: 報價貨幣
+            current_prices_map: 當前價格映射
+            is_buy: True為買入base貨幣，False為賣出base貨幣
+            
+        Returns:
+            交易匯率，如果無法獲取則返回None
+        """
+        return self.get_specific_rate(
+            base_curr, quote_curr, current_prices_map,
+            visited=None, depth=0, is_for_conversion=False
+        )
+
 def get_required_conversion_pairs(symbols: List[str], account_currency: str, available_instruments: Set[str]) -> Set[str]:
     """获取进行货币转换所需的额外货币对，只生成有效的货币对"""
     required_pairs = set()
@@ -209,8 +230,8 @@ def ensure_currency_data_for_trading(trading_symbols: List[str], account_currenc
     """
     确保交易所需的所有货币数据已下载，包括汇率转换所需的额外货币对
     
-    所有额外货币对将按照训练symbols的标准下载完整的价量信息（包括开盘价、最高价、最低价、收盘价、成交量等），
-    并存储到数据库中。这样如果这些货币对后续被选为训练symbol，就不需要重新下载。
+    所有额外货幣對將按照訓練symbols的標準下載完整的價量信息（包括開盤價、最高價、最低價、收盤價、成交量等），
+    並存儲到數據庫中。這樣如果這些貨幣對後續被選為訓練symbol，就不需要重新下載。
     
     返回:
         (success: bool, all_symbols: set)
