@@ -1015,8 +1015,7 @@ def create_real_time_charts():
             name='Portfolio Value',
             line=dict(color='green', width=2),
             marker=dict(size=3),
-            fill='tonexty'
-        ))
+            fill='tonexty'        ))
         
         fig_portfolio.add_hline(
             y=INITIAL_CAPITAL,
@@ -1029,13 +1028,22 @@ def create_real_time_charts():
             title="Portfolio Value Over Time",
             xaxis_title="Training Steps (Session)", # X-axis label updated
             yaxis_title=f"Portfolio Value ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
-            hovermode='x unified',            height=400
+            hovermode='x unified',
+            height=400
         )
         st.plotly_chart(fig_portfolio, use_container_width=True)
         
         if not df.empty:
             current_value = df['portfolio_value'].iloc[-1]
-            total_return = ((current_value - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+            # 獲取實際的初始資本值，優先使用訓練配置中的值
+            actual_initial_capital = INITIAL_CAPITAL
+            if len(df) > 0:
+                # 使用第一個記錄的 portfolio_value 作為初始值，如果它看起來像初始資本
+                first_value = df['portfolio_value'].iloc[0]
+                if abs(first_value - INITIAL_CAPITAL) < INITIAL_CAPITAL * 0.1:  # 允許10%的差異
+                    actual_initial_capital = first_value
+            
+            total_return = ((current_value - actual_initial_capital) / actual_initial_capital) * 100
             max_value = df['portfolio_value'].max()
             min_value = df['portfolio_value'].min()
             
@@ -1043,7 +1051,8 @@ def create_real_time_charts():
             with col1:
                 st.metric("Current Value", f"{ACCOUNT_CURRENCY} {current_value:,.2f}") # Using ACCOUNT_CURRENCY
             with col2:
-                st.metric("Total Return", f"{total_return:+.2f}%")
+                st.metric("Total Return", f"{total_return:+.2f}%", 
+                         help=f"計算基準: {ACCOUNT_CURRENCY} {actual_initial_capital:,.2f}")
             with col3:
                 st.metric("Max Value", f"{ACCOUNT_CURRENCY} {max_value:,.2f}") # Using ACCOUNT_CURRENCY
             with col4:
@@ -1290,8 +1299,7 @@ def create_real_time_charts():
                         height=400
                     )
                     st.plotly_chart(fig_symbols, use_container_width=True)
-                    
-                    # Symbol P&L breakdown if available
+                      # Symbol P&L breakdown if available
                     if 'profit_loss' in trades_df.columns:
                         symbol_pnl = trades_df.groupby('symbol')['profit_loss'].agg(['sum', 'mean', 'count']).round(2)
                         symbol_pnl.columns = ['Total P&L', 'Avg P&L', 'Trade Count']
@@ -1300,16 +1308,52 @@ def create_real_time_charts():
                         st.subheader("P&L by Symbol")
                         st.dataframe(symbol_pnl, use_container_width=True)
                         
-                        # Symbol P&L pie chart
-                        positive_pnl = symbol_pnl[symbol_pnl['Total P&L'] > 0]
-                        if not positive_pnl.empty:
-                            fig_symbol_pnl = go.Figure(data=[
-                                go.Pie(labels=positive_pnl.index, 
-                                       values=positive_pnl['Total P&L'],
-                                       title="Profitable Symbols Distribution")
-                            ])
-                            fig_symbol_pnl.update_layout(height=400)
-                            st.plotly_chart(fig_symbol_pnl, use_container_width=True)
+                        # 改進的 Symbol P&L 圓餅圖 - 顯示所有交易活動
+                        st.subheader("Symbol Trading Activity Distribution")
+                        
+                        # 為正值和負值使用不同的圖表
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            # 盈利品種圓餅圖
+                            positive_pnl = symbol_pnl[symbol_pnl['Total P&L'] > 0]
+                            if not positive_pnl.empty:
+                                fig_profit_symbols = go.Figure(data=[
+                                    go.Pie(labels=positive_pnl.index, 
+                                           values=positive_pnl['Total P&L'],
+                                           title="Profitable Symbols",
+                                           marker_colors=['#2E8B57', '#32CD32', '#98FB98', '#90EE90', '#00FF7F'])
+                                ])
+                                fig_profit_symbols.update_layout(height=350, showlegend=True)
+                                st.plotly_chart(fig_profit_symbols, use_container_width=True)
+                            else:
+                                st.info("No profitable symbols to display")
+                        
+                        with col2:
+                            # 虧損品種圓餅圖
+                            negative_pnl = symbol_pnl[symbol_pnl['Total P&L'] < 0]
+                            if not negative_pnl.empty:
+                                fig_loss_symbols = go.Figure(data=[
+                                    go.Pie(labels=negative_pnl.index, 
+                                           values=abs(negative_pnl['Total P&L']),  # 使用絕對值顯示
+                                           title="Loss-Making Symbols",
+                                           marker_colors=['#DC143C', '#FF6347', '#FA8072', '#F08080', '#FFA07A'])
+                                ])
+                                fig_loss_symbols.update_layout(height=350, showlegend=True)
+                                st.plotly_chart(fig_loss_symbols, use_container_width=True)
+                            else:
+                                st.info("No loss-making symbols to display")
+                        
+                        # 交易次數分佈圓餅圖
+                        st.subheader("Trading Frequency Distribution")
+                        fig_frequency = go.Figure(data=[
+                            go.Pie(labels=symbol_pnl.index, 
+                                   values=symbol_pnl['Trade Count'],
+                                   title="Trade Count by Symbol",
+                                   marker_colors=['#4169E1', '#1E90FF', '#87CEEB', '#87CEFA', '#B0E0E6'])
+                        ])
+                        fig_frequency.update_layout(height=400, showlegend=True)
+                        st.plotly_chart(fig_frequency, use_container_width=True)
                 else:
                     st.info("No symbol data available for analysis.")
         else:

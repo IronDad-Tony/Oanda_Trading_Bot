@@ -420,16 +420,18 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             # 公式: 保證金 = 單位數 * 合約大小 * 價格 * 保證金率
             # 其中保證金率 = 1 / 槓桿比例 (例如0.02對應50倍槓桿)
             margin_required_qc = abs(new_units) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
-            
-            # 根據波動性增加額外保證金要求 (Oanda會根據市場波動動態調整)
-            volatility_factor = Decimal('1.0') + (self.atr_values_qc[slot_idx] / trade_price_qc) * Decimal('5.0')
+              # 根據波動性增加額外保證金要求 (Oanda會根據市場波動動態調整)
+            # 降低波動性因子以避免過度保證金要求
+            atr_ratio = self.atr_values_qc[slot_idx] / trade_price_qc if trade_price_qc > 0 else Decimal('0')
+            # 使用更合理的波動性調整：最大2.5倍而非5倍
+            volatility_factor = Decimal('1.0') + min(atr_ratio * Decimal('2.5'), Decimal('1.5'))  # 限制最大1.5倍額外保證金
             margin_required_qc *= volatility_factor
             
             # 轉換為賬戶貨幣
             self.margin_used_per_position_ac[slot_idx] = margin_required_qc * exchange_rate_qc_to_ac
             
-            # 添加2%緩衝區（Oanda實際會根據波動性動態調整）
-            margin_buffer = Decimal('0.02')
+            # 增加保證金緩衝區到5%以提供更好的安全邊際
+            margin_buffer = Decimal('0.05')  # 從2%提升到5%
             self.margin_used_per_position_ac[slot_idx] *= (Decimal('1.0') + margin_buffer)
         else:
             self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
@@ -867,14 +869,17 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 # 當平均ATR比例過高時（市場過於波動），給予懲罰
                 volatility_penalty = enhanced_risk_factor * (avg_atr_ratio - self.atr_penalty_threshold) * Decimal('0.3')  # 從0.5降低到0.3
                 reward_val -= volatility_penalty
-        
-        # === 7. 保證金追繳懲罰（強化風險管理） ===
+          # === 7. 保證金追繳懲罰（強化風險管理） ===
         if self.total_margin_used_ac > Decimal('0'):
             margin_level = self.equity_ac / self.total_margin_used_ac
-            margin_warning_level = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) * Decimal('1.2')  # 60%水平開始警告
+            # 提高警告水平到70%，給予更多緩衝時間
+            margin_warning_level = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) * Decimal('1.4')  # 70%水平開始警告
             
             if margin_level < margin_warning_level:
-                margin_risk_penalty = (margin_warning_level - margin_level) * Decimal('0.05')  # 從0.1降低到0.05
+                # 使用更平滑的懲罰曲線
+                margin_shortage = margin_warning_level - margin_level
+                # 懲罰隨著接近強平水平而急劇增加
+                margin_risk_penalty = margin_shortage * margin_shortage * Decimal('0.1')  # 平方懲罰，更平滑
                 reward_val -= margin_risk_penalty
         
         # === 記錄詳細信息用於監控 ===
