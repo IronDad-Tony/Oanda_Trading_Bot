@@ -883,11 +883,27 @@ def create_real_time_charts():
                 
                 has_negative_values = has_negative_actor or has_negative_critic
                 yaxis_type = "linear" if has_negative_values else "log"
-                
-                st.write(f"**Chart Configuration:**")
+                st.write("**Chart Configuration:**")
                 st.write(f"Actor has negative: {has_negative_actor}")
                 st.write(f"Critic has negative: {has_negative_critic}")
                 st.write(f"Y-axis type: {yaxis_type}")
+                
+                # Add interpretation for SAC losses
+                if 'actor_loss' in df.columns and df['actor_loss'].notna().any():
+                    actor_mean = df['actor_loss'].mean()
+                    if actor_mean < 0:
+                        st.success(f"✓ Actor Loss negative (healthy): {actor_mean:.3f}")
+                    else:
+                        st.warning(f"⚠ Actor Loss positive (may need investigation): {actor_mean:.3f}")
+                
+                if 'critic_loss' in df.columns and df['critic_loss'].notna().any():
+                    critic_mean = df['critic_loss'].mean()
+                    if 0 < critic_mean < 10:
+                        st.success(f"✓ Critic Loss in healthy range: {critic_mean:.3f}")
+                    elif critic_mean > 10:
+                        st.warning(f"⚠ Critic Loss high: {critic_mean:.3f}")
+                    else:
+                        st.info(f"ℹ Critic Loss: {critic_mean:.3f}")
             with col2:
                 if 'actor_loss' in df.columns:
                     actor_loss_stats = {
@@ -946,9 +962,8 @@ def create_real_time_charts():
         
         # Use linear scale if we have negative values, otherwise log scale for better visualization
         yaxis_type = "linear" if has_negative_values else "log"
-        
         fig_loss.update_layout(
-            title="Training Loss Curves",
+            title="Training Loss Curves (SAC: Negative Actor Loss = Good Performance)",
             xaxis_title="Training Steps (Session)", # X-axis label updated
             yaxis_title="Loss",
             yaxis_type=yaxis_type,
