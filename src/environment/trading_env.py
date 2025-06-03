@@ -96,25 +96,24 @@ except ImportError as e_initial_import_v5:
                 logger.error("Downloader not available in fallback.")
         logger.info("trading_env.py (V5.0): Fallback definitions applied.")
 
-TIMESTEPS = _config_values_env_v5.get("TIMESTEPS", 128); MAX_SYMBOLS_ALLOWED = _config_values_env_v5.get("MAX_SYMBOLS_ALLOWED", 20); ACCOUNT_CURRENCY = _config_values_env_v5.get("ACCOUNT_CURRENCY", "AUD"); DEFAULT_INITIAL_CAPITAL = _config_values_env_v5.get("DEFAULT_INITIAL_CAPITAL", 100000.0); OANDA_MARGIN_CLOSEOUT_LEVEL = _config_values_env_v5.get("OANDA_MARGIN_CLOSEOUT_LEVEL", Decimal('0.50')); TRADE_COMMISSION_PERCENTAGE = _config_values_env_v5.get("TRADE_COMMISSION_PERCENTAGE", Decimal('0.0001')); OANDA_API_KEY = _config_values_env_v5.get("OANDA_API_KEY", None); ATR_PERIOD = _config_values_env_v5.get("ATR_PERIOD", 14); STOP_LOSS_ATR_MULTIPLIER = _config_values_env_v5.get("STOP_LOSS_ATR_MULTIPLIER", Decimal('2.0')); MAX_ACCOUNT_RISK_PERCENTAGE = _config_values_env_v5.get("MAX_ACCOUNT_RISK_PERCENTAGE", Decimal('0.01'))
+TIMESTEPS = _config_values_env_v5.get("TIMESTEPS", 128); MAX_SYMBOLS_ALLOWED = _config_values_env_v5.get("MAX_SYMBOLS_ALLOWED", 20); ACCOUNT_CURRENCY = _config_values_env_v5.get("ACCOUNT_CURRENCY", "AUD"); DEFAULT_INITIAL_CAPITAL = _config_values_env_v5.get("DEFAULT_INITIAL_CAPITAL", 100000.0); OANDA_MARGIN_CLOSEOUT_LEVEL = _config_values_env_v5.get("OANDA_MARGIN_CLOSEOUT_LEVEL", Decimal('0.50')); TRADE_COMMISSION_PERCENTAGE = _config_values_env_v5.get("TRADE_COMMISSION_PERCENTAGE", Decimal('0.0001')); OANDA_API_KEY = _config_values_env_v5.get("OANDA_API_KEY", None); ATR_PERIOD = _config_values_env_v5.get("ATR_PERIOD", 14); STOP_LOSS_ATR_MULTIPLIER = _config_values_env_v5.get("STOP_LOSS_ATR_MULTIPLIER", Decimal('2.0')); MAX_ACCOUNT_RISK_PERCENTAGE = _config_values_env_v5.get("MAX_ACCOUNT_RISK_PERCENTAGE", Decimal('0.01')); MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY = _config_values_env_v5.get("MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY", Decimal('0.10'))
 
 
 class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
     metadata = {'render_modes': ['human', 'array'], 'render_fps': 10}
-    
-    def __init__(self, dataset: UniversalMemoryMappedDataset, instrument_info_manager: InstrumentInfoManager, active_symbols_for_episode: List[str], # type: ignore
+      def __init__(self, dataset: UniversalMemoryMappedDataset, instrument_info_manager: InstrumentInfoManager, active_symbols_for_episode: List[str], # type: ignore
                  initial_capital: float = float(DEFAULT_INITIAL_CAPITAL), max_episode_steps: Optional[int] = None,
                  commission_percentage_override: Optional[float] = None, reward_config: Optional[Dict[str, Union[float, Decimal]]] = None,
                  max_account_risk_per_trade: float = float(MAX_ACCOUNT_RISK_PERCENTAGE),
                  stop_loss_atr_multiplier: float = float(STOP_LOSS_ATR_MULTIPLIER),
                  atr_period: int = ATR_PERIOD, render_mode: Optional[str] = None,
-                 shared_data_manager=None, training_step_offset: int = 0):
+                 shared_data_manager=None, training_step_offset: int = 0,
+                 max_position_size_percentage: float = float(MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY)):
         super().__init__()
         self.dataset = dataset
         self.instrument_info_manager = instrument_info_manager
         self.initial_capital = Decimal(str(initial_capital))
-        
-        # 初始化統一的貨幣轉換管理器
+          # 初始化統一的貨幣轉換管理器
         from src.data_manager.currency_manager import CurrencyDependencyManager
         self.currency_manager = CurrencyDependencyManager(ACCOUNT_CURRENCY, apply_oanda_markup=True)
         if commission_percentage_override is not None:
@@ -125,6 +124,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.max_account_risk_per_trade = Decimal(str(max_account_risk_per_trade))
         self.stop_loss_atr_multiplier = Decimal(str(stop_loss_atr_multiplier))
         self.atr_period = atr_period
+        self.max_position_size_percentage = Decimal(str(max_position_size_percentage))
         
         # Shared data manager integration for real-time monitoring
         self.shared_data_manager = shared_data_manager
@@ -545,9 +545,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             
             if current_bid_qc <= Decimal('0') or current_ask_qc <= Decimal('0'):
                 logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid current prices.")
-                continue
-
-            # 計算目標單位數 (target_units)
+                continue            # 計算目標單位數 (target_units)
             risk_per_unit_qc = self.atr_values_qc[slot_idx] * self.stop_loss_atr_multiplier
             if risk_per_unit_qc <= Decimal('0'):
                 logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to zero ATR risk.")
@@ -567,14 +565,26 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             max_units_by_risk = (max_risk_capital / risk_per_unit_ac).quantize(Decimal('1'), rounding=ROUND_DOWN)
 
             target_position_ratio = Decimal(str(action[slot_idx]))
-            target_nominal_value_ac = abs(target_position_ratio) * self.equity_ac
+            
+            # 🔧 修復關鍵風險管理缺陷：先應用最大持倉限制，再應用動作值
+            # 原來：target_nominal_value_ac = abs(target_position_ratio) * self.equity_ac
+            # 修復後：先限制最大持倉比例，再應用SAC動作比例
+            max_position_value_ac = self.equity_ac * self.max_position_size_percentage
+            target_nominal_value_ac = abs(target_position_ratio) * max_position_value_ac
+            
             current_mid_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2')
 
             if current_mid_price_qc <= Decimal('0'):
                 logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid mid price.")
                 continue
 
+            # 計算目標交易單位數，應用多層風險控制
             target_units_raw = (target_nominal_value_ac / (current_mid_price_qc * exchange_rate_qc_to_ac)).quantize(Decimal('1e-9'), rounding=ROUND_HALF_UP)
+            
+            # 應用風險管理層次：
+            # 1. 最大持倉限制 (已在 target_nominal_value_ac 中應用)
+            # 2. 單筆交易風險限制 (ATR-based)
+            # 3. 最終取最小值確保安全
             target_units_final = min(target_units_raw, max_units_by_risk)
             target_units_final = target_units_final.copy_sign(target_position_ratio)
             target_units = details.round_units(target_units_final)
