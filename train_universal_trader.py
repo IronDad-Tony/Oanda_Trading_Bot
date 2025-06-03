@@ -18,8 +18,8 @@ def make_env(symbols):
     # 創建MMAP數據集
     dataset = UniversalMemoryMappedDataset(
         symbols=symbols,
-        start_iso=DEFAULT_TRAIN_START_ISO,
-        end_iso=DEFAULT_TRAIN_END_ISO,
+        start_time_iso=DEFAULT_TRAIN_START_ISO,
+        end_time_iso=DEFAULT_TRAIN_END_ISO,
     )
     # 創建instrument info manager
     info_mgr = InstrumentInfoManager()

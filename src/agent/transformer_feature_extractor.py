@@ -27,8 +27,7 @@ class TransformerFeatureExtractor(BaseFeaturesExtractor):
             'num_input_features': feat_dim,
             'num_symbols_possible': num_slots,
         })
-        self.transformer = UniversalTradingTransformer(**tf_kwargs)
-        # 計算總輸出維度：每個symbol輸出維度 * 符號數
+        self.transformer = UniversalTradingTransformer(**tf_kwargs)        # 計算總輸出維度：每個symbol輸出維度 * 符號數
         self._features_dim = num_slots * TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
         self.features_key = features_key
         self.mask_key = mask_key
@@ -38,7 +37,10 @@ class TransformerFeatureExtractor(BaseFeaturesExtractor):
         x = observations[self.features_key]  # Tensor shape (B,S,T,F)
         mask = observations[self.mask_key]   # Tensor shape (B,S)
         # padding_mask傳入cross-asset注意力: True表示要mask
-        # 我們用 ~mask（True表示dummy slots）
+        # 確保mask是布林類型，然後進行邏輯反轉
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        # 我們用邏輯反轉 (~mask) 表示dummy slots需要被mask
         out = self.transformer(x, padding_mask_symbols=~mask)
         # out shape (B,S,D)
         # 展平成 (B, S*D)
