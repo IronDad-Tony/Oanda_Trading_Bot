@@ -8,9 +8,8 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.logger import configure as sb3_logger_configure # 重命名以避免衝突
-from gymnasium import spaces # <-- gymnasium.spaces
-from .quantum_strategy_layer import QuantumTradingLayer  # 導入完整量子策略層
-import gymnasium as gym # <-- 導入 gymnasium as gym 以便MockEnv使用
+from gymnasium import spaces
+import gymnasium as gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # 導入 functional 模組解決 F 未定義問題
@@ -25,42 +24,39 @@ import sys # 確保導入
 import gc  # 垃圾回收
 
 try:
-    from agent.sac_policy import CustomSACPolicy
-    from common.config import (
+    from src.agent.sac_policy import CustomSACPolicy
+    from src.common.config import (
         DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
         SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU,
         TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP # <--- 添加混合精度訓練支持
     )
-    from common.logger_setup import logger
+    from src.common.logger_setup import logger
 except ImportError:
-    # project_root_wrapper = Path(__file__).resolve().parent.parent.parent # 移除
-    # src_path_wrapper = project_root_wrapper / "src" # 移除
-    # if str(project_root_wrapper) not in sys.path: # 移除
-    #     sys.path.insert(0, str(project_root_wrapper)) # 移除
     try:
-        # 假設 PYTHONPATH 已設定，這些導入應該能工作
         from src.agent.sac_policy import CustomSACPolicy
         from src.common.config import (
             DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
-            SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU, TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP
+            SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU,
+            TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP
         )
         from src.common.logger_setup import logger
         logger.info("Direct run SACAgentWrapper: Successfully re-imported modules.")
     except ImportError as e_retry_wrapper:
         import logging
-        logger = logging.getLogger("sac_agent_wrapper_fallback") # type: ignore
+        logger = logging.getLogger("sac_agent_wrapper_fallback")  # type: ignore
         logger.setLevel(logging.INFO)
         _ch_wrapper = logging.StreamHandler(sys.stdout)
         _ch_wrapper.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        if not logger.handlers: logger.addHandler(_ch_wrapper)
+        if not logger.handlers:
+            logger.addHandler(_ch_wrapper)
         logger.error(f"Direct run SACAgentWrapper: Critical import error: {e_retry_wrapper}", exc_info=True)
-        CustomSACPolicy = None # type: ignore
-        DEVICE="cpu"; SAC_LEARNING_RATE=3e-4; SAC_BATCH_SIZE=256; SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR=1000
-        SAC_LEARNING_STARTS_FACTOR=10; SAC_GAMMA=0.99; SAC_ENT_COEF='auto'
-        SAC_TRAIN_FREQ_STEPS=1; SAC_GRADIENT_STEPS=1; SAC_TAU=0.005; TIMESTEPS=128
-        LOGS_DIR=Path("./logs_fallback"); MAX_SYMBOLS_ALLOWED=20; USE_AMP=False
+        CustomSACPolicy = None  # type: ignore
+        DEVICE = "cpu"; SAC_LEARNING_RATE = 3e-4; SAC_BATCH_SIZE = 256; SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 1000
+        SAC_LEARNING_STARTS_FACTOR = 10; SAC_GAMMA = 0.99; SAC_ENT_COEF = 'auto'
+        SAC_TRAIN_FREQ_STEPS = 1; SAC_GRADIENT_STEPS = 1; SAC_TAU = 0.005; TIMESTEPS = 128
+        LOGS_DIR = Path("./logs_fallback"); MAX_SYMBOLS_ALLOWED = 20; USE_AMP = False
 
 
 class QuantumEnhancedSAC:
@@ -86,114 +82,35 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
                  use_amp: bool = USE_AMP
                 ):
         self.env = env
+        # 使用传入的 policy_class（默认为 CustomSACPolicy）
         self.policy_class = policy_class
-        _policy_kwargs = policy_kwargs if policy_kwargs is not None else {}
+
+        # 准备 policy_kwargs，用自定义 CustomSACPolicy 和 TransformerFeatureExtractor
+        from src.agent.transformer_feature_extractor import TransformerFeatureExtractor
+        policy_kwargs = dict(
+            net_arch=dict(pi=[256, 256], qf=[256, 256]),
+            features_extractor_class=TransformerFeatureExtractor,
+            features_extractor_kwargs={"transformer_kwargs": {}},
+        )
+
         self.use_amp = use_amp # This is the USE_AMP from common.config
 
-        # Ensure features_extractor_kwargs exists
-        if "features_extractor_kwargs" not in _policy_kwargs:
-            _policy_kwargs["features_extractor_kwargs"] = {}
-        # The line below caused the TypeError and has been removed:
-        # _policy_kwargs["features_extractor_kwargs"]["use_amp"] = self.use_amp 
-        
-        self.policy_kwargs = _policy_kwargs
-        
         # 優化設備配置
         self.device = self._setup_device(device)
         logger.info(f"量子增強SAC: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
-          # 初始化量子策略層 (新版本)
-        # 獲取觀察空間的形狀
-        obs_space = env.observation_space
-        if hasattr(obs_space, 'spaces'):
-            state_dim = obs_space['features_from_dataset'].shape[2]  # 特徵維度
-        else:
-            state_dim = obs_space.shape[0]
-        action_dim = env.action_space.shape[0]
-        self.quantum_policy = QuantumTradingLayer(
-            input_dim=state_dim,
-            action_dim=action_dim,
-            num_strategies=3
-        ).to(self.device)
         
-        # num_active_symbols = getattr(self.env.envs[0], 'num_active_symbols_in_slots', 1) # Removed this line
-        # Check if env is a list of environments (VecEnv) or a single environment
-        if hasattr(self.env, 'envs') and isinstance(self.env.envs, list) and len(self.env.envs) > 0:
-            # This is a VecEnv, access the first environment
-            first_env = self.env.envs[0]
-        else:
-            # This is a single environment
-            first_env = self.env
-        
-        num_active_symbols = getattr(first_env, 'num_tradable_symbols_this_episode', 1) # V5.0環境使用此屬性名
-
-        calculated_buffer_size = num_active_symbols * TIMESTEPS * buffer_size_factor
-        self.buffer_size = min(max(calculated_buffer_size, batch_size * 200, 50000),200000)
-        calculated_learning_starts = num_active_symbols * batch_size * learning_starts_factor
-        self.learning_starts = max(calculated_learning_starts, batch_size * 20, 2000)          # 根據設備調整批次大小以優化GPU利用率 - 恢復動態調整
-        if self.device.type == 'cuda':
-            # 啟用動態批次大小調整，根據GPU內存自動優化
-            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            if gpu_memory_gb >= 16:  # 16GB以上GPU
-                self.optimized_batch_size = min(batch_size * 3, 384)
-            elif gpu_memory_gb >= 12:  # 12-16GB GPU
-                self.optimized_batch_size = min(batch_size * 2, 256)
-            elif gpu_memory_gb >= 8:  # 8-12GB GPU
-                self.optimized_batch_size = min(int(batch_size * 1.5), 192)
-            else:  # 小於8GB GPU
-                self.optimized_batch_size = batch_size
-            # 確保批次大小不會太小
-            self.optimized_batch_size = max(self.optimized_batch_size, 32)
-            logger.info(f"GPU模式 ({gpu_memory_gb:.1f}GB)：原始批次大小 {batch_size}，動態調整後批次大小 {self.optimized_batch_size}")
-        else:
-            self.optimized_batch_size = batch_size
-            logger.info(f"CPU模式：批次大小 {self.optimized_batch_size}")
-        logger.info(f"強制設定優化後批次大小為: {self.optimized_batch_size}")
-            
-        logger.info(f"SAC Agent Wrapper: num_active_symbols={num_active_symbols}, BufferSize={self.buffer_size}, LearningStarts={self.learning_starts}, BatchSize={self.optimized_batch_size}")
-        if tensorboard_log_path is None:
-            current_time_str = datetime.now().strftime("%Y%m%d-%H%M%S") # datetime 已導入
-            self.tensorboard_log_path = str(LOGS_DIR / f"sac_tensorboard_logs_{current_time_str}")
-            os.makedirs(self.tensorboard_log_path, exist_ok=True)
-            logger.info(f"TensorBoard日誌將保存到: {self.tensorboard_log_path}")
-        else:
-            self.tensorboard_log_path = tensorboard_log_path
-        # 配置自定義策略網絡
-        policy_kwargs = dict(
-            net_arch=dict(pi=[256, 256], qf=[256, 256]),
-            features_extractor_class=None,
-            features_extractor_kwargs=None
-        )
-        
-        # 創建SAC代理
+        # 创建 SAC 智能体，使用 CustomSACPolicy
         self.agent = SAC(
             policy=self.policy_class, env=self.env, learning_rate=learning_rate,
-            buffer_size=self.buffer_size, learning_starts=self.learning_starts, batch_size=self.optimized_batch_size,
-            tau=tau, gamma=gamma, train_freq=(train_freq_steps, "step"), gradient_steps=gradient_steps,
-            ent_coef=ent_coef, policy_kwargs=_policy_kwargs, verbose=verbose, seed=seed, # Corrected to use _policy_kwargs
-            device=self.device, tensorboard_log=self.tensorboard_log_path
+            buffer_size=self.buffer_size, learning_starts=self.learning_starts,
+            batch_size=self.optimized_batch_size, tau=tau, gamma=gamma,
+            train_freq=(train_freq_steps, "step"), gradient_steps=gradient_steps,
+            ent_coef=ent_coef, policy_kwargs=policy_kwargs,
+            verbose=verbose, seed=seed, device=self.device,
+            tensorboard_log=self.tensorboard_log_path
         )
-        
-        # 替換原始策略網絡為量子策略層
-        self.agent.policy.actor = self.quantum_policy
-        self.agent.actor = self.quantum_policy
 
-        # 重要：重新創建 actor_optimizer 以優化新的量子策略層的參數
-        if hasattr(self.agent, 'optimizer_class') and hasattr(self.agent, 'optimizer_kwargs') and hasattr(self.agent, 'lr_schedule'):
-            # SAC agent stores optimizer_class and optimizer_kwargs.
-            # lr_schedule is a callable (float) -> float, where input is progress_remaining (1.0 -> 0.0)
-            initial_lr = self.agent.lr_schedule(1.0) # Get initial learning rate for the optimizer
-            
-            # Ensure optimizer_kwargs is a dictionary
-            actor_optimizer_kwargs = self.agent.optimizer_kwargs.copy() if self.agent.optimizer_kwargs is not None else {} # type: ignore
-            
-            self.agent.actor_optimizer = self.agent.optimizer_class( # type: ignore
-                self.agent.actor.parameters(),  # Parameters of self.quantum_policy
-                lr=initial_lr, 
-                **actor_optimizer_kwargs
-            )
-            logger.info("Recreated actor_optimizer for QuantumTradingLayer.")
-        else:
-            logger.warning("Could not find optimizer_class, optimizer_kwargs, or lr_schedule on SAC agent to recreate actor_optimizer. QuantumTradingLayer may not train properly.")
+        # CustomSACPolicy 在內部已使用 TransformerFeatureExtractor，無需手動替換
 
         self.custom_objects = custom_objects if custom_objects is not None else {}
         self.custom_objects["policy_class"] = self.policy_class

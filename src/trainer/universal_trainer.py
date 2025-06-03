@@ -49,9 +49,9 @@ try:
     from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset
     from src.data_manager.instrument_info_manager import InstrumentInfoManager
     from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
-    from environment.trading_env import UniversalTradingEnvV4
+    from src.environment.trading_env import UniversalTradingEnvV4
     from src.agent.sac_agent_wrapper import QuantumEnhancedSAC
-    from trainer.callbacks import UniversalCheckpointCallback # 假設這個Callback已經存在並被正確實作
+    from src.trainer.callbacks import UniversalCheckpointCallback  # callback 定义在 src/trainer/callbacks.py
     if not _import_logged:
         logger.info("universal_trainer.py: Successfully imported other dependencies.")
         _import_logged = True
