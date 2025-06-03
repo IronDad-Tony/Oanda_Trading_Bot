@@ -190,7 +190,7 @@ STOP_LOSS_ATR_MULTIPLIER = 2.0      # ATR止損倍數 <--- 確保這一行存在
 #     "XAU_USD": 10.0 # 黃金
 # }
 # 實際點值和保證金率會從OANDA API獲取，這裡作為無法獲取時的後備或參考
-TRADE_COMMISSION_PERCENTAGE = 0.0001  # 名義交易手續費百分比 (例如 0.01%)
+TRADE_COMMISSION_PERCENTAGE = 0.0  # 名義交易手續費百分比 (例如 0.01%)
                                       # 如果OANDA點差已包含手續費，可以設為 0.0
 
 # OANDA 強制平倉保證金水平 (Margin Closeout Percentage)

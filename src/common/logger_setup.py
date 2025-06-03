@@ -79,19 +79,121 @@ try:
     # 在多進程環境中，使用更安全的日誌配置
     import os
     from logging.handlers import TimedRotatingFileHandler
+    import time
 
     # 日誌目錄已在上面創建
 
     if os.name == 'nt':  # Windows system
-        logger.info("Windows environment detected. Using TimedRotatingFileHandler with UTF-8 encoding.")
-        file_handler = TimedRotatingFileHandler(
+        logger.info("Windows environment detected. Using Windows-safe logging handler.")
+        
+        # Windows 安全的檔案處理器
+        class WindowsSafeRotatingFileHandler(TimedRotatingFileHandler):
+            """
+            Windows 安全的滾動檔案處理器
+            解決 Windows 系統上檔案重新命名權限問題
+            """
+            def doRollover(self):
+                """
+                覆寫滾動方法，增加錯誤處理和重試機制
+                """
+                if self.stream:
+                    self.stream.close()
+                    self.stream = None
+                
+                # 計算滾動後的檔案名
+                current_time = int(time.time())
+                dst_name = self.rotation_filename(self.baseFilename + "." + 
+                                                 time.strftime(self.suffix, time.localtime(current_time)))
+                
+                # 使用重試機制進行檔案重新命名
+                max_retries = 5
+                retry_delay = 0.1
+                
+                for attempt in range(max_retries):
+                    try:
+                        if os.path.exists(self.baseFilename):
+                            # 如果目標檔案已存在，先刪除它
+                            if os.path.exists(dst_name):
+                                try:
+                                    os.remove(dst_name)
+                                except OSError:
+                                    pass  # 忽略刪除失敗
+                            
+                            # 嘗試重新命名
+                            os.rename(self.baseFilename, dst_name)
+                        break
+                        
+                    except (OSError, PermissionError) as e:
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay * (2 ** attempt))  # 指數退避
+                            continue
+                        else:
+                            # 最後一次嘗試失敗，創建一個帶時間戳的新檔案
+                            timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+                            new_base = f"{self.baseFilename}_{timestamp}.log"
+                            self.baseFilename = new_base
+                            logger.warning(f"檔案滾動失敗，使用新檔案名: {new_base}")
+                
+                # 清理舊檔案
+                if self.backupCount > 0:
+                    self._cleanup_old_files()
+                
+                # 重新打開檔案流
+                if not self.delay:
+                    self.stream = self._open()
+            
+            def _cleanup_old_files(self):
+                """清理超出保留數量的舊檔案"""
+                try:
+                    log_dir = os.path.dirname(self.baseFilename)
+                    log_files = []
+                    
+                    for filename in os.listdir(log_dir):
+                        if filename.startswith(os.path.basename(self.baseFilename)):
+                            full_path = os.path.join(log_dir, filename)
+                            if os.path.isfile(full_path):
+                                log_files.append((full_path, os.path.getmtime(full_path)))
+                    
+                    # 按修改時間排序，保留最新的檔案
+                    log_files.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # 刪除超出保留數量的檔案
+                    if len(log_files) > self.backupCount:
+                        for file_path, _ in log_files[self.backupCount:]:
+                            try:
+                                os.remove(file_path)
+                            except OSError:
+                                pass  # 忽略刪除失敗
+                                
+                except Exception as e:
+                    logger.warning(f"清理舊日誌檔案失敗: {e}")
+            
+            def emit(self, record):
+                """
+                覆寫 emit 方法，增加異常處理
+                """
+                try:
+                    super().emit(record)
+                except Exception as e:
+                    # 如果寫入失敗，嘗試重新打開檔案
+                    try:
+                        if self.stream:
+                            self.stream.close()
+                        self.stream = self._open()
+                        super().emit(record)
+                    except Exception:
+                        # 如果還是失敗，使用 handleError
+                        self.handleError(record)
+        
+        file_handler = WindowsSafeRotatingFileHandler(
             LOG_FILE_PATH,
-            when='midnight',
+            when='H',  # 改為每小時滾動，減少衝突機會
             interval=1,
-            backupCount=7,
+            backupCount=24,  # 保留 24 小時的日誌
             encoding='utf-8',
             delay=True
         )
+        
     else:  # 非 Windows 系統 (Unix/Linux/MacOS等)
         try:
             import fcntl
