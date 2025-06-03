@@ -31,9 +31,7 @@ class SharedTrainingDataManager:
     使用 multiprocessing.Manager().Queue 和線程安全的數據結構來在訓練線程/進程和UI線程之間共享數據。
     """
     
-    _manager = None # Class variable to hold the multiprocessing.Manager instance
-
-    @classmethod
+    _manager = None # Class variable to hold the multiprocessing.Manager instance    @classmethod
     def get_manager(cls):
         if cls._manager is None:
             cls._manager = multiprocessing.Manager()
@@ -55,6 +53,9 @@ class SharedTrainingDataManager:
         self.training_error = None
         self.stop_requested = False
         self.training_start_time = None
+        
+        # Store actual initial capital for accurate return calculations
+        self.actual_initial_capital = None
         
         # multiprocessing Queues for communication from trainer
         manager = self.get_manager()
@@ -352,7 +353,7 @@ class SharedTrainingDataManager:
                 'final_portfolio_value': portfolio_values[-1],
                 'max_portfolio_value': np.max(portfolio_values),
                 'min_portfolio_value': np.min(portfolio_values),
-                'total_return': ((portfolio_values[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100,
+                'total_return': ((portfolio_values[-1] - self.get_actual_initial_capital()) / self.get_actual_initial_capital()) * 100,
                 'max_drawdown': self._calculate_max_drawdown(portfolio_values),
                 'volatility': np.std(portfolio_values) / np.mean(portfolio_values) * 100
             }
@@ -396,11 +397,15 @@ class SharedTrainingDataManager:
             self.metrics_queue.clear()
             self.trade_queue.clear()
             self.symbol_stats.clear()
+            
             self.training_status = 'idle'
             self.training_progress = 0.0
             self.training_error = None
             self.stop_requested = False
             self.training_start_time = None
+            
+            # Reset actual initial capital
+            self.actual_initial_capital = None
             
             self.current_metrics = {
                 'step': 0, 'reward': 0.0, 'portfolio_value': float(INITIAL_CAPITAL),
@@ -416,6 +421,27 @@ class SharedTrainingDataManager:
                 'training_efficiency': 0.0
             }
             logger.info("共享數據已清除 (包括 multiprocessing Queues)")
+
+    def set_actual_initial_capital(self, initial_capital: float):
+        """
+        Set the actual initial capital used by the trainer
+        
+        Args:
+            initial_capital: The actual initial capital amount
+        """
+        with self.lock:
+            self.actual_initial_capital = initial_capital
+            logger.info(f"Set actual initial capital: {initial_capital}")
+    
+    def get_actual_initial_capital(self) -> float:
+        """
+        Get the actual initial capital, falling back to config value if not set
+        
+        Returns:
+            The actual initial capital or config default
+        """
+        with self.lock:
+            return self.actual_initial_capital if self.actual_initial_capital is not None else float(INITIAL_CAPITAL)
 
 # 全局共享數據管理器實例
 _global_shared_manager_instance = None # Renamed for clarity

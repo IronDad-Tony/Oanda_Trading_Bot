@@ -196,10 +196,12 @@ class UniversalTrainer:
         self.atr_stop_loss_multiplier = atr_stop_loss_multiplier
         self.max_position_percentage = max_position_percentage / 100.0
         self.custom_atr_period = custom_atr_period
-        
-        # 初始化共享數據管理器
+          # 初始化共享數據管理器
         self.shared_data_manager = get_shared_data_manager()
         logger.info("Connected to shared data manager")
+        
+        # Set the actual initial capital in the shared data manager for accurate return calculations
+        self.shared_data_manager.set_actual_initial_capital(self.initial_capital)
         
         # 設置GPU優化
         self._setup_gpu_optimization()

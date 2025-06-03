@@ -1027,8 +1027,7 @@ def create_real_time_charts():
         fig_portfolio.update_layout(
             title="Portfolio Value Over Time",
             xaxis_title="Training Steps (Session)", # X-axis label updated
-            yaxis_title=f"Portfolio Value ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY
-            hovermode='x unified',
+            yaxis_title=f"Portfolio Value ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY        hovermode='x unified',
             height=400
         )
         st.plotly_chart(fig_portfolio, use_container_width=True)
@@ -1036,9 +1035,13 @@ def create_real_time_charts():
         if not df.empty:
             current_value = df['portfolio_value'].iloc[-1]
             # 獲取實際的初始資本值，優先使用訓練配置中的值
-            actual_initial_capital = INITIAL_CAPITAL
-            if len(df) > 0:
-                # 使用第一個記錄的 portfolio_value 作為初始值，如果它看起來像初始資本
+            actual_initial_capital = INITIAL_CAPITAL  # Default fallback
+            
+            # Try to get the actual initial capital from the trainer instance
+            if st.session_state.get('trainer') and hasattr(st.session_state.trainer, 'initial_capital'):
+                actual_initial_capital = st.session_state.trainer.initial_capital
+            elif len(df) > 0:
+                # Fallback: use first portfolio value if it looks like initial capital
                 first_value = df['portfolio_value'].iloc[0]
                 if abs(first_value - INITIAL_CAPITAL) < INITIAL_CAPITAL * 0.1:  # 允許10%的差異
                     actual_initial_capital = first_value
