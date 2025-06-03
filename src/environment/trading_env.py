@@ -416,24 +416,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
         
         # 修復：使用實際交易價格而非中間價計算保證金
-        if abs(new_units) > Decimal('1e-9') and trade_price_qc > Decimal('0'):
-            # 使用從API獲取的合約大小和保證金率計算保證金 (保證金率已反映槓桿比例)
-            # 公式: 保證金 = 單位數 * 合約大小 * 價格 * 保證金率
-            # 其中保證金率 = 1 / 槓桿比例 (例如0.02對應50倍槓桿)
+        if abs(new_units) > Decimal('1e-9') and trade_price_qc > Decimal('0'):            # 使用Oanda官方保證金計算公式 (符合官方規範)
+            # 公式: Margin_Used = Margin_Rate × Trade_Quantity × Instrument_To_Home_Currency_Conversion_Rate
+            # 其中保證金率 = 1 / 槓桿比例 (例如0.03333對應30倍槓桿)
             margin_required_qc = abs(new_units) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
-              # 根據波動性增加額外保證金要求 (Oanda會根據市場波動動態調整)
-            # 降低波動性因子以避免過度保證金要求
-            atr_ratio = self.atr_values_qc[slot_idx] / trade_price_qc if trade_price_qc > 0 else Decimal('0')
-            # 使用更合理的波動性調整：最大2.5倍而非5倍
-            volatility_factor = Decimal('1.0') + min(atr_ratio * Decimal('2.5'), Decimal('1.5'))  # 限制最大1.5倍額外保證金
-            margin_required_qc *= volatility_factor
             
-            # 轉換為賬戶貨幣
+            # 轉換為賬戶貨幣 (Oanda官方標準：不需要額外的波動性調整或安全緩衝)
             self.margin_used_per_position_ac[slot_idx] = margin_required_qc * exchange_rate_qc_to_ac
-            
-            # 增加保證金緩衝區到5%以提供更好的安全邊際
-            margin_buffer = Decimal('0.05')  # 從2%提升到5%
-            self.margin_used_per_position_ac[slot_idx] *= (Decimal('1.0') + margin_buffer)
         else:
             self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
 
@@ -607,15 +596,10 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
             if trade_price_qc <= Decimal('0'):
                 logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid trade price.")
-                continue
-
-            # 精確保證金檢查（Oanda實時風控）
-            # 使用從API獲取的合約大小和保證金率計算保證金 (保證金率已反映槓桿比例)
+                continue            # 精確保證金檢查（Oanda官方標準）
+            # 使用Oanda官方保證金計算公式 (符合官方規範)
             margin_required_qc = abs(units_to_trade) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
-            # 根據波動性增加額外保證金要求 (Oanda會根據市場波動動態調整)
-            volatility_factor = Decimal('1.0') + (self.atr_values_qc[slot_idx] / trade_price_qc) * Decimal('5.0')
-            margin_required_qc *= volatility_factor
-            # 轉換為賬戶貨幣
+            # 轉換為賬戶貨幣 (不需要額外的波動性調整)
             margin_required_ac = margin_required_qc * exchange_rate_qc_to_ac
             
             if margin_required_ac > self.cash * Decimal('0.9'):  # 保留10%現金緩衝
@@ -624,7 +608,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             
             _t_margin_check_start = time.perf_counter()
             projected_new_units = current_units + units_to_trade
-            projected_margin_required_qc = abs(projected_new_units) * trade_price_qc * Decimal(str(details.margin_rate))
+            projected_margin_required_qc = abs(projected_new_units) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
             projected_margin_required_ac = projected_margin_required_qc * exchange_rate_qc_to_ac
             current_margin_for_slot_ac = self.margin_used_per_position_ac[slot_idx]
             projected_total_margin_used_ac = self.total_margin_used_ac - current_margin_for_slot_ac + projected_margin_required_ac

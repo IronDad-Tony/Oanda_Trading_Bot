@@ -63,17 +63,17 @@ class InstrumentDetails:
         self.financing_long_rate = financing_long_rate; self.financing_short_rate = financing_short_rate
         self.is_forex = is_forex
         self.pip_value_in_quote_currency_per_unit = Decimal(str(10**pip_location))
-        
-        # 根據品種類型設置合約大小
+          # 根據品種類型設置合約大小
+        # For Oanda, trade units already represent the notional amount
         if type == "METAL":
-            # 黃金白銀等貴金屬 (XAU, XAG)
-            self.contract_size = Decimal('100')  # 100盎司
+            # 黃金白銀等貴金屬 (XAU, XAG) - units are in troy ounces
+            self.contract_size = Decimal('1')  # 1 unit = 1 troy ounce
         elif type == "CFD":
             # 指數CFD
             self.contract_size = Decimal('1')
         else:
-            # 外匯貨幣對
-            self.contract_size = Decimal('100000')  # 標準合約大小
+            # 外匯貨幣對 - units already represent base currency amount
+            self.contract_size = Decimal('1')  # 1 unit = 1 unit of base currency
 
     def round_units(self, units: Union[float, Decimal, str]) -> Decimal: # Union 已導入
         units_decimal = Decimal(str(units)); min_unit_d = self.minimum_trade_size
