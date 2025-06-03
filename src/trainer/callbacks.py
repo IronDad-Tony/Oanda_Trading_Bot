@@ -245,11 +245,29 @@ class UniversalCheckpointCallback(BaseCallback):
         current_time = datetime.now(timezone.utc)
         # Update shared data manager with current training metrics
         if self.shared_data_manager is not None:
-            step_count = self.num_timesteps
-
-            # Safely get metrics from SB3 logger; provide defaults if not found
-            actor_loss = self.model.logger.name_to_value.get('train/actor_loss', 0.0)
-            critic_loss = self.model.logger.name_to_value.get('train/critic_loss', 0.0)
+            step_count = self.num_timesteps            # Safely get metrics from SB3 logger; provide defaults if not found
+            # Debug: Print all available metrics every 100 steps to identify correct names
+            if self.n_calls % 100 == 0:
+                available_metrics = list(self.model.logger.name_to_value.keys())
+                logger.info(f"Available SB3 logger metrics: {available_metrics}")
+              # Try multiple possible metric names for SAC - Fixed to handle negative values properly
+            actor_loss = None
+            for metric_name in ['train/actor_loss', 'train/policy_loss', 'train/ent_loss']:
+                value = self.model.logger.name_to_value.get(metric_name)
+                if value is not None:
+                    actor_loss = float(value)
+                    break
+            if actor_loss is None:
+                actor_loss = 0.0
+            
+            critic_loss = None
+            for metric_name in ['train/critic_loss', 'train/qf_loss', 'train/qf1_loss', 'train/qf2_loss']:
+                value = self.model.logger.name_to_value.get(metric_name)
+                if value is not None:
+                    critic_loss = float(value)
+                    break
+            if critic_loss is None:
+                critic_loss = 0.0
             current_step_reward = 0.0
             # self.locals often contains 'rewards' for the last step
             if 'rewards' in self.locals and isinstance(self.locals['rewards'], np.ndarray) and self.locals['rewards'].size > 0:
@@ -318,11 +336,9 @@ class UniversalCheckpointCallback(BaseCallback):
                     
         except Exception as e_grad:
             logger.warning(f"梯度範數計算錯誤: {e_grad}")
-            grad_norm_val = 0.0
-
-        # Debug: Log the actual values being passed to shared_data_manager every 100 steps
+            grad_norm_val = 0.0        # Debug: Log the actual values being passed to shared_data_manager every 100 steps
         if self.n_calls % 100 == 0:
-            logger.info(f"Step {step_count}: L2={l2_norm_val:.6f}, Grad={grad_norm_val:.6f}, Actor_Loss={actor_loss}, Critic_Loss={critic_loss}")        # 將所有指標傳遞給shared_data_manager，每步都傳遞
+            logger.info(f"Step {step_count}: L2={l2_norm_val:.6f}, Grad={grad_norm_val:.6f}, Actor_Loss={actor_loss} (type: {type(actor_loss)}), Critic_Loss={critic_loss} (type: {type(critic_loss)})")# 將所有指標傳遞給shared_data_manager，每步都傳遞
         self.shared_data_manager.add_training_metric(
             step=step_count,
             reward=current_step_reward,

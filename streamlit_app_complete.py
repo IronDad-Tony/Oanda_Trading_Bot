@@ -865,6 +865,61 @@ def create_real_time_charts():
     
     with chart_tab2:
         st.subheader("Model Diagnostics")
+          # Debug information for loss data
+        if not df.empty:
+            st.write("**Debug Information:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write(f"DataFrame shape: {df.shape}")
+                st.write(f"Columns: {list(df.columns)}")
+                
+                # Check for negative values and show Y-axis type
+                has_negative_actor = False
+                has_negative_critic = False
+                if 'actor_loss' in df.columns and df['actor_loss'].notna().any():
+                    has_negative_actor = df['actor_loss'].min() < 0
+                if 'critic_loss' in df.columns and df['critic_loss'].notna().any():
+                    has_negative_critic = df['critic_loss'].min() < 0
+                
+                has_negative_values = has_negative_actor or has_negative_critic
+                yaxis_type = "linear" if has_negative_values else "log"
+                
+                st.write(f"**Chart Configuration:**")
+                st.write(f"Actor has negative: {has_negative_actor}")
+                st.write(f"Critic has negative: {has_negative_critic}")
+                st.write(f"Y-axis type: {yaxis_type}")
+            with col2:
+                if 'actor_loss' in df.columns:
+                    actor_loss_stats = {
+                        'Count': len(df),
+                        'Non-NaN count': df['actor_loss'].notna().sum(),
+                        'NaN count': df['actor_loss'].isna().sum(),
+                        'Min': df['actor_loss'].min() if df['actor_loss'].notna().any() else 'N/A',
+                        'Max': df['actor_loss'].max() if df['actor_loss'].notna().any() else 'N/A',
+                        'Mean': df['actor_loss'].mean() if df['actor_loss'].notna().any() else 'N/A'
+                    }
+                    st.write("**Actor Loss Stats:**")
+                    for k, v in actor_loss_stats.items():
+                        st.write(f"{k}: {v}")
+            with col3:
+                if 'critic_loss' in df.columns:
+                    critic_loss_stats = {
+                        'Count': len(df),
+                        'Non-NaN count': df['critic_loss'].notna().sum(),
+                        'NaN count': df['critic_loss'].isna().sum(),
+                        'Min': df['critic_loss'].min() if df['critic_loss'].notna().any() else 'N/A',
+                        'Max': df['critic_loss'].max() if df['critic_loss'].notna().any() else 'N/A',
+                        'Mean': df['critic_loss'].mean() if df['critic_loss'].notna().any() else 'N/A'
+                    }
+                    st.write("**Critic Loss Stats:**")
+                    for k, v in critic_loss_stats.items():
+                        st.write(f"{k}: {v}")
+            
+            # Show first few and last few rows
+            st.write("**First 5 rows:**")
+            st.dataframe(df.head()[['step', 'actor_loss', 'critic_loss', 'reward', 'portfolio_value']])
+            st.write("**Last 5 rows:**")
+            st.dataframe(df.tail()[['step', 'actor_loss', 'critic_loss', 'reward', 'portfolio_value']])
         
         fig_loss = go.Figure()
         if 'actor_loss' in df.columns and df['actor_loss'].notna().any():
@@ -882,12 +937,21 @@ def create_real_time_charts():
                 mode='lines',
                 name='Critic Loss',
                 line=dict(color='green', width=2)
-            ))
+            ))        # Check if we have negative values in losses to determine y-axis type
+        has_negative_values = False
+        if 'actor_loss' in df.columns and df['actor_loss'].notna().any():
+            has_negative_values = has_negative_values or (df['actor_loss'].min() < 0)
+        if 'critic_loss' in df.columns and df['critic_loss'].notna().any():
+            has_negative_values = has_negative_values or (df['critic_loss'].min() < 0)
+        
+        # Use linear scale if we have negative values, otherwise log scale for better visualization
+        yaxis_type = "linear" if has_negative_values else "log"
+        
         fig_loss.update_layout(
             title="Training Loss Curves",
             xaxis_title="Training Steps (Session)", # X-axis label updated
             yaxis_title="Loss",
-            yaxis_type="log", # Consider making this conditional or providing a toggle if losses can be zero/negative
+            yaxis_type=yaxis_type,
             height=400
         )
         st.plotly_chart(fig_loss, use_container_width=True)
