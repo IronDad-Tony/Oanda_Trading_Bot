@@ -67,7 +67,7 @@ class QuantumEnhancedSAC:
                  learning_rate: Union[float, Callable[[float], float]] = SAC_LEARNING_RATE,
                  batch_size: int = SAC_BATCH_SIZE, # SAC_BATCH_SIZE 現在是 64
                  buffer_size: Optional[int] = None, # 改為直接接收 buffer_size
-buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
+                 buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
                  learning_starts_factor: int = SAC_LEARNING_STARTS_FACTOR,
                  gamma: float = SAC_GAMMA,
                  ent_coef: Union[str, float] = SAC_ENT_COEF,
@@ -79,25 +79,64 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
                  seed: Optional[int] = None,
                  custom_objects: Optional[Dict[str, Any]] = None,
                  device: Union[torch.device, str] = DEVICE,
-                 use_amp: bool = USE_AMP
-                ):
+                 use_amp: bool = USE_AMP                ):
         self.env = env
         # 使用传入的 policy_class（默认为 CustomSACPolicy）
         self.policy_class = policy_class
 
-        # 准备 policy_kwargs，用自定义 CustomSACPolicy 和 TransformerFeatureExtractor
+        # 設置實例屬性
+        self.use_amp = use_amp # This is the USE_AMP from common.config
+          # 計算 buffer_size（如果沒有提供）
+        if buffer_size is None:
+            # 根據環境中的貨幣對數量和因子計算 buffer_size
+            # 先嘗試從環境獲取 num_symbols，如果沒有則用默認值
+            try:
+                if hasattr(self.env, 'num_active_symbols_in_slots'):
+                    num_symbols = self.env.num_active_symbols_in_slots
+                elif hasattr(self.env, 'envs') and len(self.env.envs) > 0:
+                    # DummyVecEnv case
+                    first_env = self.env.envs[0]
+                    if hasattr(first_env, 'num_tradable_symbols_this_episode'):
+                        num_symbols = first_env.num_tradable_symbols_this_episode
+                    elif hasattr(first_env, 'active_symbols_for_episode'):
+                        num_symbols = len(first_env.active_symbols_for_episode)
+                    else:
+                        num_symbols = 5  # 默認值
+                else:
+                    num_symbols = 5  # 默認值
+            except:
+                num_symbols = 5  # 默認值
+            
+            self.buffer_size = max(10000, num_symbols * buffer_size_factor)
+        else:
+            self.buffer_size = buffer_size
+            
+        # 計算 learning_starts
+        self.learning_starts = max(1000, self.buffer_size // learning_starts_factor)
+        
+        # 設置優化的批次大小
+        self.optimized_batch_size = min(batch_size, self.buffer_size // 4)
+        
+        # 設置 TensorBoard 日誌路徑
+        self.tensorboard_log_path = tensorboard_log_path
+
+        # 準備 policy_kwargs，合併用戶提供的和默認的設置
         from src.agent.transformer_feature_extractor import TransformerFeatureExtractor
-        policy_kwargs = dict(
+        default_policy_kwargs = dict(
             net_arch=dict(pi=[256, 256], qf=[256, 256]),
             features_extractor_class=TransformerFeatureExtractor,
             features_extractor_kwargs={"transformer_kwargs": {}},
         )
-
-        self.use_amp = use_amp # This is the USE_AMP from common.config
+        
+        # 如果用戶提供了 policy_kwargs，則合併
+        if policy_kwargs is not None:
+            default_policy_kwargs.update(policy_kwargs)
+        self.policy_kwargs = default_policy_kwargs
 
         # 優化設備配置
         self.device = self._setup_device(device)
         logger.info(f"量子增強SAC: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
+        logger.info(f"Buffer size: {self.buffer_size}, Learning starts: {self.learning_starts}, Batch size: {self.optimized_batch_size}")
         
         # 创建 SAC 智能体，使用 CustomSACPolicy
         self.agent = SAC(
@@ -105,7 +144,7 @@ buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             buffer_size=self.buffer_size, learning_starts=self.learning_starts,
             batch_size=self.optimized_batch_size, tau=tau, gamma=gamma,
             train_freq=(train_freq_steps, "step"), gradient_steps=gradient_steps,
-            ent_coef=ent_coef, policy_kwargs=policy_kwargs,
+            ent_coef=ent_coef, policy_kwargs=self.policy_kwargs,
             verbose=verbose, seed=seed, device=self.device,
             tensorboard_log=self.tensorboard_log_path
         )
