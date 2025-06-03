@@ -116,18 +116,17 @@ class QuantumEnhancedSAC:
           # 設置優化的批次大小
         self.optimized_batch_size = min(batch_size, self.buffer_size // 4)        # 設置 TensorBoard 日誌路徑，使用統一的目錄結構
         if tensorboard_log_path is None:
-            # 使用統一的 TensorBoard 目錄
+            # 使用統一的 TensorBoard 目錄，直接指向根目錄以避免層次過深
             self.tensorboard_log_path = str(LOGS_DIR / "tensorboard")
             # 確保目錄存在
             os.makedirs(self.tensorboard_log_path, exist_ok=True)
             
-            # 創建基於時間戳的會話名稱，直接在 tensorboard 目錄下
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.session_subdir = f"SAC_session_{timestamp}"
-            logger.info(f"TensorBoard 將記錄到: {self.tensorboard_log_path}/{self.session_subdir}")
+            # 不再創建子目錄，直接使用主目錄
+            self.session_subdir = ""  # 空字符串表示直接使用根目錄
+            logger.info(f"TensorBoard 將記錄到: {self.tensorboard_log_path}")
         else:
             self.tensorboard_log_path = tensorboard_log_path
-            self.session_subdir = "SAC_1"
+            self.session_subdir = ""
 
         # 準備 policy_kwargs，合併用戶提供的和默認的設置
         from src.agent.transformer_feature_extractor import TransformerFeatureExtractor
@@ -140,16 +139,16 @@ class QuantumEnhancedSAC:
         # 如果用戶提供了 policy_kwargs，則合併
         if policy_kwargs is not None:
             default_policy_kwargs.update(policy_kwargs)
-        self.policy_kwargs = default_policy_kwargs
-
-        # 優化設備配置
+        self.policy_kwargs = default_policy_kwargs        # 優化設備配置
         self.device = self._setup_device(device)
+        
         logger.info(f"量子增強SAC: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
-        logger.info(f"Buffer size: {self.buffer_size}, Learning starts: {self.learning_starts}, Batch size: {self.optimized_batch_size}")          # 创建 SAC 智能体，使用 CustomSACPolicy，直接使用 TensorBoard 根目錄
-        # 為當前訓練會話創建專用的 TensorBoard 日誌目錄
-        full_tensorboard_path = os.path.join(self.tensorboard_log_path, self.session_subdir)
-        os.makedirs(full_tensorboard_path, exist_ok=True)
-        # 使用該會話目錄做為 SAC tensorboard_log
+        logger.info(f"Buffer size: {self.buffer_size}, Learning starts: {self.learning_starts}, Batch size: {self.optimized_batch_size}")
+        
+        # 創建 SAC 智能體，直接使用 TensorBoard 根目錄
+        # 使用主 TensorBoard 目錄，不創建額外的子目錄
+        full_tensorboard_path = self.tensorboard_log_path
+        
         self.agent = SAC(
             policy=self.policy_class, env=self.env, learning_rate=learning_rate,
             buffer_size=self.buffer_size, learning_starts=self.learning_starts,
@@ -364,8 +363,7 @@ class QuantumEnhancedSAC:
         rewards_tensor = torch.FloatTensor(rewards).to(self.device)
         probs = F.softmax(self.quantum_policy.amplitudes, dim=0)
           # 計算策略損失
-        loss = -torch.mean(torch.sum(torch.log(probs) * rewards_tensor, dim=1))
-          # 優化振幅參數
+        loss = -torch.mean(torch.sum(torch.log(probs) * rewards_tensor, dim=1))        # 優化振幅參數
         self.quantum_policy.quantum_annealing_step(rewards_tensor)
 
     def save(self, path: Union[str, Path]):
@@ -390,10 +388,9 @@ class QuantumEnhancedSAC:
             self.agent = SAC.load(path, env=env or self.env, custom_objects=self.custom_objects, device=self.agent.device)
             logger.info(f"智能體模型已從 {path} 加載。")
             
-            # 使用統一的 TensorBoard 目錄，而不是創建新的時間戳目錄
-            current_time_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.session_subdir = f"SAC_loaded_{current_time_str}"
-            logger.info(f"模型載入後，TensorBoard 將記錄到: {self.tensorboard_log_path}/{self.session_subdir}")
+            # 使用統一的 TensorBoard 目錄，不創建新的時間戳目錄
+            self.session_subdir = ""
+            logger.info(f"模型載入後，TensorBoard 將記錄到: {self.tensorboard_log_path}")
             
             # 重新配置 TensorBoard 日誌路徑
             if hasattr(self.agent, 'tensorboard_log') and self.agent.tensorboard_log:
@@ -401,7 +398,7 @@ class QuantumEnhancedSAC:
                 sb3_logger = sb3_logger_configure(self.tensorboard_log_path, ["stdout", "csv", "tensorboard"])
                 self.agent.set_logger(sb3_logger)
                 
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"加載智能體模型失敗: {e}", exc_info=True)
             raise
 
