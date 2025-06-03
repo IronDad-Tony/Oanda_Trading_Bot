@@ -113,6 +113,10 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.dataset = dataset
         self.instrument_info_manager = instrument_info_manager
         self.initial_capital = Decimal(str(initial_capital))
+        
+        # 初始化統一的貨幣轉換管理器
+        from src.data_manager.currency_manager import CurrencyDependencyManager
+        self.currency_manager = CurrencyDependencyManager(ACCOUNT_CURRENCY, apply_oanda_markup=True)
         if commission_percentage_override is not None:
             self.commission_percentage = Decimal(str(commission_percentage_override))
         else:
@@ -279,98 +283,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
 
     def _get_exchange_rate_to_account_currency(self, from_currency: str, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Decimal:
         """
-        根據Oanda實際轉換規則實現的匯率轉換邏輯：
-        1. 優先使用直接貨幣對報價
-        2. 次選通過USD中轉（Oanda標準做法）
-        3. 最後嘗試其他主要貨幣中轉
+        使用統一的CurrencyDependencyManager進行貨幣轉換
+        包含OANDA 0.5%標記以確保真實交易成本模擬
         """
-        from_currency_upper = from_currency.upper()
-        account_currency_upper = ACCOUNT_CURRENCY.upper()
-        
-        # 1. 相同貨幣直接返回1.0
-        if from_currency_upper == account_currency_upper:
-            return Decimal('1.0')
-        
-        # 2. 嘗試直接匯率 (AUD_CAD)
-        direct_pair = f"{from_currency_upper}_{account_currency_upper}"
-        direct_rate = self._get_specific_rate(from_currency_upper, account_currency_upper, current_prices_map)
-        if direct_rate and direct_rate > 0:
-            return direct_rate
-        
-        # 3. 嘗試反向匯率 (CAD_AUD)
-        reverse_pair = f"{account_currency_upper}_{from_currency_upper}"
-        reverse_rate = self._get_specific_rate(account_currency_upper, from_currency_upper, current_prices_map)
-        if reverse_rate and reverse_rate > 0:
-            return Decimal('1.0') / reverse_rate
-        
-        # 4. 標準Oanda轉換：通過USD中轉
-        # 修正USD中轉邏輯錯誤
-        if from_currency_upper != "USD" and account_currency_upper != "USD":
-            # 源貨幣→USD→目標貨幣
-            rate_from_to_usd = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
-            rate_usd_to_ac = self._get_specific_rate("USD", account_currency_upper, current_prices_map)
-            if rate_from_to_usd and rate_usd_to_ac and rate_from_to_usd > 0 and rate_usd_to_ac > 0:
-                rate = rate_from_to_usd * rate_usd_to_ac
-                logger.debug(f"通過USD中轉成功: {from_currency}→USD→{ACCOUNT_CURRENCY} = {rate}")
-                return rate
-        elif from_currency_upper != "USD":
-            # 源貨幣→USD (目標貨幣是USD)
-            rate = self._get_specific_rate(from_currency_upper, "USD", current_prices_map)
-            if rate and rate > 0:
-                logger.debug(f"源貨幣→USD成功: {from_currency}→USD = {rate}")
-                return rate
-        elif account_currency_upper != "USD":
-            # USD→目標貨幣 (源貨幣是USD)
-            rate = self._get_specific_rate("USD", account_currency_upper, current_prices_map)
-            if rate and rate > 0:
-                logger.debug(f"USD→目標貨幣成功: USD→{ACCOUNT_CURRENCY} = {rate}")
-                return rate
-        
-        # 5. 加強版：非標準貨幣對通過EUR中轉
-        if from_currency_upper != "EUR":
-            rate_from_eur = self._get_specific_rate(from_currency_upper, "EUR", current_prices_map)
-        else:
-            rate_from_eur = Decimal('1.0')
-            
-        if account_currency_upper != "EUR":
-            rate_eur_to_ac = self._get_specific_rate("EUR", account_currency_upper, current_prices_map)
-        else:
-            rate_eur_to_ac = Decimal('1.0')
-            
-        if rate_from_eur and rate_eur_to_ac and rate_from_eur > 0 and rate_eur_to_ac > 0:
-            return rate_from_eur * rate_eur_to_ac
-        
-        # 6. 終極備援：嘗試其他主要貨幣中轉
-        for intermediate in ["GBP", "JPY", "CHF", "CAD", "AUD"]:
-            if intermediate == from_currency_upper or intermediate == account_currency_upper:
-                continue
-                
-            # 獲取中轉匯率
-            rate_to_intermediate = self._get_specific_rate(from_currency_upper, intermediate, current_prices_map)
-            rate_from_intermediate = self._get_specific_rate(intermediate, account_currency_upper, current_prices_map)
-                
-            if rate_to_intermediate and rate_from_intermediate and rate_to_intermediate > 0 and rate_from_intermediate > 0:
-                return rate_to_intermediate * rate_from_intermediate
-        
-        # 7. 安全後備 - 添加更詳細的調試信息
-        available_pairs = ", ".join(current_prices_map.keys())
-        logger.error(f"Oanda標準轉換失敗: {from_currency}→{ACCOUNT_CURRENCY}，所有路徑均失敗:")
-        logger.error(f"  嘗試的直接匯率: {direct_pair} 和 {reverse_pair}")
-        logger.error(f"  嘗試的USD中轉路徑: {from_currency}→USD→{ACCOUNT_CURRENCY}")
-        logger.error(f"  嘗試的EUR中轉路徑: {from_currency}→EUR→{ACCOUNT_CURRENCY}")
-        
-        # 記錄中間貨幣轉換狀態
-        for intermediate in ["USD", "EUR", "GBP", "JPY"]:
-            if from_currency_upper != intermediate:
-                rate_from_inter = self._get_specific_rate(from_currency_upper, intermediate, current_prices_map)
-                logger.error(f"    {from_currency}→{intermediate}: {'可用' if rate_from_inter else '不可用'}")
-            if account_currency_upper != intermediate:
-                rate_inter_to_ac = self._get_specific_rate(intermediate, account_currency_upper, current_prices_map)
-                logger.error(f"    {intermediate}→{ACCOUNT_CURRENCY}: {'可用' if rate_inter_to_ac else '不可用'}")
-        
-        logger.error(f"當前可用的貨幣對: [{available_pairs}]")
-        logger.error("使用安全值1.0進行轉換，這可能導致計算錯誤!")
-        return Decimal('1.0')
+        return self.currency_manager.convert_to_account_currency(
+            from_currency, current_prices_map, is_credit=True
+        )
     
     def _update_atr_values(self, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
         for slot_idx in range(self.num_env_slots):
