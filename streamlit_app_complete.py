@@ -575,7 +575,8 @@ def training_worker(trainer_instance, shared_manager, symbols, total_timesteps):
         loop.close()
         logger.info("Training worker: Asyncio loop closed. Thread finishing.")
 
-def start_training(symbols, start_date, end_date, total_timesteps, save_freq, eval_freq):
+def start_training(symbols, start_date, end_date, total_timesteps, save_freq, eval_freq, 
+                   initial_capital, risk_percentage, atr_stop_loss_multiplier, max_position_percentage):
     """Start training with enhanced error handling and session state management."""
     
     # Ensure session state is initialized (though main() should handle this first)
@@ -616,12 +617,18 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
                 save_freq=save_freq,
                 eval_freq=eval_freq,
                 model_name_prefix="sac_universal_trader",
+                # Pass UI parameters to trainer
+                initial_capital=initial_capital,
+                risk_percentage=risk_percentage,
+                atr_stop_loss_multiplier=atr_stop_loss_multiplier,
+                max_position_percentage=max_position_percentage,
                 # The trainer should ideally get the shared_manager via a method or init arg
                 # For now, we pass it to the worker, which can set it if the trainer supports it.
             )
             st.session_state.trainer = current_trainer # Store the new trainer in session state
             trainer_instance_for_thread = current_trainer
             logger.info(f"New EnhancedUniversalTrainer instance created and stored in session_state.trainer: {current_trainer}")
+            logger.info(f"UI Parameters passed to trainer - Initial Capital: {initial_capital}, Risk %: {risk_percentage}, ATR Mult: {atr_stop_loss_multiplier}, Max Pos %: {max_position_percentage}")
         else:
             st.session_state.trainer = None 
             logger.warning("TRAINER_AVAILABLE is False. Real training will not occur; simulation will be used by worker.")
@@ -1788,12 +1795,12 @@ def main():
                     else:
                         # --- Data download progress bar before training ---
                         logger.info("main(): 'Start Training' button clicked. Proceeding with data download and start_training.")
-                        download_data_with_progress(selected_symbols, start_date, end_date)
-                        # Pass the actual initial_capital, risk_pct etc. to start_training if they need to override config
+                        download_data_with_progress(selected_symbols, start_date, end_date)                        # Pass the actual initial_capital, risk_pct etc. to start_training if they need to override config
                         # For now, assuming EnhancedUniversalTrainer uses values from config.py or its defaults
                         success = start_training(
                             selected_symbols, start_date, end_date, 
-                            total_timesteps, save_freq, eval_freq
+                            total_timesteps, save_freq, eval_freq,
+                            initial_capital, risk_pct, atr_mult, max_pos_pct
                         )
                         if success:
                             st.success("Training start initiated successfully! Monitor progress below.")
