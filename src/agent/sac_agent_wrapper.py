@@ -113,12 +113,16 @@ class QuantumEnhancedSAC:
             
         # 計算 learning_starts
         self.learning_starts = max(1000, self.buffer_size // learning_starts_factor)
-        
-        # 設置優化的批次大小
+          # 設置優化的批次大小
         self.optimized_batch_size = min(batch_size, self.buffer_size // 4)
         
-        # 設置 TensorBoard 日誌路徑
-        self.tensorboard_log_path = tensorboard_log_path
+        # 設置 TensorBoard 日誌路徑，如果未提供則使用默認路徑
+        if tensorboard_log_path is None:
+            # 創建基於時間戳的 TensorBoard 日誌目錄
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.tensorboard_log_path = str(LOGS_DIR / f"sac_tensorboard_logs_{timestamp}")
+        else:
+            self.tensorboard_log_path = tensorboard_log_path
 
         # 準備 policy_kwargs，合併用戶提供的和默認的設置
         from src.agent.transformer_feature_extractor import TransformerFeatureExtractor
