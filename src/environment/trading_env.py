@@ -101,7 +101,8 @@ TIMESTEPS = _config_values_env_v5.get("TIMESTEPS", 128); MAX_SYMBOLS_ALLOWED = _
 
 class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
     metadata = {'render_modes': ['human', 'array'], 'render_fps': 10}
-      def __init__(self, dataset: UniversalMemoryMappedDataset, instrument_info_manager: InstrumentInfoManager, active_symbols_for_episode: List[str], # type: ignore
+    
+    def __init__(self, dataset: UniversalMemoryMappedDataset, instrument_info_manager: InstrumentInfoManager, active_symbols_for_episode: List[str], # type: ignore
                  initial_capital: float = float(DEFAULT_INITIAL_CAPITAL), max_episode_steps: Optional[int] = None,
                  commission_percentage_override: Optional[float] = None, reward_config: Optional[Dict[str, Union[float, Decimal]]] = None,
                  max_account_risk_per_trade: float = float(MAX_ACCOUNT_RISK_PERCENTAGE),
@@ -113,7 +114,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.dataset = dataset
         self.instrument_info_manager = instrument_info_manager
         self.initial_capital = Decimal(str(initial_capital))
-          # 初始化統一的貨幣轉換管理器
+        # 初始化統一的貨幣轉換管理器
         from src.data_manager.currency_manager import CurrencyDependencyManager
         self.currency_manager = CurrencyDependencyManager(ACCOUNT_CURRENCY, apply_oanda_markup=True)
         if commission_percentage_override is not None:
