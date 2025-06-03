@@ -371,15 +371,16 @@ class UniversalCheckpointCallback(BaseCallback):
                     self.interrupted = True
                     return False 
             elif current_metric > self.es_best_metric_val :
-                 self.es_best_metric_val = current_metric        # 3. 記錄Transformer範數（定期記錄到SB3日誌）
-        if self.n_calls > 0 and self.n_calls % self.log_transformer_norm_freq == 0:
-            # 記錄到 SB3 logger 用於 TensorBoard
-            if l2_norm_val > 0:
-                self.logger.record("train/transformer_l2_norm", l2_norm_val)
+                 self.es_best_metric_val = current_metric        # 3. 記錄Transformer範數（每步都記錄到SB3日誌）
+        # 記錄到 SB3 logger 用於 TensorBoard
+        if l2_norm_val > 0:
+            self.logger.record("train/transformer_l2_norm", l2_norm_val)
+            if self.n_calls % 100 == 0:  # 每100步詳細log一次，避免過多log
                 logger.debug(f"Transformer L2 Norm @{self.num_timesteps}: {l2_norm_val:.4f}")
-            
-            if grad_norm_val > 0:
-                self.logger.record("train/gradient_norm", grad_norm_val)
+        
+        if grad_norm_val > 0:
+            self.logger.record("train/gradient_norm", grad_norm_val)
+            if self.n_calls % 100 == 0:  # 每100步詳細log一次，避免過多log
                 logger.debug(f"Gradient Norm @{self.num_timesteps}: {grad_norm_val:.4f}")
         
         # 4. 數值穩定性檢查和梯度裁剪

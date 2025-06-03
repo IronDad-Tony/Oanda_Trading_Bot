@@ -93,8 +93,8 @@ EARLY_STOPPING_MIN_DELTA_PERCENT = 0.1 # 至少改善 0.1% 才算顯著 (相對�
 EARLY_STOPPING_MIN_EVALS = 20 # 至少評估20次後才開始檢查早停
 
 # Transformer 權重範數記錄頻率 (用於 UniversalCheckpointCallback)
-# 降低頻率以提高L2範數和梯度範數的更新頻率
-LOG_TRANSFORMER_NORM_FREQ_STEPS = 50  # 從1000降低到50，每50步記錄一次
+# 設定為每步記錄L2範數和梯度範數
+LOG_TRANSFORMER_NORM_FREQ_STEPS = 1  # 每1步記錄一次（即每步都記錄）
 
 # 劃分訓練集和驗證集的時間點 (ISO格式 UTC)
 # 示例：假設我們總共有從 2023-01-01 到 2024-01-01 的數據
