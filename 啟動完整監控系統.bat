@@ -61,7 +61,7 @@ echo.
 echo 正在啟動服務...
 echo.
 
-REM 啟動 TensorBoard (在背景執行)
+REM 啟動 TensorBoard (在背景執行) - 使用統一的目錄
 echo 啟動 TensorBoard...
 start "TensorBoard" cmd /c "tensorboard --logdir=logs\tensorboard --port=6006 --host=localhost"
 
