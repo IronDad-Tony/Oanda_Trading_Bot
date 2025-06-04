@@ -170,47 +170,71 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             for key, value in reward_config.items():
                 if key in default_reward_config_decimal: default_reward_config_decimal[key] = Decimal(str(value))
         self.reward_config = default_reward_config_decimal
-        
-        # Initialize Enhanced Reward Calculator if available
+          # Initialize Reward Calculators
         self.enhanced_reward_calculator = None
+        self.progressive_reward_calculator = None
         self.use_enhanced_rewards = False
-        if 'EnhancedRewardCalculator' in globals() and EnhancedRewardCalculator is not None:
-            try:
-                # Enhanced reward configuration with improved parameters
-                enhanced_config = {
-                    "portfolio_log_return_factor": Decimal('0.8'),
-                    "risk_adjusted_return_factor": Decimal('1.2'),  # Increased from 0.5
-                    "max_drawdown_penalty_factor": Decimal('1.5'),  # Decreased from 2.0
-                    "commission_penalty_factor": Decimal('0.8'),    # Decreased from 1.0
-                    "margin_call_penalty": Decimal('-50.0'),         # Less harsh than -100
-                    "profit_target_bonus": Decimal('0.3'),          # Increased from 0.1
-                    "hold_penalty_factor": Decimal('0.0005'),       # Reduced from 0.001
-                    "win_rate_incentive_factor": Decimal('1.0'),    # New parameter
-                    "trend_following_bonus": Decimal('0.5'),        # New parameter
-                    "quick_stop_loss_bonus": Decimal('0.1'),        # New parameter
-                    "compound_holding_factor": Decimal('0.2'),      # New parameter
-                }
-                
-                # Override with any user-provided config
-                if reward_config:
-                    for key, value in reward_config.items():
-                        if key in enhanced_config:
-                            enhanced_config[key] = Decimal(str(value))
-                        elif key == "use_enhanced_rewards":
-                            self.use_enhanced_rewards = bool(value)
-                
-                self.enhanced_reward_calculator = EnhancedRewardCalculator(
-                    initial_capital=self.initial_capital,
-                    config=enhanced_config
-                )
-                self.use_enhanced_rewards = True
-                logger.info("EnhancedRewardCalculator successfully initialized with improved parameters")
-            except Exception as e:
-                logger.warning(f"Failed to initialize EnhancedRewardCalculator: {e}. Falling back to standard rewards.")
-                self.enhanced_reward_calculator = None
-                self.use_enhanced_rewards = False
-        else:
-            logger.info("EnhancedRewardCalculator not available. Using standard reward calculation.")
+        self.use_progressive_rewards = False
+        
+        # Check reward type preference from config
+        reward_type = reward_config.get('reward_type', 'progressive') if reward_config else 'progressive'
+        
+        # Try to initialize Progressive Reward Calculator first (new default)
+        try:
+            from .progressive_reward_calculator import ProgressiveRewardCalculator
+            
+            progressive_config = {}
+            if reward_config and 'progressive_config' in reward_config:
+                progressive_config = reward_config['progressive_config']
+            
+            self.progressive_reward_calculator = ProgressiveRewardCalculator(
+                initial_capital=self.initial_capital,
+                config=progressive_config
+            )
+            self.use_progressive_rewards = True
+            logger.info("ProgressiveRewardCalculator successfully initialized - using 3-stage training approach")
+            
+        except Exception as e:
+            logger.warning(f"Failed to initialize ProgressiveRewardCalculator: {e}. Trying EnhancedRewardCalculator...")
+            
+            # Fallback to Enhanced Reward Calculator
+            if 'EnhancedRewardCalculator' in globals() and EnhancedRewardCalculator is not None:
+                try:
+                    # Enhanced reward configuration with improved parameters
+                    enhanced_config = {
+                        "portfolio_log_return_factor": Decimal('0.8'),
+                        "risk_adjusted_return_factor": Decimal('1.2'),  # Increased from 0.5
+                        "max_drawdown_penalty_factor": Decimal('1.5'),  # Decreased from 2.0
+                        "commission_penalty_factor": Decimal('0.8'),    # Decreased from 1.0
+                        "margin_call_penalty": Decimal('-50.0'),         # Less harsh than -100
+                        "profit_target_bonus": Decimal('0.3'),          # Increased from 0.1
+                        "hold_penalty_factor": Decimal('0.0005'),       # Reduced from 0.001
+                        "win_rate_incentive_factor": Decimal('1.0'),    # New parameter
+                        "trend_following_bonus": Decimal('0.5'),        # New parameter
+                        "quick_stop_loss_bonus": Decimal('0.1'),        # New parameter
+                        "compound_holding_factor": Decimal('0.2'),      # New parameter
+                    }
+                    
+                    # Override with any user-provided config
+                    if reward_config:
+                        for key, value in reward_config.items():
+                            if key in enhanced_config:
+                                enhanced_config[key] = Decimal(str(value))
+                            elif key == "use_enhanced_rewards":
+                                self.use_enhanced_rewards = bool(value)
+                    
+                    self.enhanced_reward_calculator = EnhancedRewardCalculator(
+                        initial_capital=self.initial_capital,
+                        config=enhanced_config
+                    )
+                    self.use_enhanced_rewards = True
+                    logger.info("EnhancedRewardCalculator successfully initialized as fallback")
+                except Exception as e2:
+                    logger.warning(f"Failed to initialize EnhancedRewardCalculator: {e2}. Using standard rewards.")
+                    self.enhanced_reward_calculator = None
+                    self.use_enhanced_rewards = False
+            else:
+                logger.info("No advanced reward calculators available. Using standard reward calculation.")
         
         self.peak_portfolio_value_episode: Decimal = self.initial_capital; self.max_drawdown_episode: Decimal = Decimal('0.0')
         obs_spaces = {
@@ -690,16 +714,77 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         info["reward_this_step"] = reward
         logger.debug(f"--- Step {self.episode_step_count} End. Total time: {time.perf_counter() - _step_time_start:.6f}s ---")
         return next_observation, reward, terminated, truncated, info
-    
+
     def _calculate_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
         """
-        計算強化學習獎勵函數，支援傳統與增強版獎勵計算
+        計算強化學習獎勵函數，支援三階段漸進式、增強版與傳統獎勵計算
         
-        如果啟用增強版獎勵計算器，則使用更先進的獎勵機制；
-        否則使用傳統的風險調整獎勵計算
+        優先級順序：
+        1. 漸進式獎勵計算器（三階段自適應獎勵系統）
+        2. 增強版獎勵計算器（固定增強獎勵機制）
+        3. 傳統風險調整獎勵計算
         """
         
-        # 使用增強版獎勵計算器（如果可用且啟用）
+        # 優先使用漸進式獎勵計算器（如果可用且啟用）
+        if self.use_progressive_rewards and self.progressive_reward_calculator is not None:
+            try:
+                # 準備持倉數據，格式化為 ProgressiveRewardCalculator 所需的格式
+                positions_data = {'positions': {}}
+                  # 轉換持倉資料格式
+                for slot_idx in self.current_episode_tradable_slot_indices:
+                    if abs(self.current_positions_units[slot_idx]) > Decimal('1e-9'):
+                        symbol = self.slot_to_symbol_map[slot_idx]
+                        if symbol is not None:
+                            positions_data['positions'][symbol] = {
+                                'units': self.current_positions_units[slot_idx],
+                                'unrealized_pnl': self.unrealized_pnl_ac[slot_idx],
+                                'hold_duration': self.episode_step_count - self.last_trade_step_per_slot[slot_idx] 
+                                               if self.last_trade_step_per_slot[slot_idx] >= 0 
+                                               else 0
+                            }
+                
+                # 準備市場數據
+                market_data = {
+                    'atr_values': self.atr_values_qc,
+                    'atr_penalty_threshold': self.atr_penalty_threshold,
+                    'current_step': self.episode_step_count
+                }
+                  # 調用漸進式獎勵計算
+                progressive_reward_info = self.progressive_reward_calculator.calculate_reward(
+                    current_portfolio_value=self.portfolio_value_ac,
+                    prev_portfolio_value=prev_portfolio_value_ac,
+                    commission_this_step=commission_this_step_ac,
+                    trade_log=self.trade_log,
+                    positions_data=positions_data,
+                    market_data=market_data,
+                    episode_step=self.episode_step_count
+                )
+                
+                # 提取總獎勵值
+                progressive_reward = progressive_reward_info['total_reward']
+                  # 記錄漸進式獎勵組件
+                if not hasattr(self, 'progressive_reward_components_history'):
+                    self.progressive_reward_components_history = []
+                
+                # 直接使用返回的獎勵信息
+                self.progressive_reward_components_history.append(progressive_reward_info)
+                
+                # 記錄階段變化
+                current_stage = self.progressive_reward_calculator.get_current_stage()
+                if not hasattr(self, 'last_reward_stage'):
+                    self.last_reward_stage = current_stage
+                elif self.last_reward_stage != current_stage:
+                    logger.info(f"獎勵系統階段切換 at step {self.episode_step_count}: {self.last_reward_stage} -> {current_stage}")
+                    self.last_reward_stage = current_stage
+                
+                return progressive_reward
+                
+            except Exception as e:
+                logger.error(f"Progressive reward calculation failed: {e}. Falling back to enhanced calculation.")
+                # 如果漸進式計算失敗，回退到增強版計算
+                self.use_progressive_rewards = False
+        
+        # 回退到增強版獎勵計算器（如果可用且啟用）
         if self.use_enhanced_rewards and self.enhanced_reward_calculator is not None:
             try:
                 # 準備增強版獎勵計算所需的數據
@@ -741,7 +826,8 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 logger.error(f"Enhanced reward calculation failed: {e}. Falling back to standard calculation.")
                 # 如果增強版計算失敗，回退到傳統計算
                 self.use_enhanced_rewards = False
-          # 傳統獎勵計算（改進版）
+        
+        # 傳統獎勵計算（改進版）
         return self._calculate_standard_reward(prev_portfolio_value_ac, commission_this_step_ac)
     
     def _calculate_standard_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
