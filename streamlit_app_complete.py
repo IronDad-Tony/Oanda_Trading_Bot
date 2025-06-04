@@ -472,10 +472,16 @@ def display_system_monitoring():
     else:
         st.info("No GPU detected or GPU monitoring unavailable")
 
-def simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps):
+def simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps, initial_capital=None):
     """Simulate training process with realistic data generation"""
-    logger.info(f"Starting simulation training for symbols: {symbols}, steps: {total_timesteps}")
+    # Use the provided initial_capital or fall back to the configured default
+    sim_initial_capital = initial_capital if initial_capital is not None else INITIAL_CAPITAL
+    
+    logger.info(f"Starting simulation training for symbols: {symbols}, steps: {total_timesteps}, initial_capital: {sim_initial_capital}")
     shared_manager.update_training_status('running', 0)
+    
+    # Set the actual initial capital in shared manager for UI consistency
+    shared_manager.set_actual_initial_capital(sim_initial_capital)
     
     for step in range(total_timesteps):
         if shared_manager.is_stop_requested():
@@ -488,10 +494,9 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
         
         base_reward = -2.0 + (step / total_timesteps) * 3.0
         reward = base_reward + np.random.normal(0, 0.5)
-        
         portfolio_change = reward * 0.001
-        portfolio_value = INITIAL_CAPITAL * (1 + portfolio_change * (step + 1) / 100)
-        portfolio_value = max(portfolio_value, INITIAL_CAPITAL * 0.5)
+        portfolio_value = sim_initial_capital * (1 + portfolio_change * (step + 1) / 100)
+        portfolio_value = max(portfolio_value, sim_initial_capital * 0.5)
         
         actor_loss = max(0.01, 0.5 * np.exp(-step/1000) + np.random.normal(0, 0.05))
         critic_loss = max(0.01, 0.8 * np.exp(-step/800) + np.random.normal(0, 0.08))
@@ -529,12 +534,12 @@ def simulate_training_with_shared_manager(shared_manager, symbols, total_timeste
     logger.info("Simulation training completed.")
     return True
 
-def training_worker(trainer_instance, shared_manager, symbols, total_timesteps): # Renamed arg for clarity
+def training_worker(trainer_instance, shared_manager, symbols, total_timesteps, initial_capital): # Renamed arg for clarity
     """Training worker thread - uses shared data manager"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        logger.info(f"Training worker thread started. Trainer instance: {trainer_instance}, Symbols: {symbols}, Steps: {total_timesteps}")
+        logger.info(f"Training worker thread started. Trainer instance: {trainer_instance}, Symbols: {symbols}, Steps: {total_timesteps}, Initial Capital: {initial_capital}")
         
         success = False  # 初始化 success 變量
         if trainer_instance and TRAINER_AVAILABLE:
@@ -550,7 +555,7 @@ def training_worker(trainer_instance, shared_manager, symbols, total_timesteps):
             success = trainer_instance.run_full_training_pipeline()
         else:
             logger.info("No valid trainer instance or TRAINER_NOT_AVAILABLE. Starting simulation training process.")
-            success = simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps)
+            success = simulate_training_with_shared_manager(shared_manager, symbols, total_timesteps, initial_capital)
         
         if shared_manager.is_stop_requested():
             shared_manager.update_training_status('idle')
@@ -636,7 +641,7 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
 
         training_thread = threading.Thread(
             target=training_worker,
-            args=(trainer_instance_for_thread, shared_manager, symbols, total_timesteps),
+            args=(trainer_instance_for_thread, shared_manager, symbols, total_timesteps, initial_capital),
             daemon=True
         )
         training_thread.start()
@@ -1016,32 +1021,46 @@ def create_real_time_charts():
             line=dict(color='green', width=2),
             marker=dict(size=3),
             fill='tonexty'        ))
+          # 使用實際的初始資本值而不是硬編碼的INITIAL_CAPITAL
+        actual_initial_capital_for_line = INITIAL_CAPITAL  # Default fallback
+        
+        # Try to get the actual initial capital from shared data manager
+        shared_manager = st.session_state.shared_data_manager
+        if shared_manager:
+            actual_initial_capital_for_line = shared_manager.get_actual_initial_capital()
+        
+        # Fallback: try to get from trainer instance
+        if actual_initial_capital_for_line == INITIAL_CAPITAL and st.session_state.get('trainer') and hasattr(st.session_state.trainer, 'initial_capital'):
+            actual_initial_capital_for_line = st.session_state.trainer.initial_capital
         
         fig_portfolio.add_hline(
-            y=INITIAL_CAPITAL,
+            y=actual_initial_capital_for_line,
             line_dash="dash",
             line_color="red",
-            annotation_text="Initial Capital"
+            annotation_text=f"Initial Capital ({ACCOUNT_CURRENCY} {actual_initial_capital_for_line:,.0f})"
         )
         
         fig_portfolio.update_layout(
             title="Portfolio Value Over Time",
             xaxis_title="Training Steps (Session)", # X-axis label updated
             yaxis_title=f"Portfolio Value ({ACCOUNT_CURRENCY})", # Using ACCOUNT_CURRENCY        hovermode='x unified',
-            height=400
-        )
+            height=400        )
         st.plotly_chart(fig_portfolio, use_container_width=True)
-        
         if not df.empty:
             current_value = df['portfolio_value'].iloc[-1]
-            # 獲取實際的初始資本值，優先使用訓練配置中的值
+            # 獲取實際的初始資本值，優先使用shared_data_manager中的值
             actual_initial_capital = INITIAL_CAPITAL  # Default fallback
             
-            # Try to get the actual initial capital from the trainer instance
-            if st.session_state.get('trainer') and hasattr(st.session_state.trainer, 'initial_capital'):
+            # Try to get the actual initial capital from shared data manager first
+            shared_manager = st.session_state.shared_data_manager
+            if shared_manager:
+                actual_initial_capital = shared_manager.get_actual_initial_capital()
+            
+            # Fallback: try to get from trainer instance
+            if actual_initial_capital == INITIAL_CAPITAL and st.session_state.get('trainer') and hasattr(st.session_state.trainer, 'initial_capital'):
                 actual_initial_capital = st.session_state.trainer.initial_capital
-            elif len(df) > 0:
-                # Fallback: use first portfolio value if it looks like initial capital
+            elif actual_initial_capital == INITIAL_CAPITAL and len(df) > 0:
+                # Last fallback: use first portfolio value if it looks like initial capital
                 first_value = df['portfolio_value'].iloc[0]
                 if abs(first_value - INITIAL_CAPITAL) < INITIAL_CAPITAL * 0.1:  # 允許10%的差異
                     actual_initial_capital = first_value
@@ -1581,18 +1600,20 @@ def update_critical_training_metrics():
             st.metric(
                 "Training Steps (Session)", 
                 f"{session_current_steps:,}",
-                delta=f"/ {total_steps:,}" if total_steps > 0 else None,
-                help="Current steps in this training session out of the target steps for this session. This shows how much of the current training job is complete."
+                delta=f"/ {total_steps:,}" if total_steps > 0 else None,                help="Current steps in this training session out of the target steps for this session. This shows how much of the current training job is complete."
             )
-        
         with col2:
             portfolio_value = current_status.get('current_metrics', {}).get('portfolio_value', INITIAL_CAPITAL) # Use INITIAL_CAPITAL as default
-            initial_cap_for_delta = INITIAL_CAPITAL # Ensure this is the correct initial capital for comparison
+            
+            # 獲取實際的初始資本值用於計算百分比變化
+            shared_manager = st.session_state.shared_data_manager
+            initial_cap_for_delta = shared_manager.get_actual_initial_capital() if shared_manager else INITIAL_CAPITAL
+            
             st.metric(
                 "Portfolio Value", 
                 f"{ACCOUNT_CURRENCY} {portfolio_value:,.2f}", # Using ACCOUNT_CURRENCY
                 delta=f"{((portfolio_value / initial_cap_for_delta - 1) * 100):+.2f}%" if initial_cap_for_delta > 0 and portfolio_value != initial_cap_for_delta else None,
-                help=f"Current value of the trading portfolio in {ACCOUNT_CURRENCY} and its percentage change from the initial capital. This reflects the overall performance."
+                help=f"Current value of the trading portfolio in {ACCOUNT_CURRENCY} and its percentage change from the initial capital ({ACCOUNT_CURRENCY} {initial_cap_for_delta:,.0f}). This reflects the overall performance."
             )
         
         with col3:
