@@ -1479,9 +1479,7 @@ def display_training_status():
                         times_from_deque = [pd.to_datetime(t) for t in times_from_deque]
                     except Exception as e:
                         st.warning(f"Error converting timestamps to datetime: {e}")
-                        times_from_deque = [] # Reset if conversion fails
-
-            if len(times_from_deque) >= 2 and len(global_steps_from_deque) >=2: # Ensure both have enough data
+                        times_from_deque = [] # Reset if conversion fails            if len(times_from_deque) >= 2 and len(global_steps_from_deque) >=2: # Ensure both have enough data
                 dt = (times_from_deque[-1] - times_from_deque[0]).total_seconds()
                 d_global_steps = global_steps_from_deque[-1] - global_steps_from_deque[0]
 
@@ -1496,12 +1494,29 @@ def display_training_status():
                     h, m, s = eta_sec // 3600, (eta_sec % 3600) // 60, eta_sec % 60
                     eta_text = f"ETA: {h:02d}:{m:02d}:{s:02d}"
 
-    if status == 'running':
-        # Calculate progress based on session steps
+    # Display status based on training state
+    if status == 'running':        # Calculate progress based on session steps
         session_progress_percentage = (current_session_steps / session_target_steps * 100) if session_target_steps > 0 else 0
         session_progress_percentage = max(0, min(100, session_progress_percentage))
 
-        st.success(f"🚀 Training in Progress - {session_progress_percentage:.1f}% Complete (Session)")
+        # Create three columns for training status, speed, and ETA
+        status_col1, status_col2, status_col3 = st.columns(3)
+        
+        with status_col1:
+            st.success(f"🚀 Training in Progress - {session_progress_percentage:.1f}% Complete (Session)")
+        
+        with status_col2:
+            if steps_per_sec:
+                st.info(f"Training Speed: {steps_per_sec:.2f} steps/sec")
+            else:
+                st.info("Training Speed: Calculating...")
+        
+        with status_col3:
+            if eta_text:
+                st.info(eta_text)
+            else:
+                st.info("ETA: Calculating...")
+        
         st.progress(session_progress_percentage / 100)
         
         if current_metrics and current_global_step >= initial_global_step: # Check if current_metrics is populated
@@ -1532,11 +1547,6 @@ def display_training_status():
                 # 顯示梯度範數
                 grad_norm_val = current_metrics.get('grad_norm', float('nan'))
                 st.metric("Gradient Norm", f"{grad_norm_val:.4f}")
-        
-        if steps_per_sec:
-            st.info(f"Training Speed: {steps_per_sec:.2f} steps/sec")
-        if eta_text:
-            st.info(eta_text)
         
     elif status == 'completed':
         st.success("✅ Training Completed Successfully!")
@@ -1705,23 +1715,29 @@ def update_system_resources():
 
 def main():
     """Main application function"""
-    
-    # Initialize session state ONCE at the beginning of main if not already done.
+      # Initialize session state ONCE at the beginning of main if not already done.
     # The 'app_initialized' flag handles the very first run of the script in a session.
     # init_session_state() ensures all necessary keys are present.
     if not st.session_state.get('session_state_initialized', False):
-       init_session_state()
-       logger.info("main(): Called init_session_state() because 'session_state_initialized' was not True.")
+        init_session_state()
+        logger.info("main(): Called init_session_state() because 'session_state_initialized' was not True.")
     
     st.title("🚀 OANDA AI Trading Model")
     st.markdown("**Enhanced Real-time Trading Monitor with GPU Support**")
     
-    if not TRAINER_AVAILABLE:
-        st.warning("⚠️ Running in simulation mode - trainer modules not available. Full functionality may be limited.")
-        # logger.info("Main: TRAINER_AVAILABLE is False.") # Logged once at import usually
-    else:
-        st.success("✅ All modules loaded successfully. System is ready for training.")
-        # logger.info("Main: TRAINER_AVAILABLE is True.")
+    # Create a status row for system and training information
+    status_col1, status_col2, status_col3, status_col4 = st.columns(4)
+    
+    # Store the columns in session state for use by display_training_status
+    st.session_state['status_columns'] = (status_col1, status_col2, status_col3, status_col4)
+    
+    with status_col1:
+        if not TRAINER_AVAILABLE:
+            st.warning("⚠️ Simulation mode")
+            # logger.info("Main: TRAINER_AVAILABLE is False.") # Logged once at import usually
+        else:
+            st.success("✅ All modules loaded successfully")
+            # logger.info("Main: TRAINER_AVAILABLE is True.")
     
     with st.sidebar:
         st.header("⚙️ Training Configuration")
