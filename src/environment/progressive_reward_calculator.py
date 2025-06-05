@@ -53,12 +53,12 @@ class ProgressiveRewardCalculator:
             3: self._get_stage3_config(),  # 最終訓練階段
         }
         
-        # 全局設置
-        self.risk_free_rate = Decimal('0.02') / Decimal('252')  # 年化2%無風險利率
+        # 全局設置        self.risk_free_rate = Decimal('0.02') / Decimal('252')  # 年化2%無風險利率
         self.last_portfolio_value = initial_capital
         self.step_count = 0
         self.stage_switch_cooldown = 0  # 防止頻繁切換階段
-          # 用戶自訂配置覆蓋
+        
+        # 用戶自訂配置覆蓋
         if config:
             for stage in [1, 2, 3]:
                 if f'stage_{stage}_config' in config:
@@ -75,26 +75,45 @@ class ProgressiveRewardCalculator:
         """
         階段1：初始訓練階段配置
         目標：讓模型快速學會基礎交易概念，鼓勵多交易多學習
+        重點：多嘗試、多交易、理解獲利與虧損的基本原理
+        
+        教學理念：
+        1. 正向強化 > 負向懲罰 (鼓勵實驗精神)
+        2. 頻繁交易 = 快速學習 (增加訓練密度)
+        3. 多樣性探索 = 概念理解 (避免過早收斂)
+        4. 即時反饋 = 明確學習信號 (加速概念形成)
         """
         return {
-            # 基礎獎勵權重
-            "profit_reward_factor": Decimal('2.0'),        # 獲利獎勵係數
-            "loss_penalty_factor": Decimal('1.0'),         # 虧損懲罰係數
-            "trade_frequency_bonus": Decimal('0.1'),       # 交易頻率獎勵
-            "exploration_bonus": Decimal('0.5'),           # 探索獎勵
+            # 基礎獎勵權重（強化學習導向）- 比例 3:1 (獎勵:懲罰)
+            "profit_reward_factor": Decimal('4.0'),        # 獲利獎勵係數（進一步加強正向反饋）
+            "loss_penalty_factor": Decimal('0.7'),         # 虧損懲罰係數（再次降低，鼓勵大膽嘗試）
+            "trade_frequency_bonus": Decimal('0.2'),       # 交易頻率獎勵（再次增強）
+            "exploration_bonus": Decimal('0.8'),           # 探索獎勵（大幅增強，鼓勵多樣性）
             
-            # 鼓勵交易學習
-            "min_trades_per_episode": 10,                  # 每集最少交易次數
-            "trade_diversity_bonus": Decimal('0.2'),       # 交易多樣性獎勵
-            "quick_decision_bonus": Decimal('0.1'),        # 快速決策獎勵
+            # 鼓勵交易學習（教學強化版）
+            "min_trades_per_episode": 6,                   # 每集最少交易次數（進一步降低門檻）
+            "trade_diversity_bonus": Decimal('0.4'),       # 交易多樣性獎勵（強化）
+            "quick_decision_bonus": Decimal('0.2'),        # 快速決策獎勵（增強即時反應）
+            "learning_progress_bonus": Decimal('0.5'),     # 學習進步獎勵（提高重要性）
+            "concept_mastery_bonus": Decimal('0.35'),      # 概念掌握獎勵（加強基礎理解）
             
-            # 基礎風險控制（寬鬆）
-            "max_single_loss_ratio": Decimal('0.05'),      # 單筆最大虧損比例：5%
-            "commission_penalty_factor": Decimal('0.5'),   # 手續費懲罰係數（較低）
+            # 基礎風險控制（寬鬆且教學導向）
+            "max_single_loss_ratio": Decimal('0.1'),       # 單筆最大虧損比例：10%（適度放寬）
+            "commission_penalty_factor": Decimal('0.2'),   # 手續費懲罰係數（進一步降低）
+            "risk_awareness_threshold": Decimal('0.05'),   # 新增：風險意識門檻（5%）
             
-            # 持倉管理（簡單）
-            "hold_profit_bonus": Decimal('0.2'),           # 持有獲利部位獎勵
-            "fast_stop_loss_bonus": Decimal('0.3'),        # 快速停損獎勵
+            # 持倉管理（簡單但教學導向）
+            "hold_profit_bonus": Decimal('0.4'),           # 持有獲利部位獎勵（增強讓利潤奔跑概念）
+            "fast_stop_loss_bonus": Decimal('0.5'),        # 快速停損獎勵（強化風險控制概念）
+            "position_experimentation_bonus": Decimal('0.3'), # 倉位實驗獎勵（鼓勵部位管理學習）
+            
+            # 教學導向獎勵（新增強化版）
+            "first_trade_bonus": Decimal('0.6'),           # 首次交易獎勵（增強初始動機）
+            "consecutive_learning_bonus": Decimal('0.25'),  # 連續學習獎勵（持續改進）
+            "mistake_recovery_bonus": Decimal('0.4'),       # 錯誤恢復獎勵（從失敗中學習）
+            "early_profit_multiplier": Decimal('1.5'),     # 新增：早期獲利倍數（前20筆交易）
+            "learning_milestone_bonus": Decimal('0.3'),    # 新增：學習里程碑獎勵
+            "concept_breakthrough_bonus": Decimal('0.8'),  # 新增：概念突破獎勵
         }
     
     def _get_stage2_config(self) -> Dict[str, Decimal]:
@@ -200,8 +219,7 @@ class ProgressiveRewardCalculator:
             new_stage = 2  # 進階訓練階段
         elif avg_trade_expectation > 0 and win_rate >= 0.5:
             new_stage = 3  # 最終訓練階段
-        
-        # 如果階段改變，設置冷卻期
+          # 如果階段改變，設置冷卻期
         if new_stage != self.current_stage:
             self.stage_switch_cooldown = 25  # 25步冷卻期
             logger.info(f"獎勵系統階段切換: {self.current_stage} -> {new_stage}")
@@ -210,60 +228,82 @@ class ProgressiveRewardCalculator:
         return new_stage
     
     def calculate_stage1_reward(self, 
-                              current_portfolio_value: Decimal,
-                              prev_portfolio_value: Decimal,
-                              commission_this_step: Decimal,
-                              trade_log: List[Dict[str, Any]],
-                              positions_data: Dict[str, Any],
-                              market_data: Dict[str, Any],
-                              episode_step: int) -> Dict[str, Decimal]:
+                                current_portfolio_value: Decimal,
+                                prev_portfolio_value: Decimal,
+                                commission_this_step: Decimal,
+                                trade_log: List[Dict[str, Any]],
+                                positions_data: Dict[str, Any],
+                                market_data: Dict[str, Any],
+                                episode_step: int) -> Dict[str, Decimal]:
         """
-        階段1獎勵計算：簡單線性獎勵，鼓勵交易學習
+        階段1獎勵計算：教學導向獎勵，鼓勵多交易多學習
+        重點：讓模型多嘗試、多交易、理解獲利與虧損的基本原理
         """
         config = self.stage_configs[1]
         components = {}
         
-        # 1. 基礎收益獎勵（線性，直接）
+        # 1. 基礎收益獎勵（強化正面學習體驗）
         step_return = current_portfolio_value - prev_portfolio_value
         if step_return > Decimal('0'):
+            # 獲利時給予更大的鼓勵，讓模型明確知道這是好行為
             profit_reward = step_return / self.initial_capital * config["profit_reward_factor"]
             components['profit_reward'] = profit_reward
+            
+            # 新增：首次獲利額外獎勵
+            if not hasattr(self, '_first_profit_achieved'):
+                self._first_profit_achieved = True
+                components['first_profit_milestone'] = config["first_trade_bonus"]
         else:
+            # 虧損時給予較輕的懲罰，避免模型過度保守
             loss_penalty = abs(step_return) / self.initial_capital * config["loss_penalty_factor"]
             components['loss_penalty'] = -loss_penalty
         
-        # 2. 交易頻率獎勵（鼓勵多交易）
+        # 2. 增強交易頻率獎勵（鼓勵多嘗試）
         recent_trades = [t for t in trade_log[-10:] if t.get('realized_pnl', 0) != 0]
-        if len(recent_trades) > 0:
-            trade_frequency_bonus = Decimal(str(len(recent_trades))) * config["trade_frequency_bonus"] / Decimal('10')
+        if len(recent_trades) > 0:            # 使用非線性獎勵，鼓勵更多交易
+            trade_count = len(recent_trades)
+            frequency_multiplier = min(Decimal(str(trade_count)) / Decimal('5.0'), Decimal('2.0'))  # 5筆交易達到最大倍數
+            trade_frequency_bonus = Decimal(str(trade_count)) * config["trade_frequency_bonus"] * frequency_multiplier / Decimal('10')
             components['trade_frequency'] = trade_frequency_bonus
+            
+            # 新增：交易里程碑獎勵
+            total_trades = len([t for t in trade_log if t.get('realized_pnl', 0) != 0])
+            if total_trades in [5, 10, 20, 50]:  # 里程碑交易數
+                components['trade_milestone'] = config["learning_progress_bonus"]
         
-        # 3. 探索獎勵（鼓勵嘗試不同策略）
-        if self._is_new_trading_pattern(trade_log):
-            components['exploration'] = config["exploration_bonus"]
+        # 3. 增強探索獎勵（鼓勵嘗試不同策略）
+        exploration_reward = self._calculate_enhanced_exploration_reward(trade_log, config)
+        if exploration_reward > Decimal('0'):
+            components['exploration'] = exploration_reward
         
-        # 4. 快速停損獎勵
-        for trade in trade_log[-5:]:  # 檢查最近5筆交易
-            if (trade.get('realized_pnl', 0) < 0 and 
-                trade.get('hold_duration', 0) <= 3):  # 3步內停損
-                loss_ratio = abs(trade['realized_pnl']) / self.initial_capital
-                if loss_ratio <= config["max_single_loss_ratio"]:
-                    fast_stop_bonus = config["fast_stop_loss_bonus"] * (
-                        config["max_single_loss_ratio"] - loss_ratio
-                    )
-                    components['fast_stop_loss'] = components.get('fast_stop_loss', Decimal('0')) + fast_stop_bonus        # 5. 持有獲利部位獎勵
-        positions = positions_data.get('positions', {})
-        for symbol, position_info in positions.items():
-            unrealized_pnl = position_info.get('unrealized_pnl', Decimal('0'))
-            hold_duration = position_info.get('hold_duration', 0)
-            if unrealized_pnl > Decimal('0') and hold_duration > 2:
-                profit_ratio = float(unrealized_pnl / self.initial_capital)
-                hold_bonus = float(config["hold_profit_bonus"]) * profit_ratio * min(hold_duration / 10, 1.0)
-                components['hold_profit'] = components.get('hold_profit', Decimal('0')) + Decimal(str(hold_bonus))
+        # 4. 教學導向的交易概念獎勵
+        concept_reward = self._calculate_trading_concept_mastery(trade_log, positions_data, config)
+        if concept_reward > Decimal('0'):
+            components['concept_mastery'] = concept_reward
         
-        # 6. 輕微的手續費懲罰
+        # 5. 改進的快速停損獎勵（教學意圖明確）
+        fast_stop_reward = self._calculate_educational_stop_loss_reward(trade_log, config)
+        if fast_stop_reward > Decimal('0'):
+            components['fast_stop_loss'] = fast_stop_reward
+        
+        # 6. 增強持有獲利部位獎勵（讓模型體驗"讓利潤奔跑"）
+        hold_profit_reward = self._calculate_enhanced_hold_profit_reward(positions_data, config)
+        if hold_profit_reward > Decimal('0'):
+            components['hold_profit'] = hold_profit_reward
+        
+        # 7. 錯誤恢復獎勵（從虧損中學習）
+        recovery_reward = self._calculate_mistake_recovery_reward(trade_log, config)
+        if recovery_reward > Decimal('0'):
+            components['mistake_recovery'] = recovery_reward
+        
+        # 8. 降低手續費懲罰（在學習階段不要讓手續費阻礙實驗）
         commission_penalty = commission_this_step / self.initial_capital * config["commission_penalty_factor"]
         components['commission'] = -commission_penalty
+        
+        # 9. 新增：學習進度獎勵
+        progress_reward = self._calculate_learning_progress_reward(episode_step, trade_log, config)
+        if progress_reward > Decimal('0'):
+            components['learning_progress'] = progress_reward
         
         return components
     
@@ -899,6 +939,194 @@ class ProgressiveRewardCalculator:
         recent_returns = list(self.returns_history)[-10:]
         return self._calculate_volatility(recent_returns)
     
+    # === 階段1增強版輔助方法 ===
+    
+    def _calculate_enhanced_exploration_reward(self, trade_log: List[Dict[str, Any]], config: Dict[str, Decimal]) -> Decimal:
+        """
+        增強探索獎勵：鼓勵模型嘗試不同的交易策略和方向
+        教學目標：讓模型理解多空雙向交易的概念
+        """
+        if len(trade_log) < 3:
+            return config["exploration_bonus"]  # 早期給予基礎探索獎勵
+        
+        recent_trades = trade_log[-8:]  # 檢查最近8筆交易
+        closed_trades = [t for t in recent_trades if t.get('realized_pnl', 0) != 0]
+        
+        if len(closed_trades) < 2:
+            return Decimal('0')
+        
+        exploration_score = Decimal('0')
+        
+        # 1. 檢測交易方向多樣性（做多vs做空）
+        long_trades = sum(1 for t in closed_trades if t.get('trade_type') == 'long' or 
+                         (t.get('realized_pnl', 0) != 0 and t.get('units', 0) > 0))
+        short_trades = len(closed_trades) - long_trades
+        
+        if long_trades > 0 and short_trades > 0:
+            exploration_score += config["exploration_bonus"] * Decimal('0.5')  # 雙向交易獎勵
+        
+        # 2. 檢測不同持倉時間的嘗試
+        hold_durations = [t.get('hold_duration', 0) for t in closed_trades]
+        if len(set(hold_durations)) >= 3:  # 至少3種不同的持倉時間
+            exploration_score += config["exploration_bonus"] * Decimal('0.3')
+        
+        # 3. 檢測交易規模的多樣性
+        trade_sizes = [abs(t.get('units', 0)) for t in closed_trades]
+        if len(set(trade_sizes)) >= 2:  # 至少2種不同的交易規模
+            exploration_score += config["exploration_bonus"] * Decimal('0.2')
+        
+        return min(exploration_score, config["exploration_bonus"])  # 限制最大獎勵
+    
+    def _calculate_trading_concept_mastery(self, trade_log: List[Dict[str, Any]], 
+                                         positions_data: Dict[str, Any], 
+                                         config: Dict[str, Decimal]) -> Decimal:
+        """
+        交易概念掌握獎勵：獎勵模型掌握基本交易概念
+        教學目標：讓模型理解獲利、虧損、做多、做空等基本概念
+        """
+        concept_score = Decimal('0')
+        recent_trades = [t for t in trade_log[-10:] if t.get('realized_pnl', 0) != 0]
+        
+        if len(recent_trades) < 2:
+            return Decimal('0')
+        
+        # 1. 掌握獲利概念：能夠實現獲利交易
+        profitable_trades = [t for t in recent_trades if t.get('realized_pnl', 0) > 0]
+        if len(profitable_trades) > 0:
+            profit_ratio = len(profitable_trades) / len(recent_trades)
+            concept_score += config["concept_mastery_bonus"] * Decimal(str(profit_ratio))
+        
+        # 2. 掌握止損概念：能夠及時止損
+        loss_trades = [t for t in recent_trades if t.get('realized_pnl', 0) < 0]
+        quick_stops = [t for t in loss_trades if t.get('hold_duration', 0) <= 5]
+        if len(loss_trades) > 0 and len(quick_stops) > 0:
+            stop_ratio = len(quick_stops) / len(loss_trades)
+            concept_score += config["concept_mastery_bonus"] * Decimal(str(stop_ratio)) * Decimal('0.5')
+        
+        # 3. 掌握持倉概念：理解持有部位的意義
+        positions = positions_data.get('positions', {})
+        if len(positions) > 0:
+            active_positions = sum(1 for pos in positions.values() if abs(pos.get('units', 0)) > 0)
+            if active_positions > 0:
+                concept_score += config["concept_mastery_bonus"] * Decimal('0.3')
+        
+        return concept_score
+    
+    def _calculate_educational_stop_loss_reward(self, trade_log: List[Dict[str, Any]], 
+                                              config: Dict[str, Decimal]) -> Decimal:
+        """
+        教學導向停損獎勵：明確教導模型什麼是好的停損行為
+        教學目標：培養風險意識，理解止損的重要性
+        """
+        stop_loss_reward = Decimal('0')
+        recent_trades = [t for t in trade_log[-8:] if t.get('realized_pnl', 0) < 0]  # 只看虧損交易
+        
+        for trade in recent_trades:
+            hold_duration = trade.get('hold_duration', 0)
+            loss_ratio = abs(trade.get('realized_pnl', 0)) / self.initial_capital
+              # 教學規則：快速止損小虧損 = 好行為
+            if hold_duration <= 4 and loss_ratio <= config["max_single_loss_ratio"]:
+                # 越快止損，越小虧損，獎勵越大
+                time_factor = max(Decimal('0'), (Decimal('5') - Decimal(str(hold_duration))) / Decimal('5'))  # 1步止損=1.0，4步止損=0.2
+                size_factor = max(Decimal('0'), (config["max_single_loss_ratio"] - loss_ratio) / config["max_single_loss_ratio"])
+                
+                bonus = config["fast_stop_loss_bonus"] * time_factor * size_factor
+                stop_loss_reward += bonus
+        
+        return stop_loss_reward
+    
+    def _calculate_enhanced_hold_profit_reward(self, positions_data: Dict[str, Any], 
+                                             config: Dict[str, Decimal]) -> Decimal:
+        """
+        增強持有獲利獎勵：教導模型"讓利潤奔跑"的概念
+        教學目標：讓模型理解持有獲利部位可以獲得更多收益
+        """
+        hold_reward = Decimal('0')
+        positions = positions_data.get('positions', {})
+        
+        for symbol, position_info in positions.items():
+            unrealized_pnl = position_info.get('unrealized_pnl', Decimal('0'))
+            hold_duration = position_info.get('hold_duration', 0)
+            
+            if unrealized_pnl > Decimal('0') and hold_duration > 1:  # 降低門檻
+                profit_ratio = unrealized_pnl / self.initial_capital
+                  # 教學導向：持有時間越長，獎勵遞增但有上限
+                time_factor = min(Decimal(str(hold_duration)) / Decimal('8.0'), Decimal('1.5'))  # 8步達到最大1.5倍
+                
+                # 根據獲利幅度給予不同獎勵
+                if profit_ratio > Decimal('0.02'):  # 2%以上獲利
+                    bonus_multiplier = Decimal('1.5')
+                elif profit_ratio > Decimal('0.01'):  # 1-2%獲利
+                    bonus_multiplier = Decimal('1.2')
+                else:  # 小於1%獲利
+                    bonus_multiplier = Decimal('1.0')
+                
+                hold_bonus = config["hold_profit_bonus"] * profit_ratio * time_factor * bonus_multiplier
+                hold_reward += hold_bonus
+        
+        return hold_reward
+    
+    def _calculate_mistake_recovery_reward(self, trade_log: List[Dict[str, Any]], 
+                                         config: Dict[str, Decimal]) -> Decimal:
+        """
+        錯誤恢復獎勵：獎勵模型從虧損中快速恢復
+        教學目標：讓模型理解虧損後的調整和恢復很重要
+        """
+        if len(trade_log) < 4:
+            return Decimal('0')
+        
+        recovery_reward = Decimal('0')
+        recent_trades = [t for t in trade_log[-6:] if t.get('realized_pnl', 0) != 0]
+        
+        # 檢測虧損後的快速恢復模式
+        for i in range(len(recent_trades) - 1):
+            current_trade = recent_trades[i]
+            next_trade = recent_trades[i + 1]
+            
+            # 如果前一筆虧損，後一筆獲利
+            if (current_trade.get('realized_pnl', 0) < 0 and 
+                next_trade.get('realized_pnl', 0) > 0):
+                
+                # 計算恢復比例
+                loss_amount = abs(current_trade.get('realized_pnl', 0))
+                profit_amount = next_trade.get('realized_pnl', 0)
+                
+                if profit_amount >= loss_amount * 0.5:  # 至少恢復50%虧損
+                    recovery_ratio = min(profit_amount / loss_amount, 2.0)  # 最大2倍恢復
+                    recovery_reward += config["mistake_recovery_bonus"] * Decimal(str(recovery_ratio * 0.5))
+        
+        return recovery_reward
+    
+    def _calculate_learning_progress_reward(self, episode_step: int, 
+                                          trade_log: List[Dict[str, Any]], 
+                                          config: Dict[str, Decimal]) -> Decimal:
+        """
+        學習進度獎勵：根據學習階段給予適當獎勵
+        教學目標：鼓勵持續學習和改進
+        """
+        progress_reward = Decimal('0')
+        
+        # 1. 早期交易鼓勵（前50步）
+        if episode_step <= 50:
+            closed_trades = [t for t in trade_log if t.get('realized_pnl', 0) != 0]
+            if len(closed_trades) >= episode_step // 10:  # 每10步至少1筆交易
+                progress_reward += config["learning_progress_bonus"] * Decimal('0.3')
+        
+        # 2. 交易品質改善獎勵
+        if len(trade_log) >= 10:
+            recent_5_trades = [t for t in trade_log[-5:] if t.get('realized_pnl', 0) != 0]
+            previous_5_trades = [t for t in trade_log[-10:-5] if t.get('realized_pnl', 0) != 0]
+            
+            if len(recent_5_trades) >= 3 and len(previous_5_trades) >= 3:
+                recent_avg = sum(t.get('realized_pnl', 0) for t in recent_5_trades) / len(recent_5_trades)
+                previous_avg = sum(t.get('realized_pnl', 0) for t in previous_5_trades) / len(previous_5_trades)
+                
+                if recent_avg > previous_avg:  # 最近交易表現改善
+                    improvement_ratio = (recent_avg - previous_avg) / max(abs(previous_avg), self.initial_capital * Decimal('0.001'))
+                    progress_reward += config["learning_progress_bonus"] * min(improvement_ratio, Decimal('0.5'))
+        
+        return progress_reward
+
     def get_current_config(self) -> Dict[str, Any]:
         """獲取當前階段的配置"""
         return self.stage_configs.get(self.current_stage, {})
