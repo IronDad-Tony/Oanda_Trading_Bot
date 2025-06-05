@@ -76,10 +76,16 @@ except ImportError as e_initial_import_v5:
         # Import enhanced reward calculator
         try:
             from src.environment.enhanced_reward_calculator import EnhancedRewardCalculator
-            logger.info("trading_env.py (V5.0): Successfully imported EnhancedRewardCalculator")
+            from src.environment.progressive_reward_calculator import ProgressiveRewardCalculator
+            from src.environment.adaptive_reward_optimizer import AdaptiveRewardOptimizer
+            from src.environment.advanced_reward_strategies import AdvancedRewardStrategies
+            logger.info("trading_env.py (V5.0): Successfully imported all reward calculators")
         except ImportError as e_reward_calc:
-            logger.warning(f"trading_env.py (V5.0): Failed to import EnhancedRewardCalculator: {e_reward_calc}")
+            logger.warning(f"trading_env.py (V5.0): Failed to import reward calculators: {e_reward_calc}")
             EnhancedRewardCalculator = None
+            ProgressiveRewardCalculator = None
+            AdaptiveRewardOptimizer = None
+            AdvancedRewardStrategies = None
         logger.info("trading_env.py (V5.0): Successfully re-imported other dependencies after path adjustment.")
     except ImportError as e_retry_critical_v5:
         logger.error(f"trading_env.py (V5.0): Critical import error after path adjustment: {e_retry_critical_v5}", exc_info=True); logger.warning("trading_env.py (V5.0): Using fallback values for config (critical error during import).")
@@ -709,7 +715,6 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
           # next_observation was already fetched, no need to call _get_observation() again here
         # _t_get_obs = time.perf_counter()
         # next_observation = self._get_observation() # THIS LINE IS REMOVED / COMMENTED OUT
-        # logger.debug(f"Step {self.episode_step_count}: _get_observation took {time.perf_counter() - _t_get_obs:.6f}s")
         info = self._get_info()
         info["reward_this_step"] = reward
         logger.debug(f"--- Step {self.episode_step_count} End. Total time: {time.perf_counter() - _step_time_start:.6f}s ---")

@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional
 from collections import deque
 import numpy as np
 import logging
+from .adaptive_reward_optimizer import AdaptiveRewardOptimizer
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,18 @@ class ProgressiveRewardCalculator:
         self.trade_history = deque(maxlen=self.observation_window)
         self.returns_history = deque(maxlen=self.observation_window)
         self.reward_components_history: List[Dict[str, Any]] = []
+        
+        # 新增：自適應獎勵優化器
+        self.adaptive_optimizer = AdaptiveRewardOptimizer(config)
+        
+        # 新增：性能監控
+        self.performance_metrics = {
+            'episode_rewards': deque(maxlen=1000),
+            'portfolio_values': deque(maxlen=1000),
+            'sharpe_ratios': deque(maxlen=100),
+            'max_drawdowns': deque(maxlen=100),
+            'profit_factors': deque(maxlen=100)
+        }
         
         # 階段特定參數
         self.stage_configs = {
@@ -434,6 +447,22 @@ class ProgressiveRewardCalculator:
         
         self.reward_components_history.append(reward_info)
         self.last_portfolio_value = current_portfolio_value
+        
+        # 新增：更新性能監控數據
+        self.performance_metrics['episode_rewards'].append(total_reward)
+        self.performance_metrics['portfolio_values'].append(float(current_portfolio_value))
+        
+        if len(self.performance_metrics['sharpe_ratios']) >= 10:
+            self.performance_metrics['sharpe_ratios'].append(float(self._calculate_sharpe_ratio()))
+        
+        if len(self.performance_metrics['max_drawdowns']) >= 10:
+            self.performance_metrics['max_drawdowns'].append(float(self._calculate_current_drawdown(current_portfolio_value)))
+        
+        if len(self.performance_metrics['profit_factors']) >= 10:
+            avg_profit = sum(v for v in self.performance_metrics['episode_rewards'][-10:] if v > 0)
+            avg_loss = -sum(v for v in self.performance_metrics['episode_rewards'][-10:] if v < 0)
+            profit_factor = avg_profit / avg_loss if avg_loss != 0 else Decimal('1.0')
+            self.performance_metrics['profit_factors'].append(float(profit_factor))
         
         return reward_info
     
@@ -896,4 +925,5 @@ class ProgressiveRewardCalculator:
                 'sortino_ratio': float(self._calculate_sortino_ratio()),
                 'current_drawdown': float(self._calculate_current_drawdown(self.last_portfolio_value))
             })
-       
+        
+        return metrics
