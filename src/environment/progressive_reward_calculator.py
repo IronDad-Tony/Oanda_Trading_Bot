@@ -9,6 +9,7 @@ from collections import deque
 import numpy as np
 import logging
 from .adaptive_reward_optimizer import AdaptiveRewardOptimizer
+from .reward_normalizer import RewardNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,13 @@ class ProgressiveRewardCalculator:
         self.last_portfolio_value = initial_capital
         self.step_count = 0
         self.stage_switch_cooldown = 0  # 防止頻繁切換階段
+        
+        # 新增：獎勵標準化器
+        self.reward_normalizer = RewardNormalizer(
+            target_range=(-100.0, 100.0),
+            history_window=1000,
+            adaptive_scaling=True
+        )
         
         # 用戶自訂配置覆蓋
         if config:
@@ -475,15 +483,26 @@ class ProgressiveRewardCalculator:
             )
         
         # 計算總獎勵
-        total_reward = sum(reward_components.values())
-          # 記錄詳細組件
-        reward_info = {
+        total_reward = sum(reward_components.values())        # 記錄詳細組件（原始獎勵）
+        raw_reward_info = {
             'step': episode_step,
             'stage': self.current_stage,
             'portfolio_value': float(current_portfolio_value),
             'components': {k: float(v) for k, v in reward_components.items()},
             'total_reward': float(total_reward)
         }
+        
+        # 應用獎勵標準化
+        normalized_reward_info = self.reward_normalizer.normalize_reward(
+            raw_reward_info, method='hybrid'
+        )
+        
+        # 更新總獎勵為標準化後的值
+        total_reward = normalized_reward_info['total_reward']
+        
+        # 保存原始和標準化的獎勵信息
+        reward_info = normalized_reward_info.copy()
+        reward_info['raw_reward_info'] = raw_reward_info
         
         self.reward_components_history.append(reward_info)
         self.last_portfolio_value = current_portfolio_value
@@ -1155,3 +1174,15 @@ class ProgressiveRewardCalculator:
             })
         
         return metrics
+    
+    def get_reward_normalization_stats(self) -> Dict[str, Any]:
+        """獲取獎勵標準化統計信息"""
+        return self.reward_normalizer.get_normalization_stats()
+    
+    def update_normalization_config(self, **kwargs):
+        """更新標準化配置"""
+        self.reward_normalizer.update_config(**kwargs)
+    
+    def reset_normalization_history(self):
+        """重置標準化歷史數據"""
+        self.reward_normalizer.reset_history()
