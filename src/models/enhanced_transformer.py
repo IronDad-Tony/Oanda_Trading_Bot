@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
-from typing import List, Optional, Tuple, Union, Dict
+from typing import List, Optional, Tuple, Union, Dict, Any
 import logging
 
 try:
@@ -423,41 +423,54 @@ class CrossTimeScaleFusion(nn.Module):
 
 class EnhancedUniversalTradingTransformer(nn.Module):
     """
-    增強版通用交易Transformer
+    增強版通用交易Transformer - Large Model
     
     主要特性：
-    1. 深度架構：12-16層
+    1. 深度架構：16-24層
     2. 多尺度特徵提取
     3. 自適應注意力機制
     4. 跨時間尺度融合
     5. 改進的位置編碼
+    6. 完全動態維度適應
     """
     
     def __init__(self, 
                  num_input_features: int,
                  num_symbols_possible: int = MAX_SYMBOLS_ALLOWED,
-                 model_dim: int = 512,  # 從256提升到512
-                 num_layers: int = 12,  # 從4提升到12
-                 num_heads: int = 16,   # 從8提升到16
-                 ffn_dim: int = 2048,   # 從1024提升到2048
+                 model_dim: int = 768,    # Large模型: 768維度
+                 num_layers: int = 16,    # Large模型: 16層
+                 num_heads: int = 24,     # Large模型: 24個注意力頭
+                 ffn_dim: int = 3072,     # Large模型: 3072 FFN維度
                  dropout_rate: float = 0.1,
                  max_seq_len: int = TIMESTEPS,
-                 output_dim_per_symbol: int = 32,
+                 output_dim_per_symbol: int = None,  # 動態計算
                  use_multi_scale: bool = True,
                  use_cross_time_fusion: bool = True):
         
         super().__init__()
         
+        # 動態維度計算
         self.model_dim = model_dim
         self.num_symbols_possible = num_symbols_possible
         self.num_layers = num_layers
+        self.num_heads = num_heads
         self.use_multi_scale = use_multi_scale
         self.use_cross_time_fusion = use_cross_time_fusion
         
-        logger.info(f"初始化增強版Transformer: "
-                   f"layers={num_layers}, heads={num_heads}, dim={model_dim}")
+        # 動態輸出維度計算（基於模型維度的25%）
+        if output_dim_per_symbol is None:
+            output_dim_per_symbol = max(32, model_dim // 4)
+        self.output_dim_per_symbol = output_dim_per_symbol
         
-        # 輸入投影
+        # 驗證維度兼容性
+        assert model_dim % num_heads == 0, f"model_dim ({model_dim}) 必須能被 num_heads ({num_heads}) 整除"
+        assert ffn_dim >= model_dim, f"ffn_dim ({ffn_dim}) 必須大於等於 model_dim ({model_dim})"
+        
+        logger.info(f"初始化Large Transformer: "
+                   f"layers={num_layers}, heads={num_heads}, dim={model_dim}, "
+                   f"ffn_dim={ffn_dim}, output_per_symbol={output_dim_per_symbol}")
+        
+        # 輸入投影（動態適應）
         self.input_projection = nn.Linear(num_input_features, model_dim)
         
         # 符號嵌入
@@ -466,30 +479,30 @@ class EnhancedUniversalTradingTransformer(nn.Module):
         # 改進的位置編碼
         self.positional_encoding = self._create_positional_encoding(max_seq_len, model_dim)
         
-        # 多尺度特徵提取器
+        # 多尺度特徵提取器（動態維度適應）
         if use_multi_scale:
             self.multi_scale_extractor = MultiScaleFeatureExtractor(
                 model_dim, model_dim, scales=[3, 5, 7, 11]
             )
         
-        # 深度Transformer編碼器層
+        # 深度Transformer編碼器層（動態數量）
         self.transformer_layers = nn.ModuleList([
             EnhancedTransformerLayer(model_dim, num_heads, ffn_dim, dropout_rate)
             for _ in range(num_layers)
         ])
         
-        # 跨時間尺度融合
+        # 跨時間尺度融合（動態適應）
         if use_cross_time_fusion:
             self.cross_time_fusion = CrossTimeScaleFusion(model_dim)
         
-        # 跨資產注意力
+        # 跨資產注意力（動態頭數）
         self.cross_asset_attention = nn.MultiheadAttention(
             embed_dim=model_dim,
             num_heads=num_heads,
             batch_first=True
         )
         
-        # 輸出投影
+        # 輸出投影（動態維度）
         self.output_projection = nn.Sequential(
             nn.Linear(model_dim, model_dim // 2),
             nn.GELU(),
@@ -500,8 +513,23 @@ class EnhancedUniversalTradingTransformer(nn.Module):
         # 初始化權重
         self._initialize_weights()
         
-        logger.info(f"增強版Transformer初始化完成，總參數量: "
-                   f"{sum(p.numel() for p in self.parameters()):,}")
+        # 計算和顯示模型信息
+        total_params = sum(p.numel() for p in self.parameters())
+        logger.info(f"Large Transformer初始化完成，總參數量: {total_params:,}")
+        logger.info(f"預估模型大小: {total_params * 4 / (1024**3):.2f}GB")
+    
+    def get_dynamic_config(self) -> Dict[str, Any]:
+        """獲取動態配置信息"""
+        return {
+            'model_dim': self.model_dim,
+            'num_layers': self.num_layers,
+            'num_heads': self.num_heads,
+            'ffn_dim': self.transformer_layers[0].ffn[0].out_features if self.transformer_layers else 0,
+            'output_dim_per_symbol': self.output_dim_per_symbol,
+            'use_multi_scale': self.use_multi_scale,
+            'use_cross_time_fusion': self.use_cross_time_fusion,
+            'head_dim': self.model_dim // self.num_heads
+        }
     
     def _create_positional_encoding(self, max_len: int, d_model: int) -> torch.Tensor:
         """創建正弦位置編碼"""

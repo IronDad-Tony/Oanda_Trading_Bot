@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from typing import Dict
+from typing import Dict, Any
 import numpy as np
 
 try:
@@ -171,6 +171,49 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         combined = F.layer_norm(combined, combined.shape[1:])
         
         return combined
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """獲取模型動態配置信息"""
+        if hasattr(self.enhanced_transformer, 'get_dynamic_config'):
+            return self.enhanced_transformer.get_dynamic_config()
+        else:
+            return {
+                'model_dim': TRANSFORMER_MODEL_DIM,
+                'num_layers': TRANSFORMER_NUM_LAYERS,
+                'num_heads': TRANSFORMER_NUM_HEADS,
+                'ffn_dim': TRANSFORMER_FFN_DIM,
+                'output_dim_per_symbol': TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
+            }
+    
+    def adapt_to_config(self, config: Dict[str, Any]) -> bool:
+        """動態適應新的配置
+        
+        Args:
+            config: 包含新配置的字典
+            
+        Returns:
+            是否成功適應新配置
+        """
+        try:
+            current_config = self.get_model_info()
+            
+            # 檢查是否需要重新初始化模型
+            key_params = ['model_dim', 'num_layers', 'num_heads', 'ffn_dim']
+            needs_reinit = any(
+                config.get(k) != current_config.get(k) 
+                for k in key_params if k in config
+            )
+            
+            if needs_reinit:
+                logger.warning("⚠️ 檢測到關鍵模型參數變化，建議重新初始化特徵提取器")
+                return False
+            
+            logger.info("✅ 特徵提取器配置已適應")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ 配置適應失敗: {e}")
+            return False
 
 
 class EnhancedTransformerFeatureExtractorWithMemory(EnhancedTransformerFeatureExtractor):

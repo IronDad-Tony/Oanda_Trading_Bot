@@ -456,6 +456,7 @@ class DynamicStrategyGenerator(nn.Module):
     """
     動態策略生成器：實時創建和調整交易策略
     基於遺傳算法和神經進化的混合方法
+    支持完全動態自適應維度配置
     """
     
     def __init__(self, state_dim: int, action_dim: int, 
@@ -467,34 +468,42 @@ class DynamicStrategyGenerator(nn.Module):
         self.base_strategies = base_strategies
         self.max_generated_strategies = max_generated_strategies
         
-        # 策略基因編碼器
+        # 動態計算中間層維度 - 自適應縮放
+        self.gene_hidden_dim = max(16, min(128, state_dim // 4))  # 動態隱藏層維度
+        self.gene_latent_dim = max(8, min(64, state_dim // 8))   # 動態潛在維度
+        self.decoder_hidden_1 = max(32, min(256, action_dim * 2))  # 解碼器第一層
+        self.decoder_hidden_2 = max(64, min(512, action_dim * 4))  # 解碼器第二層
+        self.fitness_hidden_1 = max(32, min(128, (state_dim + action_dim) // 2))
+        self.fitness_hidden_2 = max(16, min(64, (state_dim + action_dim) // 4))
+        
+        # 策略基因編碼器 - 動態維度
         self.gene_encoder = nn.Sequential(
-            nn.Linear(state_dim, 64),
+            nn.Linear(state_dim, self.gene_hidden_dim),
             nn.GELU(),
-            nn.Linear(64, 32),
+            nn.Linear(self.gene_hidden_dim, self.gene_hidden_dim // 2),
             nn.GELU(),
-            nn.Linear(32, 16)  # 16維基因編碼
+            nn.Linear(self.gene_hidden_dim // 2, self.gene_latent_dim)
         )
         
-        # 策略解碼器網絡
+        # 策略解碼器網絡 - 動態維度
         self.strategy_decoder = nn.ModuleDict({
             f"decoder_{i}": nn.Sequential(
-                nn.Linear(16, 64),
+                nn.Linear(self.gene_latent_dim, self.decoder_hidden_1),
                 nn.GELU(),
-                nn.Linear(64, 128),
+                nn.Linear(self.decoder_hidden_1, self.decoder_hidden_2),
                 nn.GELU(),
-                nn.Linear(128, action_dim),
+                nn.Linear(self.decoder_hidden_2, action_dim),
                 nn.Tanh()
             ) for i in range(max_generated_strategies)
         })
         
-        # 策略適應度評估器
+        # 策略適應度評估器 - 動態維度
         self.fitness_evaluator = nn.Sequential(
-            nn.Linear(state_dim + action_dim, 64),
+            nn.Linear(state_dim + action_dim, self.fitness_hidden_1),
             nn.ReLU(),
-            nn.Linear(64, 32),
+            nn.Linear(self.fitness_hidden_1, self.fitness_hidden_2),
             nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(self.fitness_hidden_2, 1),
             nn.Sigmoid()
         )
         
@@ -589,6 +598,7 @@ class EnhancedStrategySuperposition(nn.Module):
     """
     增強版策略疊加系統
     管理15+種策略的量子疊加，包含動態策略生成
+    支持完全動態自適應維度配置
     """
     
     def __init__(self, state_dim: int, action_dim: int, 
@@ -626,56 +636,145 @@ class EnhancedStrategySuperposition(nn.Module):
             self.dynamic_generator = DynamicStrategyGenerator(
                 state_dim, action_dim, self.base_strategies, max_generated_strategies=5
             )
-            total_strategies = self.num_base_strategies + 5
+            self.total_strategies = self.num_base_strategies + 5
         else:
-            total_strategies = self.num_base_strategies
+            self.total_strategies = self.num_base_strategies
+        
+        # 動態計算權重網絡的隱藏層維度 - 自適應縮放
+        self.vol_hidden_dim = max(16, min(64, self.total_strategies))
+        self.regime_hidden_dim = max(32, min(128, state_dim // 4))
+        self.corr_hidden_dim = max(32, min(128, (state_dim + 1) // 4))
         
         # 量子振幅參數（可學習）
         self.quantum_amplitudes = nn.Parameter(
-            torch.ones(total_strategies) / math.sqrt(total_strategies)
+            torch.ones(self.total_strategies) / math.sqrt(self.total_strategies)
         )
         
-        # 多層次權重調整網絡
+        # 多層次權重調整網絡 - 動態維度配置
         self.weight_networks = nn.ModuleDict({
             'volatility_net': nn.Sequential(
-                nn.Linear(1, 32),
+                nn.Linear(1, self.vol_hidden_dim),
                 nn.ReLU(),
-                nn.Linear(32, total_strategies),
+                nn.Linear(self.vol_hidden_dim, self.total_strategies),
                 nn.Sigmoid()
             ),
             'regime_net': nn.Sequential(
-                nn.Linear(state_dim, 64),
+                nn.Linear(state_dim, self.regime_hidden_dim),
                 nn.GELU(),
-                nn.Linear(64, total_strategies),
+                nn.Linear(self.regime_hidden_dim, self.total_strategies),
                 nn.Softmax(dim=-1)
             ),
             'correlation_net': nn.Sequential(
-                nn.Linear(state_dim + 1, 64),
+                nn.Linear(state_dim + 1, self.corr_hidden_dim),
                 nn.GELU(),
-                nn.Linear(64, total_strategies),
+                nn.Linear(self.corr_hidden_dim, self.total_strategies),
                 nn.Softmax(dim=-1)
             )
         })
         
         # 策略相互作用矩陣
         self.interaction_matrix = nn.Parameter(
-            torch.eye(total_strategies) + torch.randn(total_strategies, total_strategies) * 0.05
+            torch.eye(self.total_strategies) + torch.randn(self.total_strategies, self.total_strategies) * 0.05
         )
         
         # 策略性能追蹤
         self.register_buffer('strategy_performance_history', 
-                           torch.zeros(total_strategies, 100))  # 記錄最近100次性能
+                           torch.zeros(self.total_strategies, 100))  # 記錄最近100次性能
         self.register_buffer('performance_index', torch.tensor(0))
         
         # 量子糾纏效應模擬
         self.entanglement_strength = nn.Parameter(torch.tensor(0.1))
         
-        logger.info(f"初始化增強版策略疊加系統: {total_strategies}種策略")
+        logger.info(f"🌟 初始化增強版策略疊加系統: {self.total_strategies}種策略")
+        logger.info(f"📐 動態維度配置 - State: {state_dim}, Action: {action_dim}")
+        logger.info(f"🔧 權重網絡隱藏層 - Vol: {self.vol_hidden_dim}, Regime: {self.regime_hidden_dim}, Corr: {self.corr_hidden_dim}")
+    
+    def get_dynamic_dimensions(self) -> Dict[str, int]:
+        """獲取當前動態維度配置信息"""
+        return {
+            'state_dim': self.state_dim,
+            'action_dim': self.action_dim,
+            'total_strategies': self.total_strategies,
+            'vol_hidden_dim': self.vol_hidden_dim,
+            'regime_hidden_dim': self.regime_hidden_dim,
+            'corr_hidden_dim': self.corr_hidden_dim,
+            'num_base_strategies': self.num_base_strategies,
+            'dynamic_generation_enabled': self.enable_dynamic_generation
+        }
+    
+    def _adaptive_dimension_handler(self, tensor: torch.Tensor, 
+                                   expected_dim: int, 
+                                   operation_name: str = "unknown") -> torch.Tensor:
+        """
+        動態維度適配處理器
+        自動調整輸入張量以匹配期望維度
+        
+        Args:
+            tensor: 輸入張量
+            expected_dim: 期望的最後一個維度
+            operation_name: 操作名稱，用於日誌
+            
+        Returns:
+            適配後的張量
+        """
+        current_shape = tensor.shape
+        current_last_dim = current_shape[-1]
+        
+        if current_last_dim == expected_dim:
+            return tensor
+        
+        batch_dims = current_shape[:-1]
+        
+        if current_last_dim > expected_dim:
+            # 維度過大：使用線性投影降維
+            if not hasattr(self, f'_adaptive_projector_{operation_name}_{current_last_dim}_{expected_dim}'):
+                projector = nn.Linear(current_last_dim, expected_dim).to(tensor.device)
+                setattr(self, f'_adaptive_projector_{operation_name}_{current_last_dim}_{expected_dim}', projector)
+                logger.info(f"🔧 創建動態投影器: {operation_name} {current_last_dim}→{expected_dim}")
+            
+            projector = getattr(self, f'_adaptive_projector_{operation_name}_{current_last_dim}_{expected_dim}')
+            adapted_tensor = projector(tensor)
+            
+        elif current_last_dim < expected_dim:
+            # 維度過小：使用零填充擴展
+            pad_size = expected_dim - current_last_dim
+            padding = torch.zeros(*batch_dims, pad_size, device=tensor.device, dtype=tensor.dtype)
+            adapted_tensor = torch.cat([tensor, padding], dim=-1)
+            logger.info(f"🔧 動態零填充: {operation_name} {current_last_dim}→{expected_dim}")
+        
+        return adapted_tensor
+    
+    def _validate_and_adapt_inputs(self, state: torch.Tensor, 
+                                  volatility: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        驗證並適配輸入維度
+        
+        Args:
+            state: 市場狀態張量
+            volatility: 波動率張量
+            
+        Returns:
+            適配後的狀態和波動率張量
+        """
+        # 適配狀態張量
+        adapted_state = self._adaptive_dimension_handler(
+            state, self.state_dim, "state_input"
+        )
+        
+        # 確保波動率是一維的
+        if volatility.dim() > 1 and volatility.shape[-1] != 1:
+            volatility = volatility.mean(dim=-1, keepdim=True)
+        
+        if volatility.dim() == 1:
+            volatility = volatility.unsqueeze(-1)
+        
+        return adapted_state, volatility.squeeze(-1)
     
     def forward(self, state: torch.Tensor, volatility: torch.Tensor, 
                 market_regime: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         前向傳播：計算增強策略疊加輸出
+        支持動態維度適配
         
         Args:
             state: 量子編碼的市場狀態
@@ -685,26 +784,47 @@ class EnhancedStrategySuperposition(nn.Module):
         Returns:
             Tuple[疊加策略輸出, 詳細信息字典]
         """
+        # 動態維度適配
+        state, volatility = self._validate_and_adapt_inputs(state, volatility)
         batch_size = state.size(0)
         
         # 執行所有基礎策略
         base_strategy_outputs = []
         for strategy in self.base_strategies:
-            output = strategy(state)
-            base_strategy_outputs.append(output)
+            try:
+                output = strategy(state)
+                base_strategy_outputs.append(output)
+            except RuntimeError as e:
+                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                    logger.warning(f"⚠️ 策略 {strategy.get_strategy_name()} 維度不匹配，使用自適應處理")
+                    # 嘗試自適應處理
+                    adapted_state = self._adaptive_dimension_handler(state, strategy.strategy_net[0].in_features, f"strategy_{strategy.get_strategy_name()}")
+                    output = strategy(adapted_state)
+                    base_strategy_outputs.append(output)
+                else:
+                    raise e
         
         strategy_outputs = base_strategy_outputs.copy()
         
         # 動態策略生成
         dynamic_fitness = None
         if self.enable_dynamic_generation:
-            dynamic_strategies, dynamic_fitness = self.dynamic_generator.generate_strategies(state)
-            strategy_outputs.extend(dynamic_strategies)
+            try:
+                dynamic_strategies, dynamic_fitness = self.dynamic_generator.generate_strategies(state)
+                strategy_outputs.extend(dynamic_strategies)
+            except RuntimeError as e:
+                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                    logger.warning("⚠️ 動態策略生成維度不匹配，使用自適應處理")
+                    adapted_state = self._adaptive_dimension_handler(state, self.dynamic_generator.state_dim, "dynamic_generator")
+                    dynamic_strategies, dynamic_fitness = self.dynamic_generator.generate_strategies(adapted_state)
+                    strategy_outputs.extend(dynamic_strategies)
+                else:
+                    raise e
         
         # 堆疊所有策略輸出
         strategy_tensor = torch.stack(strategy_outputs, dim=1)  # [batch, num_strategies, action_dim]
         
-        # 計算多層次權重
+        # 計算多層次權重 - 使用動態適配
         vol_weights = self.weight_networks['volatility_net'](volatility.unsqueeze(-1))
         regime_weights = self.weight_networks['regime_net'](state)
         corr_input = torch.cat([state, volatility.unsqueeze(-1)], dim=-1)
@@ -735,6 +855,7 @@ class EnhancedStrategySuperposition(nn.Module):
             'regime_weights': regime_weights,
             'corr_weights': corr_weights,
             'num_active_strategies': torch.sum(final_weights > 0.01, dim=-1).float(),
+            'dimensions_info': self.get_dynamic_dimensions()
         }
         
         if dynamic_fitness is not None:

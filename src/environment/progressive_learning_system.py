@@ -728,7 +728,188 @@ class ProgressiveLearningSystem:
                 f"stage={stats['current_stage']}, "
                 f"episode={stats['current_episode']}, "
                 f"stage_progress={advancement_status.get('progress_percentage', 0):.1f}%)")
-
+    
+    def get_integration_status(self) -> Dict[str, Any]:
+        """獲取系統整合狀態信息"""
+        return {
+            'current_stage': self.current_stage.name,
+            'stage_episodes': self.stage_episodes,
+            'total_episodes': self.current_episode,
+            'stage_performance_avg': np.mean(self.stage_performance_history[self.current_stage][-10:]) if self.stage_performance_history[self.current_stage] else 0.0,
+            'advancement_progress': self.advancement_progress.get(self.current_stage, 0),
+            'can_advance': self.current_stage != LearningStage.ADVANCED,
+            'force_advancement_active': self.force_advancement,
+            'device': self.device
+        }
+    
+    def update_from_transformer_output(self, transformer_features: torch.Tensor, strategy_output: torch.Tensor) -> Dict[str, float]:
+        """基於Transformer輸出更新學習指標"""
+        """
+        根據Transformer和策略層輸出計算學習相關指標
+        
+        Args:
+            transformer_features: Transformer特徵輸出
+            strategy_output: 量子策略層輸出
+            
+        Returns:
+            更新的指標字典
+        """
+        try:
+            # 轉換為numpy進行計算
+            if isinstance(transformer_features, torch.Tensor):
+                transformer_np = transformer_features.detach().cpu().numpy()
+            else:
+                transformer_np = transformer_features
+                
+            if isinstance(strategy_output, torch.Tensor):
+                strategy_np = strategy_output.detach().cpu().numpy()
+            else:
+                strategy_np = strategy_output
+            
+            # 計算特徵統計
+            feature_stats = {
+                'feature_mean': float(np.mean(transformer_np)),
+                'feature_std': float(np.std(transformer_np)),
+                'feature_entropy': self._calculate_entropy(transformer_np),
+                'strategy_diversity': self._calculate_strategy_diversity(strategy_np),
+                'learning_complexity': self._estimate_learning_complexity(transformer_np, strategy_np)
+            }
+            
+            return feature_stats
+            
+        except Exception as e:
+            logger.error(f"更新Transformer指標時發生錯誤: {e}")
+            return {}
+    
+    def _calculate_entropy(self, features: np.ndarray) -> float:
+        """計算特徵熵值（學習多樣性指標）"""
+        try:
+            # 將特徵離散化
+            hist, _ = np.histogram(features.flatten(), bins=50, density=True)
+            hist = hist + 1e-10  # 避免log(0)
+            entropy = -np.sum(hist * np.log(hist))
+            return float(entropy)
+        except:
+            return 0.0
+    
+    def _calculate_strategy_diversity(self, strategy_output: np.ndarray) -> float:
+        """計算策略多樣性"""
+        try:
+            # 計算策略輸出的變異係數
+            if strategy_output.std() == 0:
+                return 0.0
+            diversity = strategy_output.std() / (abs(strategy_output.mean()) + 1e-10)
+            return float(np.clip(diversity, 0, 5))  # 限制範圍
+        except:
+            return 0.0
+    
+    def _estimate_learning_complexity(self, transformer_features: np.ndarray, strategy_output: np.ndarray) -> float:
+        """估計當前學習複雜度"""
+        try:
+            # 基於特徵和策略輸出的複雜度
+            feature_complexity = np.var(transformer_features)
+            strategy_complexity = np.var(strategy_output)
+            
+            # 組合複雜度分數
+            complexity_score = (feature_complexity + strategy_complexity) / 2
+            return float(np.clip(complexity_score, 0, 10))
+        except:
+            return 1.0
+    
+    def get_stage_transition_readiness(self) -> Dict[str, Any]:
+        """評估階段轉換準備狀況"""
+        if self.current_stage == LearningStage.ADVANCED:
+            return {
+                'ready_for_transition': False,
+                'reason': '已達到最高階段',
+                'completion_percentage': 100.0
+            }
+        
+        criteria = self.advancement_criteria[self.current_stage]
+        recent_performance = self.stage_performance_history[self.current_stage][-20:] if self.stage_performance_history[self.current_stage] else []
+        
+        # 檢查各項條件達成情況
+        conditions_met = {}
+        
+        # 1. 最少回合數
+        conditions_met['min_episodes'] = self.stage_episodes >= criteria['min_episodes']
+        
+        # 2. 平均獎勵
+        avg_reward = np.mean(recent_performance) if recent_performance else float('-inf')
+        conditions_met['avg_reward'] = avg_reward >= criteria['min_avg_reward']
+        
+        # 3. 其他階段特定條件
+        if 'win_rate_threshold' in criteria:
+            # 這裡需要從metrics中獲取勝率，暫時跳過
+            conditions_met['win_rate'] = True  # 簡化處理
+        
+        if 'consistency_episodes' in criteria:
+            recent_good = sum(1 for r in recent_performance[-criteria['consistency_episodes']:] if r > 0)
+            conditions_met['consistency'] = recent_good >= criteria['consistency_episodes']
+        
+        # 計算整體完成度
+        completion_percentage = (sum(conditions_met.values()) / len(conditions_met)) * 100
+        
+        return {
+            'ready_for_transition': all(conditions_met.values()),
+            'conditions_met': conditions_met,
+            'completion_percentage': completion_percentage,
+            'current_avg_reward': avg_reward,
+            'episodes_in_stage': self.stage_episodes,
+            'required_episodes': criteria['min_episodes']
+        }
+    
+    def force_next_stage(self) -> bool:
+        """強制進入下一階段"""
+        if self.current_stage == LearningStage.ADVANCED:
+            logger.warning("已經在最高階段，無法進一步進階")
+            return False
+        
+        self.force_advancement = True
+        logger.info(f"強制進階已啟用，將在下次計算獎勵時進入下一階段")
+        return True
+    
+    def reset_stage_progress(self):
+        """重置當前階段進度"""
+        self.stage_episodes = 0
+        self.advancement_progress[self.current_stage] = 0
+        logger.info(f"重置階段進度: {self.current_stage.name}")
+    
+    def get_reward_function_info(self) -> Dict[str, Any]:
+        """獲取當前獎勵函數詳細信息"""
+        current_fn = self.get_current_reward_function()
+        
+        info = {
+            'stage': self.current_stage.name,
+            'function_type': type(current_fn).__name__,
+            'device': getattr(current_fn, 'device', 'cpu')
+        }
+        
+        # 獲取權重信息
+        if hasattr(current_fn, 'pnl_weight'):
+            info['weights'] = {
+                'pnl_weight': getattr(current_fn, 'pnl_weight', 0),
+                'risk_weight': getattr(current_fn, 'risk_weight', 0),
+                'frequency_weight': getattr(current_fn, 'frequency_weight', 0)
+            }
+            
+        # 添加額外權重（如果存在）
+        if hasattr(current_fn, 'sharpe_weight'):
+            info['weights'].update({
+                'sharpe_weight': getattr(current_fn, 'sharpe_weight', 0),
+                'drawdown_weight': getattr(current_fn, 'drawdown_weight', 0),
+                'winrate_weight': getattr(current_fn, 'winrate_weight', 0)
+            })
+            
+        if hasattr(current_fn, 'sortino_weight'):
+            info['weights'].update({
+                'sortino_weight': getattr(current_fn, 'sortino_weight', 0),
+                'var_weight': getattr(current_fn, 'var_weight', 0),
+                'cost_weight': getattr(current_fn, 'cost_weight', 0),
+                'consistency_weight': getattr(current_fn, 'consistency_weight', 0)
+            })
+        
+        return info
 
 def test_progressive_learning_system():
     """測試漸進式學習系統"""

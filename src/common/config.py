@@ -65,16 +65,16 @@ PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
 
 
 # --- 模型與訓練參數 ---
-# Enhanced Transformer 配置 - Phase 3 升級
+# Large Transformer 配置 - Phase 4 升級
 TIMESTEPS = 128             # 輸入Transformer的時間步長 (序列長度)
-TRANSFORMER_MODEL_DIM = 512 # 增強版Transformer維度 (從256提升到512)
-TRANSFORMER_NUM_LAYERS = 12  # 增強版層數 (從4提升到12)
-TRANSFORMER_NUM_HEADS = 16   # 增強版注意力頭數 (從8提升到16)
-TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 4  # FFN維度 (2048)
+TRANSFORMER_MODEL_DIM = 768 # Large Transformer維度 (從512提升到768)
+TRANSFORMER_NUM_LAYERS = 16  # Large模型層數 (從12提升到16)
+TRANSFORMER_NUM_HEADS = 24   # Large模型注意力頭數 (從16提升到24)
+TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 4  # FFN維度 (3072)
 TRANSFORMER_DROPOUT_RATE = 0.1
 TRANSFORMER_LAYER_NORM_EPS = 1e-5
 TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING = 5000 # PositionalEncoding 的 max_len
-TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 128     # Transformer處理後，每個symbol的輸出特徵維度
+TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 192     # Transformer處理後，每個symbol的輸出特徵維度 (動態適應)
 
 # 增強版Transformer特有配置
 ENHANCED_TRANSFORMER_USE_MULTI_SCALE = True    # 啟用多尺度特徵提取器
