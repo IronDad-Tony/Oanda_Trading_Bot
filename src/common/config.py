@@ -65,16 +65,22 @@ PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
 
 
 # --- 模型與訓練參數 ---
-# Transformer 相關
-TIMESTEPS = 128             # 輸入Transformer的時間步長 (序列長度) - 修復維度不匹配錯誤
-TRANSFORMER_MODEL_DIM = 256 # Transformer內部的主要模型維度 (d_model) - 根據用戶要求減小
-TRANSFORMER_NUM_LAYERS = 4  # Transformer Encoder 的層數 - 根據用戶要求減小
-TRANSFORMER_NUM_HEADS = 8   # 多頭注意力機制的頭數 (確保 d_model % num_heads == 0, 256 % 8 == 0)
-TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 4  # Transformer內部前饋網絡的隱藏層維度 (保持4倍關係)
+# Enhanced Transformer 配置 - Phase 3 升級
+TIMESTEPS = 128             # 輸入Transformer的時間步長 (序列長度)
+TRANSFORMER_MODEL_DIM = 512 # 增強版Transformer維度 (從256提升到512)
+TRANSFORMER_NUM_LAYERS = 12  # 增強版層數 (從4提升到12)
+TRANSFORMER_NUM_HEADS = 16   # 增強版注意力頭數 (從8提升到16)
+TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 4  # FFN維度 (2048)
 TRANSFORMER_DROPOUT_RATE = 0.1
 TRANSFORMER_LAYER_NORM_EPS = 1e-5
 TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING = 5000 # PositionalEncoding 的 max_len
 TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 128     # Transformer處理後，每個symbol的輸出特徵維度
+
+# 增強版Transformer特有配置
+ENHANCED_TRANSFORMER_USE_MULTI_SCALE = True    # 啟用多尺度特徵提取器
+ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION = True  # 啟用跨時間尺度融合
+ENHANCED_TRANSFORMER_MULTI_SCALE_KERNELS = [3, 5, 7, 11]  # 多尺度卷積核大小
+ENHANCED_TRANSFORMER_TIME_SCALES = [5, 15, 30, 60]  # 跨時間尺度
 
 # src/common/config.py
 # ... (其他配置) ...
@@ -157,7 +163,14 @@ def setup_gpu_optimization():
 
 # 設備配置
 GPU_OPTIMIZED = setup_gpu_optimization()
-DEVICE = "auto"  # 讓SACAgentWrapper自動選擇最佳設備
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+    print(f"✅ 檢測到CUDA GPU，設備設置為: {DEVICE}")
+    print(f"   - GPU名稱: {torch.cuda.get_device_name(0)}")
+    print(f"   - GPU記憶體: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
+else:
+    DEVICE = "cpu"
+    print("⚠️  未檢測到CUDA GPU，使用CPU模式")
 
 # 混合精度訓練 (如果GPU支持且希望加速)
 USE_AMP = GPU_OPTIMIZED

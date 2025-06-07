@@ -294,11 +294,11 @@ class MetaLearningSystem(nn.Module):
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
-        
-        # 配置追蹤
+          # 配置追蹤
         self.current_config = None
         self.config_history = []
         self.dimension_changes = []
+        self.adaptation_history = []  # 添加適應歷史記錄
         
         # 性能指標
         self.register_buffer('adaptation_success_rate', torch.tensor(0.0))
@@ -342,8 +342,7 @@ class MetaLearningSystem(nn.Module):
         
         # 聚合檢測結果
         final_config = self._aggregate_detection_results(config_results)
-        
-        # 記錄配置變化
+          # 記錄配置變化
         if self.current_config is None or not self._configs_equal(self.current_config, final_config):
             if self.current_config is not None:
                 change = DimensionChange(
@@ -355,6 +354,17 @@ class MetaLearningSystem(nn.Module):
                 )
                 self.dimension_changes.append(change)
                 logger.info(f"檢測到配置變化: {change.change_type}")
+                
+                # 記錄適應事件
+                self.record_adaptation_event(
+                    event_type="config_detection",
+                    success=True,
+                    details={
+                        'old_state_dim': self.current_config.state_dim,
+                        'new_state_dim': final_config.state_dim,
+                        'change_type': change.change_type
+                    }
+                )
                 
             self.current_config = final_config
             self.config_history.append(final_config)
@@ -703,6 +713,80 @@ class MetaLearningSystem(nn.Module):
             'encoder_current_dim': self.strategy_encoder.current_input_dim,
             'encoder_dimension_changes': len(self.strategy_encoder.dimension_history),
             'supported_detection_methods': self.config_detection_methods
+        }
+    
+    def record_adaptation_event(self, event_type: str, success: bool, details: Dict[str, Any] = None):
+        """
+        記錄適應事件到適應歷史
+        
+        Args:
+            event_type: 事件類型 (如 'dimension_change', 'strategy_adaptation', 'config_detection')
+            success: 事件是否成功
+            details: 額外的事件詳情
+        """
+        if details is None:
+            details = {}
+            
+        adaptation_event = {
+            'timestamp': datetime.now().isoformat(),
+            'event_type': event_type,
+            'success': success,
+            'details': details
+        }
+        
+        self.adaptation_history.append(adaptation_event)
+        
+        # 更新適應成功率
+        self.total_adaptations += 1
+        if success:
+            # 計算新的成功率（移動平均）
+            current_success_rate = self.adaptation_success_rate.item()
+            total_adaptations = self.total_adaptations.item()
+            new_success_rate = (current_success_rate * (total_adaptations - 1) + 1.0) / total_adaptations
+            self.adaptation_success_rate.fill_(new_success_rate)
+        
+        logger.debug(f"記錄適應事件: {event_type} - 成功: {success}")
+    
+    def get_adaptation_statistics(self) -> Dict[str, Any]:
+        """
+        獲取適應統計信息
+        
+        Returns:
+            Dict: 包含適應統計的字典
+        """
+        if not self.adaptation_history:
+            return {
+                'total_events': 0,
+                'success_rate': 0.0,
+                'event_types': {},
+                'recent_events': []
+            }
+        
+        # 統計事件類型
+        event_types = {}
+        successful_events = 0
+        
+        for event in self.adaptation_history:
+            event_type = event['event_type']
+            if event_type not in event_types:
+                event_types[event_type] = {'total': 0, 'successful': 0}
+            
+            event_types[event_type]['total'] += 1
+            if event['success']:
+                event_types[event_type]['successful'] += 1
+                successful_events += 1
+        
+        # 計算成功率
+        success_rate = successful_events / len(self.adaptation_history) if self.adaptation_history else 0.0
+        
+        # 獲取最近的事件
+        recent_events = self.adaptation_history[-5:] if len(self.adaptation_history) > 5 else self.adaptation_history
+        
+        return {
+            'total_events': len(self.adaptation_history),
+            'success_rate': success_rate,
+            'event_types': event_types,
+            'recent_events': recent_events
         }
 
 

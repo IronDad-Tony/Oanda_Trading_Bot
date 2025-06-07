@@ -94,6 +94,85 @@ class MultiScaleFeatureExtractor(nn.Module):
         return attended_features + fused_features  # 殘差連接
 
 
+class MarketStateDetector(nn.Module):
+    """市場狀態檢測器：檢測趨勢、波動、均值回歸、突破等市場狀態"""
+    
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.d_model = d_model
+        
+        # 狀態特徵提取器
+        self.state_extractors = nn.ModuleDict({
+            'trend': nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Linear(d_model // 2, 1),
+                nn.Sigmoid()
+            ),
+            'volatility': nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Linear(d_model // 2, 1),
+                nn.Sigmoid()
+            ),
+            'momentum': nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Linear(d_model // 2, 1),
+                nn.Tanh()
+            ),
+            'regime': nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Linear(d_model // 2, 4),  # 4種市場機制
+                nn.Softmax(dim=-1)
+            )
+        })
+        
+        # 狀態融合網絡
+        self.state_fusion = nn.Sequential(
+            nn.Linear(7, d_model // 4),  # 1+1+1+4 = 7個狀態特徵
+            nn.GELU(),
+            nn.Linear(d_model // 4, d_model // 8),
+            nn.GELU(),
+            nn.Linear(d_model // 8, 4),
+            nn.Softmax(dim=-1)
+        )
+    
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            x: [batch_size, d_model] 或 [batch_size, seq_len, d_model]
+        Returns:
+            包含各種市場狀態的字典
+        """
+        if x.dim() == 3:
+            # 如果是序列，取平均
+            x = x.mean(dim=1)
+        
+        # 提取各種狀態特徵
+        states = {}
+        state_features = []
+        
+        for state_name, extractor in self.state_extractors.items():
+            state_value = extractor(x)
+            states[state_name] = state_value
+            
+            if state_name == 'regime':
+                state_features.append(state_value)  # [batch, 4]
+            else:
+                state_features.append(state_value)  # [batch, 1]
+        
+        # 拼接所有狀態特徵
+        concatenated_states = torch.cat(state_features, dim=-1)  # [batch, 7]
+        
+        # 融合得到最終市場狀態
+        final_market_state = self.state_fusion(concatenated_states)
+        states['final_state'] = final_market_state
+        
+        return states
+
+
 class AdaptiveAttentionLayer(nn.Module):
     """自適應注意力層：根據市場狀態動態調整注意力模式"""
     
@@ -111,17 +190,25 @@ class AdaptiveAttentionLayer(nn.Module):
         )
         
         # 市場狀態檢測器
-        self.market_state_detector = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
-            nn.Linear(d_model // 2, 4),  # 4種市場狀態
-            nn.Softmax(dim=-1)
-        )
+        self.market_state_detector = MarketStateDetector(d_model)
         
         # 狀態特定的注意力權重調製器
         self.attention_modulators = nn.ModuleList([
-            nn.Linear(d_model, d_model) for _ in range(4)
+            nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.GELU(),
+                nn.Linear(d_model, d_model),
+                nn.Sigmoid()
+            ) for _ in range(4)  # 4種市場狀態
         ])
+        
+        # 自適應溫度參數
+        self.temperature_controller = nn.Sequential(
+            nn.Linear(d_model, d_model // 4),
+            nn.GELU(),
+            nn.Linear(d_model // 4, 1),
+            nn.Softplus()  # 確保溫度為正
+        )
         
         # 輸出投影
         self.output_projection = nn.Linear(d_model, d_model)
@@ -137,7 +224,12 @@ class AdaptiveAttentionLayer(nn.Module):
         batch_size, seq_len, d_model = x.shape
         
         # 檢測市場狀態
-        market_states = self.market_state_detector(x.mean(dim=1))  # [batch, 4]
+        market_states = self.market_state_detector(x)
+        final_state = market_states['final_state']  # [batch, 4]
+        
+        # 計算自適應溫度
+        avg_features = x.mean(dim=1)  # [batch, d_model]
+        temperature = self.temperature_controller(avg_features)  # [batch, 1]
         
         # 標準注意力計算
         attn_output, attn_weights = self.attention(
@@ -147,12 +239,15 @@ class AdaptiveAttentionLayer(nn.Module):
         # 根據市場狀態調製注意力輸出
         modulated_outputs = []
         for i, modulator in enumerate(self.attention_modulators):
-            state_weight = market_states[:, i:i+1, None]  # [batch, 1, 1]
+            state_weight = final_state[:, i:i+1, None]  # [batch, 1, 1]
             modulated = modulator(attn_output) * state_weight
             modulated_outputs.append(modulated)
         
         # 加權融合所有狀態的輸出
         adaptive_output = sum(modulated_outputs)
+        
+        # 應用自適應溫度
+        adaptive_output = adaptive_output * temperature.unsqueeze(1)
         
         # 最終投影和dropout
         output = self.output_projection(adaptive_output)
@@ -233,11 +328,18 @@ class CrossTimeScaleFusion(nn.Module):
                     nhead=8,
                     dim_feedforward=d_model * 2,
                     dropout=0.1,
-                    batch_first=True
+                    batch_first=True,
+                    norm_first=True
                 ),
                 num_layers=2
             ) for _ in time_scales
         ])
+        
+        # 尺度權重計算器
+        self.scale_weight_calculator = nn.Sequential(
+            nn.Linear(d_model, len(time_scales)),
+            nn.Softmax(dim=-1)
+        )
         
         # 跨尺度注意力
         self.cross_scale_attention = nn.MultiheadAttention(
@@ -246,12 +348,21 @@ class CrossTimeScaleFusion(nn.Module):
             batch_first=True
         )
         
-        # 融合網絡
-        self.fusion_net = nn.Sequential(
+        # 時間一致性約束網絡
+        self.consistency_network = nn.Sequential(
             nn.Linear(d_model * len(time_scales), d_model * 2),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(d_model * 2, d_model)
+            nn.Linear(d_model * 2, d_model),
+            nn.LayerNorm(d_model)
+        )
+        
+        # 自適應融合權重
+        self.adaptive_fusion = nn.Sequential(
+            nn.Linear(d_model * len(time_scales), d_model),
+            nn.GELU(),
+            nn.Linear(d_model, len(time_scales)),
+            nn.Softmax(dim=-1)
         )
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -279,12 +390,33 @@ class CrossTimeScaleFusion(nn.Module):
             
             scale_features.append(upsampled)
         
-        # 跨尺度注意力融合
-        concatenated = torch.cat(scale_features, dim=-1)  # [batch, seq_len, d_model*num_scales]
-        fused = self.fusion_net(concatenated)
+        # 計算尺度權重
+        avg_features = x.mean(dim=1)  # [batch, d_model]
+        scale_weights = self.scale_weight_calculator(avg_features)  # [batch, num_scales]
         
-        # 與原始特徵進行注意力交互
-        cross_attended, _ = self.cross_scale_attention(x, fused, fused)
+        # 加權融合尺度特徵
+        weighted_features = []
+        for i, feat in enumerate(scale_features):
+            weight = scale_weights[:, i:i+1, None]  # [batch, 1, 1]
+            weighted_features.append(feat * weight)
+        
+        # 時間一致性約束
+        concatenated = torch.cat(scale_features, dim=-1)  # [batch, seq_len, d_model*num_scales]
+        consistency_features = self.consistency_network(concatenated)
+        
+        # 自適應融合
+        fusion_weights = self.adaptive_fusion(concatenated)  # [batch, seq_len, num_scales]
+        
+        # 最終融合
+        final_fused = torch.zeros_like(x)
+        for i, feat in enumerate(scale_features):
+            weight = fusion_weights[:, :, i:i+1]  # [batch, seq_len, 1]
+            final_fused += feat * weight
+        
+        # 與一致性特徵進行注意力交互
+        cross_attended, _ = self.cross_scale_attention(
+            consistency_features, final_fused, final_fused
+        )
         
         return cross_attended + x  # 殘差連接
 
