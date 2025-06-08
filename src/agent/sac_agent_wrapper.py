@@ -452,15 +452,18 @@ class QuantumEnhancedSAC:
             raise
 
     def get_policy_parameters(self):
-        if self.agent and self.agent.policy:
-            return self.agent.policy.parameters()
+        if self.agent and self.agent.policy:        return self.agent.policy.parameters()
         return None
     
     def get_feature_extractor_parameters(self):
         if self.agent and self.agent.policy and hasattr(self.agent.policy, 'features_extractor') \
-           and self.agent.policy.features_extractor is not None \
-           and hasattr(self.agent.policy.features_extractor, 'transformer'):
-            return self.agent.policy.features_extractor.transformer.parameters() # type: ignore
+           and self.agent.policy.features_extractor is not None:
+            # 檢查增強版Transformer特徵提取器
+            if hasattr(self.agent.policy.features_extractor, 'enhanced_transformer'):
+                return self.agent.policy.features_extractor.enhanced_transformer.parameters() # type: ignore
+            # 檢查原版Transformer特徵提取器
+            elif hasattr(self.agent.policy.features_extractor, 'transformer'):
+                return self.agent.policy.features_extractor.transformer.parameters() # type: ignore
         return None
 
     def _create_strategy_innovation(self):
