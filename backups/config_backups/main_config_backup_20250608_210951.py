@@ -123,7 +123,7 @@ BEST_MODEL_SUBDIR = "best_model" # 相對於 WEIGHTS_DIR
 # SAC 相關
 SAC_GAMMA = 0.95             # 折扣因子
 SAC_LEARNING_RATE = 3e-5     # 學習率
-SAC_BATCH_SIZE = 102          # 根據用戶要求設定批次大小
+SAC_BATCH_SIZE = 32          # 根據用戶要求設定批次大小
 SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # 每個交易對的緩衝區大小因子，恢復為 500
 SAC_LEARNING_STARTS_FACTOR = 200 # 學習開始前收集的最小樣本數因子 (總樣本 = N_symbols * BATCH_SIZE * factor)
 SAC_TRAIN_FREQ_STEPS = 32    # 減少訓練頻率以提高效率

@@ -12,7 +12,7 @@
   "training": {
     "total_timesteps": 2000000,
     "learning_rate": 0.0001,
-    "batch_size": 204,
+    "batch_size": 128,
     "buffer_size": 200000,
     "gradient_steps": 2,
     "train_freq": 4,

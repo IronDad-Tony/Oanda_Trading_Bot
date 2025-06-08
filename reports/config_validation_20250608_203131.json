@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-06-08T20:31:31.072821",
+  "total_checks": 8,
+  "passed_checks": 8,
+  "issues": [
+    {
+      "level": "warning",
+      "category": "value",
+      "module": "config.py",
+      "issue": "MAX_SYMBOLS_ALLOWED 未定義",
+      "current_value": null,
+      "expected_value": null,
+      "fix_suggestion": "設置合理的最大交易品種數"
+    }
+  ],
+  "critical_errors": 0,
+  "warnings": 1,
+  "overall_status": "warnings"
+}
