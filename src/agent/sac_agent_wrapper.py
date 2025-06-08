@@ -25,6 +25,10 @@ import gc  # 垃圾回收
 
 try:
     from src.agent.sac_policy import CustomSACPolicy
+    from src.agent.high_level_integration_system import HighLevelIntegrationSystem
+    from src.agent.strategy_innovation_module import create_strategy_innovation_module
+    from src.agent.market_state_awareness_system import MarketStateAwarenessSystem
+    from src.agent.meta_learning_optimizer import MetaLearningOptimizer
     from src.common.config import (
         DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
         SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
@@ -35,6 +39,10 @@ try:
 except ImportError:
     try:
         from src.agent.sac_policy import CustomSACPolicy
+        from src.agent.high_level_integration_system import HighLevelIntegrationSystem
+        from src.agent.strategy_innovation_module import create_strategy_innovation_module
+        from src.agent.market_state_awareness_system import MarketStateAwarenessSystem
+        from src.agent.meta_learning_optimizer import MetaLearningOptimizer
         from src.common.config import (
             DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
             SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
@@ -53,6 +61,10 @@ except ImportError:
             logger.addHandler(_ch_wrapper)
         logger.error(f"Direct run SACAgentWrapper: Critical import error: {e_retry_wrapper}", exc_info=True)
         CustomSACPolicy = None  # type: ignore
+        HighLevelIntegrationSystem = None  # type: ignore
+        create_strategy_innovation_module = None  # type: ignore
+        MarketStateAwarenessSystem = None  # type: ignore
+        MetaLearningOptimizer = None  # type: ignore
         DEVICE = "cpu"; SAC_LEARNING_RATE = 3e-4; SAC_BATCH_SIZE = 256; SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 1000
         SAC_LEARNING_STARTS_FACTOR = 10; SAC_GAMMA = 0.99; SAC_ENT_COEF = 'auto'
         SAC_TRAIN_FREQ_STEPS = 1; SAC_GRADIENT_STEPS = 1; SAC_TAU = 0.005; TIMESTEPS = 128
@@ -126,14 +138,12 @@ class QuantumEnhancedSAC:
             logger.info(f"TensorBoard 將記錄到: {self.tensorboard_log_path}")
         else:
             self.tensorboard_log_path = tensorboard_log_path
-            self.session_subdir = ""
-
-        # 準備 policy_kwargs，合併用戶提供的和默認的設置
-        from src.agent.transformer_feature_extractor import TransformerFeatureExtractor
+            self.session_subdir = ""        # 準備 policy_kwargs，合併用戶提供的和默認的設置
+        from src.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
         default_policy_kwargs = dict(
             net_arch=dict(pi=[256, 256], qf=[256, 256]),
-            features_extractor_class=TransformerFeatureExtractor,
-            features_extractor_kwargs={"transformer_kwargs": {}},
+            features_extractor_class=EnhancedTransformerFeatureExtractor,
+            features_extractor_kwargs={"enhanced_transformer_output_dim_per_symbol": 128},
         )
         
         # 如果用戶提供了 policy_kwargs，則合併
@@ -157,9 +167,49 @@ class QuantumEnhancedSAC:
             ent_coef=ent_coef, policy_kwargs=self.policy_kwargs,
             verbose=verbose, seed=seed, device=self.device,
             tensorboard_log=full_tensorboard_path
-        )
-
-        # CustomSACPolicy 在內部已使用 TransformerFeatureExtractor，無需手動替換
+        )        # CustomSACPolicy 在內部已使用 TransformerFeatureExtractor，無需手動替換        # Initialize High-Level Integration System for Phase 5
+        try:
+            if HighLevelIntegrationSystem is not None:
+                # Create real components for integration system
+                real_strategy_innovation = self._create_strategy_innovation()
+                real_market_state_awareness = self._create_market_state_awareness()
+                real_meta_learning_optimizer = self._create_meta_learning_optimizer()
+                
+                # Create required placeholder components
+                from src.agent.high_level_integration_system import (
+                    DynamicPositionManager, 
+                    AnomalyDetector, 
+                    EmergencyStopLoss
+                )
+                
+                position_manager = DynamicPositionManager(feature_dim=768)
+                anomaly_detector = AnomalyDetector(input_dim=768)
+                emergency_stop_loss_system = EmergencyStopLoss()
+                  # Create config with feature_dim and other settings
+                integration_config = {
+                    'feature_dim': 768,
+                    'enable_dynamic_adaptation': True,
+                    'expected_maml_input_dim': 768,
+                    'num_maml_tasks': 5,
+                    'maml_shots': 5
+                }
+                
+                self.high_level_integration = HighLevelIntegrationSystem(
+                    strategy_innovation_module=real_strategy_innovation,
+                    market_state_awareness_system=real_market_state_awareness,
+                    meta_learning_optimizer=real_meta_learning_optimizer,
+                    position_manager=position_manager,
+                    anomaly_detector=anomaly_detector,
+                    emergency_stop_loss_system=emergency_stop_loss_system,
+                    config=integration_config
+                )
+                logger.info("✅ HighLevelIntegrationSystem initialized successfully")
+            else:
+                self.high_level_integration = None
+                logger.warning("⚠️ HighLevelIntegrationSystem not available")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize HighLevelIntegrationSystem: {e}")
+            self.high_level_integration = None
 
         self.custom_objects = custom_objects if custom_objects is not None else {}
         self.custom_objects["policy_class"] = self.policy_class
@@ -361,9 +411,10 @@ class QuantumEnhancedSAC:
             rewards: 各策略在最近episode的累積獎勵 (形狀: [batch_size, num_strategies])
         """
         rewards_tensor = torch.FloatTensor(rewards).to(self.device)
-        probs = F.softmax(self.quantum_policy.amplitudes, dim=0)
-          # 計算策略損失
-        loss = -torch.mean(torch.sum(torch.log(probs) * rewards_tensor, dim=1))        # 優化振幅參數
+        probs = F.softmax(self.quantum_policy.amplitudes, dim=0)        # 計算策略損失
+        loss = -torch.mean(torch.sum(torch.log(probs) * rewards_tensor, dim=1))
+        
+        # 優化振幅參數
         self.quantum_policy.quantum_annealing_step(rewards_tensor)
 
     def save(self, path: Union[str, Path]):
@@ -391,26 +442,217 @@ class QuantumEnhancedSAC:
             # 使用統一的 TensorBoard 目錄，不創建新的時間戳目錄
             self.session_subdir = ""
             logger.info(f"模型載入後，TensorBoard 將記錄到: {self.tensorboard_log_path}")
-            
-            # 重新配置 TensorBoard 日誌路徑
+              # 重新配置 TensorBoard 日誌路徑
             if hasattr(self.agent, 'tensorboard_log') and self.agent.tensorboard_log:
                 # 如果 agent 已經有 TensorBoard 配置，更新它
                 sb3_logger = sb3_logger_configure(self.tensorboard_log_path, ["stdout", "csv", "tensorboard"])
                 self.agent.set_logger(sb3_logger)
-                
         except Exception as e:
             logger.error(f"加載智能體模型失敗: {e}", exc_info=True)
             raise
 
     def get_policy_parameters(self):
-        if self.agent and self.agent.policy: return self.agent.policy.parameters()
+        if self.agent and self.agent.policy:
+            return self.agent.policy.parameters()
         return None
+    
     def get_feature_extractor_parameters(self):
         if self.agent and self.agent.policy and hasattr(self.agent.policy, 'features_extractor') \
            and self.agent.policy.features_extractor is not None \
            and hasattr(self.agent.policy.features_extractor, 'transformer'):
             return self.agent.policy.features_extractor.transformer.parameters() # type: ignore
         return None
+
+    def _create_strategy_innovation(self):
+        """Create a real strategy innovation module"""
+        try:
+            # Use the factory function to create the real StrategyInnovationModule
+            # Note: Don't pass config_adapter as the factory function creates one automatically
+            # hidden_dim must be divisible by num_heads (24), so use 768 instead of 512
+            strategy_innovation = create_strategy_innovation_module(
+                input_dim=768,  # Market data dimension
+                hidden_dim=768,  # Must be divisible by num_heads (24): 768 % 24 = 0
+                population_size=10,
+                max_generations=50
+            )
+            logger.info("Created real StrategyInnovationModule")
+            return strategy_innovation
+        except Exception as e:
+            logger.error(f"Failed to create real StrategyInnovationModule: {e}")
+            # Fallback to mock if real component fails
+            return self._create_mock_strategy_innovation()
+    
+    def _create_mock_strategy_innovation(self):
+        """Create a mock strategy innovation module (fallback)"""
+        class MockStrategyInnovationModule(nn.Module):
+            def __init__(self, input_dim=768, output_dim=256):
+                super().__init__()
+                self.input_dim = input_dim
+                self.output_dim = output_dim
+                self.innovation_network = nn.Sequential(
+                    nn.Linear(input_dim, 512),
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(512, 256),
+                    nn.ReLU(),
+                    nn.Linear(256, output_dim)
+                )
+                
+            def forward(self, market_data, existing_strategies=None):
+                batch_size = market_data.size(0)
+                innovation_output = self.innovation_network(market_data)
+                return {
+                    'task_batches': innovation_output,
+                    'generated_strategies': innovation_output,
+                    'strategy_confidence': torch.rand(batch_size, 1)
+                }
+        
+        return MockStrategyInnovationModule()
+
+    def _create_market_state_awareness(self):
+        """Create a real market state awareness system"""
+        try:
+            # Create the real MarketStateAwarenessSystem
+            # Note: MarketStateAwarenessSystem expects input_dim and num_strategies, not hidden_dim
+            market_state_awareness = MarketStateAwarenessSystem(
+                input_dim=768,  # Market data dimension - correct parameter name
+                num_strategies=5,  # Number of trading strategies
+                enable_real_time_monitoring=True            )
+            logger.info("Created real MarketStateAwarenessSystem")
+            return market_state_awareness
+        except Exception as e:
+            logger.error(f"Failed to create real MarketStateAwarenessSystem: {e}")
+            # Fallback to mock if real component fails
+            return self._create_mock_market_state_awareness()
+
+    def _create_mock_market_state_awareness(self):
+        """Create a mock market state awareness system (fallback)"""
+        class MockMarketStateAwareness(nn.Module):
+            def __init__(self, input_dim=768, output_dim=256):
+                super().__init__()
+                self.input_dim = input_dim
+                self.output_dim = output_dim
+                self.state_network = nn.Sequential(
+                    nn.Linear(input_dim, 256),
+                    nn.ReLU(),
+                    nn.Linear(256, 128),
+                    nn.ReLU(),
+                    nn.Linear(128, output_dim)
+                )
+                
+            def forward(self, market_data):
+                batch_size = market_data.size(0)
+                state_output = self.state_network(market_data)
+                return {
+                    'market_state': {
+                        'regime': torch.randint(0, 4, (batch_size,)),
+                        'volatility_level': torch.rand(batch_size, 1),
+                        'trend_strength': torch.rand(batch_size, 1)
+                    },
+                    'state_features': state_output,
+                    'confidence': torch.rand(batch_size, 1)
+                }
+        
+        return MockMarketStateAwareness()
+
+    def _create_meta_learning_optimizer(self):
+        """Create a real meta-learning optimizer"""
+        try:
+            # Create a dummy model for the MetaLearningOptimizer since it requires a model
+            # This will be a simple neural network that can be used for meta-learning
+            dummy_model = nn.Sequential(
+                nn.Linear(768, 256),  # Input feature dimension
+                nn.ReLU(),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Linear(128, 1)  # Output dimension for task prediction
+            )
+            
+            # Create the real MetaLearningOptimizer
+            # Note: MetaLearningOptimizer requires a model parameter
+            meta_learning_optimizer = MetaLearningOptimizer(
+                model=dummy_model,  # Pass the dummy model instead of None
+                feature_dim=768,  # Market data dimension
+                adaptation_dim=256,  # Adaptation layer dimension
+                inner_lr=0.01,  # Inner loop learning rate
+                outer_lr=0.001,  # Outer loop learning rate
+                inner_steps=5  # Number of inner loop steps
+            )
+            logger.info("Created real MetaLearningOptimizer with dummy model")
+            return meta_learning_optimizer
+        except Exception as e:
+            logger.error(f"Failed to create real MetaLearningOptimizer: {e}")
+            # Fallback to mock if real component fails
+            return self._create_mock_meta_learning_optimizer()
+
+    def _create_mock_meta_learning_optimizer(self):
+        """Create a mock meta-learning optimizer (fallback)"""
+        class MockMetaLearningOptimizer(nn.Module):
+            def __init__(self, input_dim=768, output_dim=256):
+                super().__init__()
+                self.input_dim = input_dim
+                self.output_dim = output_dim
+                self.meta_network = nn.Sequential(
+                    nn.Linear(input_dim, 256),
+                    nn.ReLU(),
+                    nn.Linear(256, 128),
+                    nn.ReLU(),
+                    nn.Linear(128, output_dim)
+                )
+                
+            def forward(self, task_data, strategy_data=None):
+                batch_size = task_data.size(0)
+                meta_output = self.meta_network(task_data)
+                return {
+                    'meta_gradients': meta_output,
+                    'adaptation_params': meta_output,
+                    'learning_rate_adjustments': torch.rand(batch_size, 1)
+                }
+        
+        return MockMetaLearningOptimizer()
+
+    def process_with_high_level_integration(self,
+                                           market_data: torch.Tensor,
+                                           position_data: Optional[Dict[str, torch.Tensor]] = None,
+                                           portfolio_metrics: Optional[torch.Tensor] = None) -> Dict[str, Any]:
+        """
+        Process market data through the High-Level Integration System
+        
+        Args:
+            market_data: Market data tensor
+            position_data: Position data dictionary
+            portfolio_metrics: Portfolio metrics tensor
+            
+        Returns:
+            Dictionary containing integration results
+        """
+        if self.high_level_integration is None:
+            logger.warning("HighLevelIntegrationSystem not available, skipping high-level processing")
+            return {}
+        
+        try:
+            # Process through the high-level integration system
+            integration_results = self.high_level_integration.process_market_data(
+                market_data=market_data,
+                position_data=position_data,
+                portfolio_metrics=portfolio_metrics
+            )
+            
+            # Log key metrics
+            if 'system_health' in integration_results:
+                health_score = integration_results['system_health'].get('health_score', 'unknown')
+                logger.debug(f"System health score: {health_score}")
+            
+            if 'emergency_status' in integration_results:
+                emergency_status = integration_results['emergency_status']
+                if emergency_status.get('emergency_active', False):
+                    logger.warning(f"Emergency conditions detected: {emergency_status}")
+            
+            return integration_results
+            
+        except Exception as e:
+            logger.error(f"Error in high-level integration processing: {e}")
+            return {}
 
 if __name__ == "__main__":
     logger.info("正在直接運行 sac_agent_wrapper.py 進行測試...")
@@ -453,7 +695,7 @@ if __name__ == "__main__":
     dummy_vec_env_main = DummyVecEnv([lambda: MockEnvMain()])
 
     test_policy_kwargs_main = {
-        "features_extractor_kwargs": dict(transformer_output_dim_per_symbol=64, model_dim=128, num_time_encoder_layers=1, num_cross_asset_layers=1, num_heads=2, ffn_dim=128),
+        "features_extractor_kwargs": dict(enhanced_transformer_output_dim_per_symbol=128),
         "net_arch": dict(pi=[64, 64], qf=[64, 64])
     }
     try:

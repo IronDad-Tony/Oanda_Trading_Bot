@@ -96,9 +96,12 @@ def create_mock_meta_learning_optimizer():
             self.input_dim = input_dim
             self.task_dim = task_dim
             
-            # Meta learning network
+            # Dynamic adapters for different input sizes
+            self.adapters = nn.ModuleDict()
+            
+            # Meta learning network with flexible input
             self.meta_network = nn.Sequential(
-                nn.Linear(input_dim + task_dim, 512),
+                nn.Linear(input_dim, 512),
                 nn.ReLU(),
                 nn.Dropout(0.1),
                 nn.Linear(512, 256),
@@ -106,29 +109,51 @@ def create_mock_meta_learning_optimizer():
                 nn.Linear(256, input_dim)
             )
             
-        def optimize_and_adapt(self, market_data, context_data, task_batches):
+        def _get_or_create_adapter(self, input_size: int) -> nn.Module:
+            """Get or create adapter for specific input size"""
+            adapter_key = f"adapter_{input_size}"
+            if adapter_key not in self.adapters:
+                self.adapters[adapter_key] = nn.Linear(input_size, self.input_dim)
+            return self.adapters[adapter_key]
+            
+        def optimize_and_adapt(self, market_data, task_batches=None, context=None):
             """
-            Simulate meta learning optimization
+            Simulate meta learning optimization with flexible parameters
             """
             batch_size = market_data.size(0)
             
-            # Ensure task_batches has the right shape
-            if task_batches.size(-1) != self.task_dim:
-                # Adapt the task batch size
-                task_adapter = nn.Linear(task_batches.size(-1), self.task_dim)
-                task_batches = task_adapter(task_batches)
+            # Ensure market_data is 2D for processing
+            if market_data.dim() == 3:
+                # Take last timestep if it's a sequence
+                market_data_flat = market_data[:, -1, :]
+            elif market_data.dim() == 1:
+                market_data_flat = market_data.unsqueeze(0)
+            else:
+                market_data_flat = market_data
             
-            # Combine market data and task information
-            combined_input = torch.cat([market_data, task_batches], dim=-1)
+            # Handle variable input dimensions
+            input_size = market_data_flat.size(-1)
+            if input_size != self.input_dim:
+                # Use or create adapter for this input size
+                adapter = self._get_or_create_adapter(input_size)
+                market_data_adapted = adapter(market_data_flat)
+            else:
+                market_data_adapted = market_data_flat
             
             # Process through meta learning network
-            adapted_features = self.meta_network(combined_input)
+            adapted_features = self.meta_network(market_data_adapted)
             
             return {
                 'adapted_features': adapted_features,
                 'adaptation_score': torch.rand(batch_size, 1),
                 'learning_progress': torch.rand(batch_size, 1),
-                'meta_loss': torch.rand(1)
+                'meta_loss': torch.rand(1),
+                'adaptation_quality': 0.75 + torch.rand(1).item() * 0.2,
+                'meta_results': {
+                    'meta_loss': torch.rand(1).item(),
+                    'adaptation_quality': 0.8 + torch.rand(1).item() * 0.15,
+                    'convergence_rate': 0.7 + torch.rand(1).item() * 0.25
+                }
             }
     
     return MockMetaLearningOptimizer()
@@ -142,24 +167,43 @@ def test_high_level_integration_system():
         from agent.high_level_integration_system import HighLevelIntegrationSystem
         
         logger.info("✅ Successfully imported HighLevelIntegrationSystem")
-        
-        # Create mock components
+          # Create mock components
         logger.info("🔧 Creating mock components...")
         
         strategy_innovation = create_mock_strategy_innovation_module()
         market_state_awareness = create_mock_market_state_awareness()
         meta_learning_optimizer = create_mock_meta_learning_optimizer()
         
-        logger.info("✅ Mock components created successfully")
+        # Import required components from high_level_integration_system
+        from agent.high_level_integration_system import (
+            DynamicPositionManager, 
+            AnomalyDetector, 
+            EmergencyStopLoss
+        )
         
-        # Initialize the high level integration system
+        # Create required placeholder components
+        position_manager = DynamicPositionManager(feature_dim=768)
+        anomaly_detector = AnomalyDetector(input_dim=768)
+        emergency_stop_loss_system = EmergencyStopLoss()
+        
+        logger.info("✅ Mock components created successfully")
+          # Initialize the high level integration system
         logger.info("🏗️ Initializing HighLevelIntegrationSystem...")
+        
+        # Create config with feature_dim
+        config = {
+            'feature_dim': 768,        'enable_dynamic_adaptation': True,
+            'expected_maml_input_dim': 768
+        }
         
         system = HighLevelIntegrationSystem(
             strategy_innovation_module=strategy_innovation,
             market_state_awareness_system=market_state_awareness,
             meta_learning_optimizer=meta_learning_optimizer,
-            feature_dim=768
+            position_manager=position_manager,
+            anomaly_detector=anomaly_detector,
+            emergency_stop_loss_system=emergency_stop_loss_system,
+            config=config
         )
         
         logger.info("✅ HighLevelIntegrationSystem initialized successfully")
@@ -170,10 +214,10 @@ def test_high_level_integration_system():
         batch_size = 4
         sequence_length = 10
         feature_dim = 768
-        
-        # Market data
+          # Market data
         market_data = torch.randn(batch_size, sequence_length, feature_dim)
-          # Position data (optional) - ensure proper dimensions
+        
+        # Position data (optional) - ensure proper dimensions
         position_data = {
             'positions': torch.randn(batch_size, feature_dim),  # Match feature_dim
             'pnl': torch.randn(batch_size, feature_dim),         # Match feature_dim
@@ -185,8 +229,7 @@ def test_high_level_integration_system():
         
         logger.info("✅ Test data created successfully")
         
-        # Test the main processing pipeline
-        logger.info("🧪 Testing main processing pipeline...")
+        # Test the main processing pipeline        logger.info("🧪 Testing main processing pipeline...")
         
         # This is where the original error occurred
         results = system.process_market_data(
@@ -201,9 +244,9 @@ def test_high_level_integration_system():
         logger.info("📋 Analyzing results...")
         
         expected_keys = [
-            'market_state_results', 'innovation_results', 'meta_results',
-            'anomaly_results', 'position_risks', 'emergency_status',
-            'system_metrics', 'processing_time', 'recommendations'
+            'market_state', 'strategy_innovation', 'meta_learning',
+            'anomaly_detection', 'position_management', 'emergency_status',
+            'system_health', 'processing_time', 'adaptation_stats'
         ]
         
         for key in expected_keys:
@@ -212,13 +255,18 @@ def test_high_level_integration_system():
             else:
                 logger.warning(f"⚠️ Missing key: {key}")
         
+        # Check for recommendations within system_health
+        if 'system_health' in results and 'recommendations' in results['system_health']:
+            logger.info(f"✅ Found expected key: recommendations (in system_health)")
+        else:
+            logger.warning(f"⚠️ Missing key: recommendations (in system_health)")
+        
         # Print summary of results
         logger.info("\n📊 RESULTS SUMMARY:")
         logger.info(f"Total result keys: {len(results)}")
         logger.info(f"Processing time: {results.get('processing_time', 'N/A'):.4f}s")
-        logger.info(f"System state: {results.get('system_metrics', {}).get('system_state', 'N/A')}")
-        
-        # Test with different input scenarios
+        logger.info(f"System state: {results.get('system_health', {}).get('system_state', 'N/A')}")
+          # Test with different input scenarios
         logger.info("\n🔄 Testing additional scenarios...")
         
         # Test with minimal data

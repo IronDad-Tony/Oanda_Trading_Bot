@@ -11,14 +11,14 @@ from typing import Dict, Any, Tuple, Optional
 import logging
 
 try:
-    from src.agent.quantum_strategy_layer import QuantumTradingLayer
+    from src.agent.enhanced_quantum_strategy_layer import EnhancedStrategySuperposition
     from src.common.logger_setup import logger
     from src.common.config import DEVICE
 except ImportError:
     logger = logging.getLogger(__name__)
     DEVICE = "cpu"
     # 如果導入失敗，創建一個簡單的佔位符
-    class QuantumTradingLayer(nn.Module):
+    class EnhancedStrategySuperposition(nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__()
             self.linear = nn.Linear(128, 5)
@@ -40,14 +40,11 @@ class QuantumPolicyWrapper(nn.Module):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.latent_dim = latent_dim
-        
-        # 初始化完整的量子策略層
-        self.quantum_layer = QuantumTradingLayer(
-            input_dim=state_dim,
+          # 初始化增強版量子策略層
+        self.quantum_layer = EnhancedStrategySuperposition(
+            state_dim=state_dim,
             action_dim=action_dim,
-            latent_dim=latent_dim,
-            num_strategies=num_strategies,
-            num_energy_levels=num_energy_levels
+            enable_dynamic_generation=True
         )
         
         # SAC需要的額外層用於輸出動作分佈參數

@@ -4,13 +4,14 @@ Implements Model-Agnostic Meta-Learning (MAML) for fast adaptation capabilities
 Part of Phase 5: High-Level Meta-Learning Capabilities
 """
 
+from random import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import grad
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, List, Tuple, Optional, Any, Union, Union
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -445,6 +446,87 @@ class FastAdaptationMechanism(nn.Module):
         
         return final_output
 
+class GeneticSelector:
+    """遺傳算法超參數選擇器"""
+    
+    def __init__(self, population_size: int = 50, mutation_rate: float = 0.1):
+        self.population_size = population_size
+        self.mutation_rate = mutation_rate
+        self.population = self.initialize_population()
+        self.fitness_scores = []
+        
+    def initialize_population(self) -> List[Dict[str, float]]:
+        """初始化超參數種群"""
+        population = []
+        for _ in range(self.population_size):
+            # 隨機生成學習率和折扣因子
+            learning_rate = np.random.uniform(1e-5, 1e-2)
+            discount_factor = np.random.uniform(0.8, 0.99)
+            population.append({
+                'learning_rate': learning_rate,
+                'discount_factor': discount_factor
+            })
+        return population
+    
+    def select(self, fitness_scores: List[float]) -> List[Dict[str, float]]:
+        """基於適應度分數選擇個體"""
+        # 輪盤賭選擇
+        total_fitness = sum(fitness_scores)
+        if total_fitness == 0:
+            return self.population  # 避免除零錯誤
+            
+        probabilities = [f / total_fitness for f in fitness_scores]
+        selected_indices = np.random.choice(
+            len(self.population),
+            size=self.population_size,
+            replace=True,
+            p=probabilities
+        )
+        return [self.population[i] for i in selected_indices]
+    
+    def crossover(self, parent1: Dict[str, float], parent2: Dict[str, float]) -> Dict[str, float]:
+        """交叉操作生成新個體"""
+        # 均勻交叉
+        child = {}
+        for key in parent1.keys():
+            if np.random.rand() < 0.5:
+                child[key] = parent1[key]
+            else:
+                child[key] = parent2[key]
+        return child
+    
+    def mutate(self, individual: Dict[str, float]) -> Dict[str, float]:
+        """變異操作"""
+        mutated = individual.copy()
+        for key in mutated.keys():
+            if np.random.rand() < self.mutation_rate:
+                # 對數尺度變異
+                if key == 'learning_rate':
+                    mutated[key] = np.clip(mutated[key] * np.random.lognormal(0, 0.1), 1e-5, 1e-2)
+                else:
+                    mutated[key] = np.clip(mutated[key] * np.random.lognormal(0, 0.05), 0.8, 0.99)
+        return mutated
+    
+    def evolve(self, fitness_scores: List[float]) -> List[Dict[str, float]]:
+        """進化一代"""
+        selected = self.select(fitness_scores)
+        next_population = []
+        
+        # 精英保留: 保留最佳個體
+        best_idx = np.argmax(fitness_scores)
+        next_population.append(self.population[best_idx])
+        
+        # 生成新個體
+        while len(next_population) < self.population_size:
+            parent1 = random.choice(selected)
+            parent2 = random.choice(selected)
+            child = self.crossover(parent1, parent2)
+            child = self.mutate(child)
+            next_population.append(child)
+        
+        self.population = next_population
+        return self.population
+
 class MetaLearningOptimizer(nn.Module):
     """Complete Meta-Learning Optimizer System"""
     
@@ -472,6 +554,9 @@ class MetaLearningOptimizer(nn.Module):
             adaptation_dim=adaptation_dim
         )
         
+        # 遺傳算法超參數優化器
+        self.genetic_selector = GeneticSelector()
+        
         # Performance monitoring
         self.performance_history = deque(maxlen=1000)
         
@@ -483,10 +568,36 @@ class MetaLearningOptimizer(nn.Module):
             nn.Softmax(dim=-1)
         )
     
+    def dynamic_hyperparam_tuning(self, performance_metrics: Dict[str, float]) -> Dict[str, float]:
+        """
+        基於遺傳算法的超參數選擇
+        實時調整學習率和折扣因子
+        
+        Args:
+            performance_metrics: 策略性能指標字典
+            
+        Returns:
+            調整後的超參數字典
+        """
+        # 提取適應度分數
+        fitness_score = performance_metrics.get('fitness_score', 0.0)
+        
+        # 記錄當前適應度
+        self.genetic_selector.fitness_scores.append(fitness_score)
+        
+        # 當收集到足夠樣本時進化
+        if len(self.genetic_selector.fitness_scores) >= self.genetic_selector.population_size:
+            self.genetic_selector.evolve(self.genetic_selector.fitness_scores)
+            self.genetic_selector.fitness_scores = []  # 重置適應度記錄
+        
+        # 返回當前最佳超參數
+        best_idx = np.argmax(self.genetic_selector.fitness_scores) if self.genetic_selector.fitness_scores else 0
+        return self.genetic_selector.population[best_idx]
+    
     def optimize_and_adapt(
         self,
         features: torch.Tensor,
-        context: torch.Tensor,
+        context: Union[torch.Tensor, Dict[str, Any]],
         task_batches: List[TaskBatch]
     ) -> Dict[str, Any]:
         """Perform meta-learning optimization and fast adaptation"""
@@ -494,13 +605,38 @@ class MetaLearningOptimizer(nn.Module):
         # Perform meta-update
         meta_results = self.maml_optimizer.meta_update(task_batches)
         
-        # Select adaptation strategy
-        strategy_probs = self.strategy_selector(context.mean(dim=1))
+        # Handle context conversion to tensor if needed
+        if isinstance(context, dict):
+            # Convert dict context to tensor
+            context_tensor = self._dict_to_tensor(context, features.device)
+        else:
+            context_tensor = context
+            
+        # Ensure context_tensor has proper dimensions for strategy selector
+        if context_tensor.dim() == 1:        context_tensor = context_tensor.unsqueeze(0)  # [1, F]
+        if context_tensor.dim() > 2:
+            context_tensor = context_tensor.mean(dim=tuple(range(1, context_tensor.dim()-1)))  # Keep batch and feature dims
+            
+        # Select adaptation strategy - ensure proper tensor dimensionality
+        if context_tensor.dim() > 1:
+            # Take mean across sequence dimension but ensure we maintain batch dimension
+            strategy_input = context_tensor.mean(dim=1)  # [batch, features]
+            if strategy_input.size(-1) != self.strategy_selector[0].in_features:
+                # Project to correct input size if needed
+                strategy_input = torch.nn.functional.adaptive_avg_pool1d(
+                    strategy_input.unsqueeze(1), self.strategy_selector[0].in_features
+                ).squeeze(1)
+        else:
+            strategy_input = context_tensor
+            if strategy_input.size(-1) != self.strategy_selector[0].in_features:
+                # Expand to correct dimensions 
+                strategy_input = strategy_input.expand(-1, self.strategy_selector[0].in_features)
+        
+        strategy_probs = self.strategy_selector(strategy_input)
         selected_strategy_idx = torch.argmax(strategy_probs, dim=-1)
         selected_strategy = list(AdaptationStrategy)[selected_strategy_idx[0].item()]
-        
-        # Perform fast adaptation
-        adapted_features = self.fast_adaptation(features, context)
+          # Perform fast adaptation
+        adapted_features = self.fast_adaptation(features, context_tensor)
         
         # Collect results
         results = {
@@ -519,6 +655,52 @@ class MetaLearningOptimizer(nn.Module):
         })
         
         return results
+    
+    def _dict_to_tensor(self, context_dict: Dict[str, Any], device: torch.device) -> torch.Tensor:
+        """Convert dictionary context to tensor representation"""
+        try:
+            # Extract relevant numeric values from dictionary
+            context_values = []
+            
+            # Handle common dictionary keys that might contain tensors or numbers
+            for key, value in context_dict.items():
+                if isinstance(value, torch.Tensor):
+                    if value.numel() == 1:
+                        context_values.append(value.item())
+                    else:
+                        # For multi-element tensors, take mean
+                        context_values.append(value.mean().item())
+                elif isinstance(value, (int, float)):
+                    context_values.append(float(value))
+                elif isinstance(value, dict):
+                    # Recursively handle nested dictionaries
+                    nested_tensor = self._dict_to_tensor(value, device)
+                    context_values.append(nested_tensor.mean().item())
+                
+            # If no valid values found, create a default tensor
+            if not context_values:
+                context_values = [0.0]  # Default value
+                
+            # Create tensor with appropriate size for strategy selector
+            context_tensor = torch.tensor(context_values, dtype=torch.float32, device=device)
+            
+            # Ensure minimum size for strategy selector (expects at least 512-dim input)
+            min_size = 512
+            if context_tensor.size(0) < min_size:
+                # Pad with zeros or repeat values
+                padding_size = min_size - context_tensor.size(0)
+                padding = torch.zeros(padding_size, dtype=torch.float32, device=device)
+                context_tensor = torch.cat([context_tensor, padding], dim=0)
+            elif context_tensor.size(0) > min_size:
+                # Truncate to expected size
+                context_tensor = context_tensor[:min_size]
+                
+            return context_tensor
+            
+        except Exception as e:
+            logger.warning(f"Failed to convert context dict to tensor: {e}. Using default.")
+            # Return a default tensor of appropriate size
+            return torch.zeros(512, dtype=torch.float32, device=device)
     
     def _assess_adaptation_quality(
         self,

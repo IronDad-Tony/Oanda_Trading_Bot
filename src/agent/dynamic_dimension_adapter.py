@@ -151,8 +151,7 @@ class DynamicDimensionAdapter(nn.Module):
             'anomaly_detector': DimensionSpec('anomaly_detector', (-1, -1, 768), 3, 3),
             'emergency_stop_loss': DimensionSpec('emergency_stop_loss', (-1,), 1, 2)
         }
-        
-        # Statistics for monitoring
+          # Statistics for monitoring
         self.adaptation_stats = {
             'total_adaptations': 0,
             'successful_adaptations': 0,
@@ -182,6 +181,42 @@ class DynamicDimensionAdapter(nn.Module):
         Returns:
             Adapted tensor with target dimension
         """
+        
+        # Critical: Validate input is actually a tensor
+        if not isinstance(tensor, torch.Tensor):
+            logger.error(f"❌ Non-tensor object passed to adapt_tensor: {type(tensor)}")
+            logger.error(f"   Object contents: {tensor}")
+            logger.error(f"   Source: {source_module} -> Target: {target_module}")
+            
+            # Try to extract tensor from common container types
+            if isinstance(tensor, dict):
+                tensor_values = [v for v in tensor.values() if isinstance(v, torch.Tensor)]
+                if tensor_values:
+                    tensor = tensor_values[0]  # Use first tensor found
+                    logger.warning(f"🔧 Extracted tensor from dictionary for adaptation")
+                else:
+                    logger.error(f"❌ No tensors found in dictionary, creating default tensor")
+                    return torch.zeros(1, target_dim)
+            elif isinstance(tensor, (list, tuple)):
+                tensor_items = [item for item in tensor if isinstance(item, torch.Tensor)]
+                if tensor_items:
+                    tensor = tensor_items[0]  # Use first tensor found
+                    logger.warning(f"🔧 Extracted tensor from {type(tensor).__name__} for adaptation")
+                else:
+                    logger.error(f"❌ No tensors found in {type(tensor).__name__}, creating default tensor")
+                    return torch.zeros(1, target_dim)
+            else:
+                try:
+                    tensor = torch.tensor(tensor, dtype=torch.float32)
+                    logger.warning(f"🔧 Converted {type(tensor).__name__} to tensor for adaptation")
+                except Exception as e:
+                    logger.error(f"❌ Cannot convert {type(tensor).__name__} to tensor: {e}")
+                    return torch.zeros(1, target_dim)
+        
+        # Ensure tensor has valid shape
+        if tensor.numel() == 0:
+            logger.warning(f"⚠️ Empty tensor for adaptation, creating default tensor")
+            return torch.zeros(1, target_dim)
         
         # Get current dimension
         current_dim = tensor.size(-1)
@@ -239,8 +274,7 @@ class DynamicDimensionAdapter(nn.Module):
         source_module: str = "unknown"
     ) -> torch.Tensor:
         """Adapt tensor to match dimension specification"""
-        
-        # Get target dimension from spec
+          # Get target dimension from spec
         if target_spec.expected_shape[-1] == -1:
             # Flexible dimension - no adaptation needed
             return tensor
@@ -290,6 +324,46 @@ class DynamicDimensionAdapter(nn.Module):
         Returns:
             Adapted tensor
         """
+        
+        # Critical: Validate input is actually a tensor
+        if not isinstance(tensor, torch.Tensor):
+            logger.error(f"❌ Non-tensor object passed to smart_adapt: {type(tensor)}")
+            logger.error(f"   Object contents: {tensor}")
+            logger.error(f"   Source: {source_module} -> Target: {target_module}")
+            
+            # Try to extract tensor from common container types
+            if isinstance(tensor, dict):
+                tensor_values = [v for v in tensor.values() if isinstance(v, torch.Tensor)]
+                if tensor_values:
+                    tensor = tensor_values[0]  # Use first tensor found
+                    logger.warning(f"🔧 Extracted tensor from dictionary for smart adaptation")
+                else:
+                    logger.error(f"❌ No tensors found in dictionary, creating default tensor")
+                    fallback_dim = fallback_dim or 256  # Use fallback or default
+                    return torch.zeros(1, fallback_dim)
+            elif isinstance(tensor, (list, tuple)):
+                tensor_items = [item for item in tensor if isinstance(item, torch.Tensor)]
+                if tensor_items:
+                    tensor = tensor_items[0]  # Use first tensor found
+                    logger.warning(f"🔧 Extracted tensor from {type(tensor).__name__} for smart adaptation")
+                else:
+                    logger.error(f"❌ No tensors found in {type(tensor).__name__}, creating default tensor")
+                    fallback_dim = fallback_dim or 256  # Use fallback or default
+                    return torch.zeros(1, fallback_dim)
+            else:
+                try:
+                    tensor = torch.tensor(tensor, dtype=torch.float32)
+                    logger.warning(f"🔧 Converted {type(tensor).__name__} to tensor for smart adaptation")
+                except Exception as e:
+                    logger.error(f"❌ Cannot convert {type(tensor).__name__} to tensor: {e}")
+                    fallback_dim = fallback_dim or 256  # Use fallback or default
+                    return torch.zeros(1, fallback_dim)
+        
+        # Ensure tensor has valid shape
+        if tensor.numel() == 0:
+            logger.warning(f"⚠️ Empty tensor for smart adaptation, creating default tensor")
+            fallback_dim = fallback_dim or 256  # Use fallback or default
+            return torch.zeros(1, fallback_dim)
         
         # Check if we have specs for the target module
         if target_module in self.dimension_specs:

@@ -8,6 +8,7 @@
 2. 自適應獎勵計算
 3. 學習進度追蹤
 4. 策略優化指導
+5. 三階段獎勵計算流水線（新增）
 """
 
 import torch
@@ -17,6 +18,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from .reward_normalizer import DynamicRewardNormalizer  # 新增導入
 
 logger = logging.getLogger(__name__)
 
@@ -32,30 +34,33 @@ class RewardMetrics:
 
 class ProgressiveRewardSystem:
     """
-    漸進式獎勵系統
+    漸進式獎勵系統（三階段流水線）
     
     提供動態獎勵計算，支持：
-    - 基於績效的獎勵
-    - 自適應學習獎勵  
-    - 風險調整獎勵
-    - 一致性獎勵
+    - 階段1: 基礎獎勵計算
+    - 階段2: 動態權重調整
+    - 階段3: 獎勵標準化
+    - 績效評估
+    - 學習進度追蹤
     """
     
-    def __init__(self, 
+    def __init__(self,
                  profit_weight: float = 0.4,
                  risk_weight: float = 0.3,
                  adaptation_weight: float = 0.2,
                  consistency_weight: float = 0.1,
-                 device: str = "cpu"):
+                 device: str = "cpu",
+                 volatility_window: int = 100):  # 新增參數
         """
-        初始化漸進式獎勵系統
+        初始化漸進式獎勵系統（三階段）
         
         Args:
             profit_weight: 利潤權重
-            risk_weight: 風險權重  
+            risk_weight: 風險權重
             adaptation_weight: 適應性權重
             consistency_weight: 一致性權重
             device: 計算設備
+            volatility_window: 波動率分析窗口大小
         """
         self.profit_weight = profit_weight
         self.risk_weight = risk_weight
@@ -63,71 +68,102 @@ class ProgressiveRewardSystem:
         self.consistency_weight = consistency_weight
         self.device = device
         
+        # 初始化三階段組件
+        self.dynamic_normalizer = DynamicRewardNormalizer(volatility_window=volatility_window)  # 新增
+        
         # 初始化獎勵歷史
         self.reward_history: List[RewardMetrics] = []
         self.performance_baseline = 0.0
         self.adaptation_count = 0
         
-        logger.info(f"初始化漸進式獎勵系統 - 權重配置: 利潤={profit_weight}, 風險={risk_weight}, 適應={adaptation_weight}, 一致性={consistency_weight}")
+        logger.info(f"初始化三階段獎勵系統 - 權重配置: 利潤={profit_weight}, 風險={risk_weight}, 適應={adaptation_weight}, 一致性={consistency_weight}")
+        logger.info(f"波動率分析窗口: {volatility_window}")
     
     def calculate_reward(self,
                         profit: float,
                         drawdown: float,
                         volatility: float,
+                        market_state: dict,  # 新增市場狀態參數
                         adaptation_success: bool = True,
                         strategy_consistency: float = 1.0) -> RewardMetrics:
         """
-        計算綜合獎勵分數
+        三階段獎勵計算流水線
         
         Args:
             profit: 利潤率
             drawdown: 最大回撤
             volatility: 波動率
+            market_state: 市場狀態數據（新增）
             adaptation_success: 適應是否成功
             strategy_consistency: 策略一致性分數
             
         Returns:
             RewardMetrics: 獎勵評估結果
         """
-        # 1. 利潤分數 (範圍: -1 to 1)
-        profit_score = np.tanh(profit * 10)  # 將利潤映射到[-1,1]
+        # ===== 階段1: 基礎獎勵計算 =====
+        # 1.1 利潤分數 (範圍: -1 to 1)
+        profit_score = np.tanh(profit * 10)
         
-        # 2. 風險分數 (範圍: 0 to 1，越低越好)
+        # 1.2 風險分數 (範圍: 0 to 1)
         risk_penalty = max(0, drawdown) + max(0, volatility - 0.1)
         risk_score = max(0, 1 - risk_penalty * 2)
         
-        # 3. 適應性分數
+        # 1.3 適應性分數
         adaptation_score = 1.0 if adaptation_success else 0.5
-        if hasattr(self, 'adaptation_count'):
-            self.adaptation_count += 1 if adaptation_success else 0
-            # 獎勵頻繁成功適應
-            adaptation_bonus = min(0.2, self.adaptation_count * 0.01)
-            adaptation_score += adaptation_bonus
+        self.adaptation_count += 1 if adaptation_success else 0
+        adaptation_bonus = min(0.2, self.adaptation_count * 0.01)
+        adaptation_score += adaptation_bonus
         
-        # 4. 一致性分數
+        # 1.4 一致性分數
         consistency_score = max(0, min(1, strategy_consistency))
         
-        # 5. 計算總獎勵
-        total_reward = (
+        # 1.5 計算基礎總獎勵
+        base_total = (
             self.profit_weight * profit_score +
             self.risk_weight * risk_score +
             self.adaptation_weight * adaptation_score +
             self.consistency_weight * consistency_score
         )
         
-        # 6. 創建獎勵指標
+        # ===== 階段2: 動態權重調整 =====
+        # 2.1 更新權重基於市場波動率
+        self.dynamic_normalizer.update_weights(market_state)
+        
+        # 2.2 應用動態權重調整
+        adjusted_components = {
+            'profit_reward': profit_score * self.dynamic_normalizer.component_weights.get('profit_reward', 1.0),
+            'risk_penalty': risk_score * self.dynamic_normalizer.component_weights.get('risk_penalty', 1.0),
+            'adaptation': adaptation_score * self.dynamic_normalizer.component_weights.get('adaptation', 1.0),
+            'consistency': consistency_score * self.dynamic_normalizer.component_weights.get('consistency', 1.0)
+        }
+        
+        # 2.3 計算調整後總獎勵
+        adjusted_total = sum(adjusted_components.values())
+        
+        # ===== 階段3: 獎勵標準化 =====
+        # 3.1 準備標準化輸入
+        reward_info = {
+            'total_reward': adjusted_total,
+            'components': adjusted_components
+        }
+        
+        # 3.2 應用標準化
+        normalized_info = self.dynamic_normalizer.normalize_reward(reward_info, method='hybrid')
+        normalized_total = normalized_info['total_reward']
+        
+        # ===== 創建最終獎勵指標 =====
         metrics = RewardMetrics(
             profit_score=profit_score,
             risk_score=risk_score,
             adaptation_score=adaptation_score,
             consistency_score=consistency_score,
-            total_reward=total_reward,
+            total_reward=normalized_total,  # 使用標準化後總獎勵
             timestamp=datetime.now()
         )
         
-        # 7. 更新歷史
+        # 更新歷史
         self.reward_history.append(metrics)
-        if len(self.reward_history) > 1000:  # 保持歷史記錄在合理範圍
+        if len(self.reward_history) > 1000:
             self.reward_history = self.reward_history[-1000:]
         
         return metrics

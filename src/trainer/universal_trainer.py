@@ -100,15 +100,15 @@ except ImportError as e_initial_import_ut:
         
     except ImportError as e_retry_critical_ut:
         logger.error(f"universal_trainer.py: Critical import error after path adjustment: {e_retry_critical_ut}", exc_info=True)
-        logger.warning("universal_trainer.py: Using fallback mode - some features may not work.")
-        # Fallback classes for critical imports
+        logger.warning("universal_trainer.py: Using fallback mode - some features may not work.")        # Fallback classes for critical imports
         class CurrencyDependencyManager:
             def __init__(self, account_currency=None, **kwargs):
                 pass
             def download_required_currency_data(self, *args, **kwargs):
                 return True
         def ensure_currency_data_for_trading(*args, **kwargs):
-            return True
+            trading_symbols = kwargs.get('trading_symbols', [])
+            return True, set(trading_symbols)
         class UniversalMemoryMappedDataset:
             def __init__(self, **kwargs): pass
             def is_valid(self): return True
@@ -121,11 +121,12 @@ except ImportError as e_initial_import_ut:
                 self.observation_space = None
                 self.action_space = None
             def close(self): pass
-        class SACAgentWrapper:
+        class QuantumEnhancedSAC:
             def __init__(self, **kwargs): pass
             def load(self, path): pass
             def save(self, path): pass
             def learn(self, **kwargs): pass
+            def train(self, **kwargs): pass
         class UniversalCheckpointCallback:
             def __init__(self, **kwargs): pass
         
@@ -537,12 +538,11 @@ class UniversalTrainer:
                 self.agent.train( # Changed from self.agent.learn
                     total_timesteps=self.total_timesteps,
                     callback=self.callback, # UniversalCheckpointCallback 將會處理進度更新
-                    log_interval=100, # 假設每100步記錄一次
-                    # eval_env=None, # eval_env is not a parameter of SACAgentWrapper.train
-                    # eval_freq=self.eval_freq, # eval_freq is not a parameter of SACAgentWrapper.train
-                    # n_eval_episodes=5, # n_eval_episodes is not a parameter of SACAgentWrapper.train
-                    # tb_log_name="sac_training", # tb_log_name is not a parameter of SACAgentWrapper.train
-                    # eval_log_path=None, # eval_log_path is not a parameter of SACAgentWrapper.train
+                    log_interval=100, # 假設每100步記錄一次                    # eval_env=None, # eval_env is not a parameter of QuantumEnhancedSAC.train
+                    # eval_freq=self.eval_freq, # eval_freq is not a parameter of QuantumEnhancedSAC.train
+                    # n_eval_episodes=5, # n_eval_episodes is not a parameter of QuantumEnhancedSAC.train
+                    # tb_log_name="sac_training", # tb_log_name is not a parameter of QuantumEnhancedSAC.train
+                    # eval_log_path=None, # eval_log_path is not a parameter of QuantumEnhancedSAC.train
                     reset_num_timesteps=False
                 )
                 

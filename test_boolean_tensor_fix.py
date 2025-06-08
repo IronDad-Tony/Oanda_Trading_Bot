@@ -64,8 +64,7 @@ def test_high_level_integration_system():
         from src.agent.high_level_integration_system import HighLevelIntegrationSystem
         from src.agent.strategy_innovation_module import create_strategy_innovation_module
         from src.agent.market_state_awareness_system import MarketStateAwarenessSystem
-        from src.agent.meta_learning_optimizer import MetaLearningOptimizer
-          # Create required components
+        from src.agent.meta_learning_optimizer import MetaLearningOptimizer        # Create required components
         strategy_innovation = create_strategy_innovation_module()
         market_state_awareness = MarketStateAwarenessSystem(input_dim=768)
         
@@ -73,12 +72,34 @@ def test_high_level_integration_system():
         dummy_model = torch.nn.Linear(768, 256)
         meta_learning_optimizer = MetaLearningOptimizer(model=dummy_model, feature_dim=768)
         
+        # Import required components from high_level_integration_system
+        from src.agent.high_level_integration_system import (
+            DynamicPositionManager, 
+            AnomalyDetector, 
+            EmergencyStopLoss
+        )
+        
+        # Create required placeholder components
+        position_manager = DynamicPositionManager(feature_dim=768)
+        anomaly_detector = AnomalyDetector(input_dim=768)
+        emergency_stop_loss_system = EmergencyStopLoss()
+        
+        # Create config with feature_dim
+        config = {
+            'feature_dim': 768,
+            'enable_dynamic_adaptation': True,
+            'expected_maml_input_dim': 768
+        }
+        
         # Create HighLevelIntegrationSystem
         integration_system = HighLevelIntegrationSystem(
             strategy_innovation_module=strategy_innovation,
             market_state_awareness_system=market_state_awareness,
             meta_learning_optimizer=meta_learning_optimizer,
-            feature_dim=768
+            position_manager=position_manager,
+            anomaly_detector=anomaly_detector,
+            emergency_stop_loss_system=emergency_stop_loss_system,
+            config=config
         )
         
         # Create test market data

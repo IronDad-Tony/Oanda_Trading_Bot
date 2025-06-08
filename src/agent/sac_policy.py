@@ -30,16 +30,16 @@ except ImportError:
     logger.warning("sac_policy.py: Failed to import logger from src.common.logger_setup. Using fallback logger.")
 
 try:
-    from src.agent.feature_extractors import AdvancedTransformerFeatureExtractor
+    from src.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
     from src.common.config import (
         MAX_SYMBOLS_ALLOWED, TIMESTEPS, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
     )
     if not _import_logged:
-        logger.info("sac_policy.py: Successfully imported AdvancedTransformerFeatureExtractor and common.config.")
+        logger.info("sac_policy.py: Successfully imported EnhancedTransformerFeatureExtractor and common.config.")
         _import_logged = True
 except ImportError as e:
-    logger.error(f"sac_policy.py: Failed to import AdvancedTransformerFeatureExtractor or common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
-    AdvancedTransformerFeatureExtractor = None # type: ignore
+    logger.error(f"sac_policy.py: Failed to import EnhancedTransformerFeatureExtractor or common.config: {e}. Using fallback values.", exc_info=True) # type: ignore
+    EnhancedTransformerFeatureExtractor = None # type: ignore
     MAX_SYMBOLS_ALLOWED = 20
     TIMESTEPS = 128
     TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
@@ -54,7 +54,7 @@ class CustomSACPolicy(SACPolicy):
         lr_schedule: Callable[[float], float],
         net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
-        features_extractor_class: Type[BaseFeaturesExtractor] = AdvancedTransformerFeatureExtractor, # type: ignore
+        features_extractor_class: Type[BaseFeaturesExtractor] = EnhancedTransformerFeatureExtractor, # type: ignore
         features_extractor_kwargs: Optional[Dict[str, Any]] = None,
         normalize_images: bool = False,
         optimizer_class: Type[torch.optim.Optimizer] = torch.optim.Adam,
@@ -71,15 +71,13 @@ class CustomSACPolicy(SACPolicy):
         if net_arch is None:
             net_arch = dict(pi=[256, 256], qf=[256, 256])
         if features_extractor_kwargs is None:
-            features_extractor_kwargs = {}
-
-        # 確保 features_extractor_class 不是 None (在後備導入情況下可能發生)
+            features_extractor_kwargs = {}        # 確保 features_extractor_class 不是 None (在後備導入情況下可能發生)
         actual_feat_ext_class = features_extractor_class
-        if actual_feat_ext_class is None and 'AdvancedTransformerFeatureExtractor' in globals() and AdvancedTransformerFeatureExtractor is not None:
-            logger.info("Using default feature extractor: AdvancedTransformerFeatureExtractor")
-            actual_feat_ext_class = AdvancedTransformerFeatureExtractor # type: ignore
+        if actual_feat_ext_class is None and 'EnhancedTransformerFeatureExtractor' in globals() and EnhancedTransformerFeatureExtractor is not None:
+            logger.info("Using default feature extractor: EnhancedTransformerFeatureExtractor")
+            actual_feat_ext_class = EnhancedTransformerFeatureExtractor # type: ignore
         elif actual_feat_ext_class is None:
-            logger.error("CustomSACPolicy: features_extractor_class is None and fallback AdvancedTransformerFeatureExtractor not available!")
+            logger.error("CustomSACPolicy: features_extractor_class is None and fallback EnhancedTransformerFeatureExtractor not available!")
             # 這種情況下，父類初始化會失敗，或者需要提供一個默認的 BaseFeaturesExtractor
             # 為了能繼續，我們可能需要一個非常基礎的默認，但這會偏離我們的設計
             # super().__init__ 中 features_extractor_class 是必需的
@@ -134,8 +132,8 @@ class CustomSACPolicy(SACPolicy):
 
 if __name__ == "__main__":
     logger.info("正在直接運行 sac_policy.py 進行測試 (僅基礎導入和類定義檢查)...")
-    if 'AdvancedTransformerFeatureExtractor' not in globals() or AdvancedTransformerFeatureExtractor is None:
-        logger.error("AdvancedTransformerFeatureExtractor is None. Test cannot proceed.")
+    if 'EnhancedTransformerFeatureExtractor' not in globals() or EnhancedTransformerFeatureExtractor is None:
+        logger.error("EnhancedTransformerFeatureExtractor is None. Test cannot proceed.")
         sys.exit(1)
     required_configs = ['MAX_SYMBOLS_ALLOWED', 'TIMESTEPS', 'TRANSFORMER_OUTPUT_DIM_PER_SYMBOL']
     for cfg_var in required_configs:
@@ -153,13 +151,12 @@ if __name__ == "__main__":
         "current_positions_nominal_ratio_ac": spaces.Box(low=-1.0, high=1.0, shape=(_max_symbols,), dtype=np.float32),
         "unrealized_pnl_ratio_ac": spaces.Box(low=-1.0, high=1.0, shape=(_max_symbols,), dtype=np.float32),
         "margin_level": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
-        "padding_mask": spaces.Box(low=0, high=1, shape=(_max_symbols,), dtype=np.bool_)
-    })
+        "padding_mask": spaces.Box(low=0, high=1, shape=(_max_symbols,), dtype=np.bool_)    })
     dummy_action_space = spaces.Box(low=-1.0, high=1.0, shape=(_max_symbols,), dtype=np.float32)
 
     def dummy_lr_schedule(progress_remaining: float) -> float:
         return 3e-4 * progress_remaining
-
+    
     try:
         # 創建 CustomSACPolicy 實例時，只傳遞它和其父類 __init__ 方法實際接受的參數
         policy = CustomSACPolicy(
@@ -167,13 +164,8 @@ if __name__ == "__main__":
             action_space=dummy_action_space,
             lr_schedule=dummy_lr_schedule,
             # net_arch, activation_fn 等使用默認值
-            features_extractor_kwargs=dict( # 這些會傳給 AdvancedTransformerFeatureExtractor
-                transformer_output_dim_per_symbol=_transformer_out_dim,
-                model_dim=128,
-                num_time_encoder_layers=1,
-                num_cross_asset_layers=1,
-                num_heads=2,
-                ffn_dim=128,
+            features_extractor_kwargs=dict( # 這些會傳給 EnhancedTransformerFeatureExtractor
+                enhanced_transformer_output_dim_per_symbol=_transformer_out_dim
             ),
             # use_sde=False, # 如果需要可以設置
             # log_std_init, clip_mean, use_expln, squash_output 這些是Actor的參數，

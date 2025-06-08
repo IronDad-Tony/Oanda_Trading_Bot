@@ -1,152 +1,88 @@
-#!/usr/bin/env python3
-"""
-Simple test script for Phase 5 Strategy Innovation Module
-Tests the core functionality with dynamic dimension adaptation
-"""
-
-import sys
-import os
-sys.path.append('src')
-
 import torch
 import numpy as np
-from datetime import datetime
-import logging
+import pytest
+from src.agent.strategy_innovation_module import QuantumInspiredGenerator, StateAwareAdapter
+from src.agent.meta_learning_optimizer import MetaLearningOptimizer, GeneticSelector
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+def test_quantum_generator_effectiveness():
+    """測試量子策略生成器的有效性"""
+    # 初始化生成器
+    generator = QuantumInspiredGenerator(num_strategies=5, strategy_dim=256)
+    
+    # 創建市場狀態
+    market_state = torch.randn(1, 128)  # [batch_size, state_dim]
+    
+    # 生成策略組合
+    strategies = generator.generate_strategy(market_state)
+    
+    # 驗證輸出形狀
+    assert strategies.shape == (1, 1, 256), "策略形狀應為 [batch_size, 1, strategy_dim]"
+    
+    # 驗證策略多樣性
+    diversity = torch.std(strategies).item()
+    assert diversity > 0.1, "策略應有足夠多樣性 (std > 0.1)"
+    
+    # 驗證量子態更新
+    initial_states = generator.quantum_states.clone()
+    _ = generator.generate_strategy(market_state)
+    assert not torch.allclose(initial_states, generator.quantum_states), "量子態應在每次生成後更新"
 
-def test_phase5_strategy_innovation():
-    """Test Phase 5 Strategy Innovation Module with various configurations"""
+def test_state_adapter_stability():
+    """測試狀態適配器的穩定性"""
+    # 初始化適配器
+    adapter = StateAwareAdapter(volatility_factor=0.7, risk_aversion=0.8)
     
-    logger.info("🚀 Starting Phase 5 Strategy Innovation Module Test")
+    # 創建策略和市場狀態
+    strategy = torch.randn(1, 256)  # [batch_size, strategy_dim]
+    market_state = torch.tensor([[0.5, 0.8, 0.3, 0.9]])  # 最後一個值為波動率
     
-    try:
-        # Import the module
-        from src.agent.strategy_innovation_module import (
-            StrategyInnovationModule, 
-            ConfigAdapter,
-            create_strategy_innovation_module
-        )
+    # 適配策略
+    adapted_strategy = adapter.adapt_strategy(strategy, market_state)
+    
+    # 驗證輸出形狀
+    assert adapted_strategy.shape == strategy.shape, "適配前後策略形狀應一致"
+    
+    # 驗證調整因子應用
+    adjustment_factor = 1.0 - (market_state[..., -1].unsqueeze(-1) * adapter.volatility_factor) * adapter.risk_aversion
+    expected_strategy = strategy * adjustment_factor
+    assert torch.allclose(adapted_strategy, expected_strategy, atol=1e-5), "應正確應用調整因子"
+    
+    # 測試極端值穩定性
+    extreme_market = torch.tensor([[0.0, 0.0, 0.0, 1.0]])  # 最高波動率
+    extreme_adapted = adapter.adapt_strategy(strategy, extreme_market)
+    assert torch.isfinite(extreme_adapted).all(), "極端市場條件下應保持穩定"
+
+def test_genetic_algorithm_convergence():
+    """測試遺傳算法的收斂性"""
+    # 初始化遺傳選擇器
+    selector = GeneticSelector(population_size=20, mutation_rate=0.2)
+    
+    # 模擬適應度進化
+    convergence_history = []
+    for generation in range(10):
+        # 評估當前種群
+        fitness_scores = []
+        for params in selector.population:
+            # 模擬適應度函數：學習率越高、折扣因子越高則適應度越好
+            fitness = params['learning_rate'] * 10000 + params['discount_factor'] * 10
+            fitness_scores.append(fitness)
         
-        # Test different model configurations
-        test_configs = [
-            {'model_dim': 768, 'description': 'Large Model (Current)'},
-            {'model_dim': 512, 'description': 'Medium Model'},
-            {'model_dim': 256, 'description': 'Small Model'}
-        ]
+        # 記錄最佳適應度
+        best_fitness = max(fitness_scores)
+        convergence_history.append(best_fitness)
         
-        for config in test_configs:
-            logger.info(f"\n📊 Testing with {config['description']} - Dimension: {config['model_dim']}")
-            
-            # Create config adapter
-            config_adapter = ConfigAdapter()
-            config_adapter._cached_config = {
-                'model_dim': config['model_dim'],
-                'num_layers': 12,
-                'num_heads': 16,
-                'ffn_dim': config['model_dim'] * 4,
-                'output_dim_per_symbol': config['model_dim'] // 4,
-                'head_dim': config['model_dim'] // 16
-            }
-            
-            # Create strategy innovation module
-            innovation_module = StrategyInnovationModule(
-                input_dim=config['model_dim'],
-                population_size=10,
-                max_generations=5,
-                config_adapter=config_adapter
-            )
-            
-            # Generate test data
-            batch_size = 2
-            input_dim = config['model_dim']
-            strategy_dim = max(256, input_dim // 3)
-            
-            market_context = torch.randn(batch_size, input_dim)
-            existing_strategies = torch.randn(batch_size, 5, strategy_dim)
-            
-            logger.info(f"   Input dimensions: market_context={market_context.shape}, strategies={existing_strategies.shape}")
-            
-            # Test innovation flow
-            with torch.no_grad():
-                innovation_result = innovation_module(market_context, existing_strategies)
-                
-                # Test evolution
-                evolved_strategies = innovation_module.evolve_strategies(
-                    market_context, num_generations=2
-                )
-                
-                # Get statistics
-                stats = innovation_module.get_innovation_statistics()
-                
-            logger.info(f"   ✅ Success! Fitness: {innovation_result['evaluation']['fitness_score'].mean():.4f}")
-            logger.info(f"   📈 Evolved {len(evolved_strategies)} strategies, {stats['evolution_generations']} generations")
-            
-        # Test factory function
-        logger.info(f"\n🏭 Testing Factory Function")
-        factory_module = create_strategy_innovation_module(
-            input_dim=768, 
-            population_size=5
-        )
-        
-        test_context = torch.randn(1, 768)
-        with torch.no_grad():
-            result = factory_module(test_context)
-        
-        logger.info(f"   ✅ Factory function test successful!")
-        
-        # Test cross-market knowledge transfer
-        logger.info(f"\n🔄 Testing Cross-Market Knowledge Transfer")
-        
-        # Store some mock knowledge
-        knowledge_system = innovation_module.knowledge_transfer
-        mock_strategies = torch.randn(10, 256)
-        mock_performance = torch.rand(10)
-        
-        knowledge_system.store_market_knowledge('stocks', mock_strategies, mock_performance)
-        knowledge_system.store_market_knowledge('crypto', mock_strategies * 0.8, mock_performance * 0.9)
-        
-        # Test knowledge transfer
-        target_context = torch.randn(256)
-        transfer_result = knowledge_system.transfer_knowledge('forex', target_context)
-        
-        if transfer_result['adapted_knowledge'] is not None:
-            logger.info(f"   ✅ Knowledge transfer successful! Score: {transfer_result['transfer_scores'].mean():.4f}")
-        else:
-            logger.info(f"   ⚠️ No knowledge transferred (expected for new setup)")
-        
-        logger.info(f"\n🎉 All Phase 5 Strategy Innovation tests completed successfully!")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Test failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False
+        # 進化到下一代
+        selector.evolve(fitness_scores)
+    
+    # 驗證收斂性：後三代應優於前三代
+    early_avg = np.mean(convergence_history[:3])
+    late_avg = np.mean(convergence_history[-3:])
+    assert late_avg > early_avg, "遺傳算法應隨代數增加而改進"
+    
+    # 驗證超參數範圍
+    best_params = selector.population[np.argmax(fitness_scores)]
+    assert 1e-5 <= best_params['learning_rate'] <= 1e-2, "學習率應在合理範圍"
+    assert 0.8 <= best_params['discount_factor'] <= 0.99, "折扣因子應在合理範圍"
 
 if __name__ == "__main__":
-    start_time = datetime.now()
-    
-    success = test_phase5_strategy_innovation()
-    
-    end_time = datetime.now()
-    duration = (end_time - start_time).total_seconds()
-    
-    logger.info(f"\n⏱️ Test completed in {duration:.2f} seconds")
-    
-    if success:
-        logger.info("🎯 Phase 5 Strategy Innovation Module is working correctly!")
-        print("\n" + "="*70)
-        print("🎉 PHASE 5 STRATEGY INNOVATION MODULE - DYNAMIC ADAPTATION COMPLETE!")
-        print("="*70)
-        print("✅ All syntax errors fixed")
-        print("✅ Dynamic dimension adaptation implemented")
-        print("✅ Cross-module compatibility verified")
-        print("✅ Strategy generation and evolution working")
-        print("✅ Knowledge transfer system functional")
-        print("✅ Multi-configuration testing successful")
-        print("="*70)
-    else:
-        logger.error("💥 Phase 5 tests failed - further debugging needed")
+    pytest.main(["-v", __file__])

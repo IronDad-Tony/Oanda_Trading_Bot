@@ -176,7 +176,11 @@ class StrategyGeneratorTransformer(nn.Module):
             nn.Softmax(dim=-1)
         )
         
-        logger.info(f"初始化動態策略生成Transformer - 隱藏維度: {self.hidden_dim}, "
+        # Explicitly declare projector attributes to be None initially
+        self.context_projector: Optional[nn.Linear] = None
+        self.input_projector: Optional[nn.Linear] = None
+
+        logger.info(f"動態策略生成Transformer初始化 - 隱藏維度: {self.hidden_dim}, "
                    f"層數: {self.num_layers}, 頭數: {self.num_heads}, "                   f"架構輸出: {architecture_output_dim}, 超參數輸出: {hyperparameter_output_dim}")
     
     def forward(self, market_context: torch.Tensor,
@@ -192,55 +196,143 @@ class StrategyGeneratorTransformer(nn.Module):
             策略參數字典
         """
         batch_size = market_context.size(0)
-        
-        # 處理market_context的維度 - 確保是3D張量 [batch_size, seq_len, feature_dim]
+        device = market_context.device
+
+        # 1. 確保 market_context 是 3D 張量: [batch_size, seq_len, features]
         if market_context.dim() == 2:
-            # 如果是2D，添加序列維度
-            market_context = market_context.unsqueeze(1)  # [batch_size, 1, context_dim]
-        elif market_context.dim() == 3:
-            # 如果已經是3D，直接使用
-            pass
-        else:
-            # 如果是4D或更高，壓縮到3D
+            market_context = market_context.unsqueeze(1)
+        elif market_context.dim() > 3:
+            # 重塑形狀，例如 [B, S1, S2, F] -> [B, S1*S2, F]
             market_context = market_context.view(batch_size, -1, market_context.size(-1))
-        
-        # 準備輸入序列 - 處理維度不匹配問題
+        # 如果 market_context.dim() == 3，則已經是正確的形狀，無需更改
+
+        input_sequence: torch.Tensor
+
         if existing_strategies is not None:
-            # 確保market_context和existing_strategies維度兼容
-            context_dim = market_context.size(-1)
-            strategy_dim = existing_strategies.size(-1)
+            # 2a. 處理 existing_strategies 為字典的情況
+            if isinstance(existing_strategies, dict):
+                keys_to_try = ['strategies_tensor', 'features', 'tensor', 'data', 'strategy_features']
+                extracted_tensor = None
+                for key in keys_to_try:
+                    if key in existing_strategies and isinstance(existing_strategies[key], torch.Tensor):
+                        extracted_tensor = existing_strategies[key]
+                        break
+                if extracted_tensor is None:
+                    tensor_values = [v for v in existing_strategies.values() if isinstance(v, torch.Tensor)]
+                    if len(tensor_values) == 1:
+                        extracted_tensor = tensor_values[0]
+                    else:
+                        logger.error(f"StrategyGenerator: existing_strategies is a dict, but could not unambiguously extract a tensor. Keys: {list(existing_strategies.keys())}")
+                        raise ValueError(
+                            f"StrategyGenerator: existing_strategies is a dict, but could not unambiguously extract a tensor. "
+                            f"Dict keys: {list(existing_strategies.keys())}. Ensure one of {keys_to_try} contains the tensor, "
+                            f"or the dict contains exactly one tensor value."
+                        )
+                existing_strategies = extracted_tensor
+
+            if not isinstance(existing_strategies, torch.Tensor):
+                logger.error(f"StrategyGenerator: existing_strategies expected as torch.Tensor, got {type(existing_strategies)}.")
+                raise TypeError(
+                    f"StrategyGenerator: existing_strategies is expected to be a torch.Tensor, "
+                    f"but received type {type(existing_strategies)} after attempting to process."
+                )
+
+            # 2b. 確保 existing_strategies 是 3D 張量: [batch_size, num_strategies, strategy_dim]
+            if existing_strategies.dim() == 2: # [B, F] -> [B, 1, F]
+                existing_strategies = existing_strategies.unsqueeze(1)
+            elif existing_strategies.dim() != 3:
+                logger.error(f"StrategyGenerator: existing_strategies must be 2D or 3D, got {existing_strategies.dim()}D shape {existing_strategies.shape}")
+                raise ValueError(f"StrategyGenerator: existing_strategies must be 2D or 3D, got {existing_strategies.dim()}D")
             
-            if context_dim != strategy_dim:
-                # 如果維度不匹配，將market_context投影到strategy_dim
-                if not hasattr(self, 'context_projector'):
-                    self.context_projector = nn.Linear(context_dim, strategy_dim).to(market_context.device)
+            # 2c. 如果 market_context 的特徵維度與 existing_strategies 不同，則對 market_context 進行投影
+            context_feature_dim = market_context.size(-1)
+            strategy_feature_dim = existing_strategies.size(-1)
+            market_context_projected: torch.Tensor
+
+            if context_feature_dim != strategy_feature_dim:
+                recreate_context_projector = False
+                if self.context_projector is None: # Check if None first
+                    recreate_context_projector = True
+                elif not isinstance(self.context_projector, nn.Linear): # Should not happen if None or Linear
+                    logger.warning("StrategyGenerator: self.context_projector was not None and not nn.Linear. Recreating.")
+                    recreate_context_projector = True
+                elif self.context_projector.in_features != context_feature_dim:
+                    recreate_context_projector = True
+                elif self.context_projector.out_features != strategy_feature_dim:
+                    recreate_context_projector = True
+                
+                if recreate_context_projector:
+                    logger.info(f"StrategyGenerator: Recreating context_projector from {context_feature_dim} to {strategy_feature_dim}")
+                    self.context_projector = nn.Linear(context_feature_dim, strategy_feature_dim).to(device)
+                
                 market_context_projected = self.context_projector(market_context)
             else:
                 market_context_projected = market_context
             
-            # 組合市場上下文和現有策略
+            # 2d. 將 market_context_projected 和 existing_strategies 沿序列維度連接
+            # market_context_projected 是 [B, S_ctx, F_strat]
+            # existing_strategies 是 [B, S_strat, F_strat]
             input_sequence = torch.cat([market_context_projected, existing_strategies], dim=1)
         else:
+            # 3. 如果沒有 existing_strategies，則直接使用 market_context
             input_sequence = market_context
+
+        # 4. 獲取 input_sequence 當前的特徵維度
+        # input_sequence 是 [B, S_combined_or_ctx, F_current]
+        current_input_feature_dim = input_sequence.size(-1)
         
-        seq_len = input_sequence.size(1)
+        # 5. 確定嵌入層所需的目標特徵維度
+        # self.input_dim 是 self.input_embedding 預期的特徵大小
+        desired_embedding_input_dim = self.input_dim 
+
+        final_sequence_for_embedding: torch.Tensor
+
+        # 6. 如果 input_sequence 的特徵維度與嵌入層預期的不匹配，則進行投影
+        if current_input_feature_dim != desired_embedding_input_dim:
+            recreate_input_projector = False
+            if self.input_projector is None: # Check if None first
+                recreate_input_projector = True
+            elif not isinstance(self.input_projector, nn.Linear): # Should not happen
+                logger.warning("StrategyGenerator: self.input_projector was not None and not nn.Linear. Recreating.")
+                recreate_input_projector = True
+            elif self.input_projector.in_features != current_input_feature_dim:
+                recreate_input_projector = True
+            elif self.input_projector.out_features != desired_embedding_input_dim: # Target dim for projector
+                recreate_input_projector = True
+            
+            if recreate_input_projector:
+                logger.info(f"StrategyGenerator: Recreating input_projector from {current_input_feature_dim} to {desired_embedding_input_dim}")
+                self.input_projector = nn.Linear(current_input_feature_dim, desired_embedding_input_dim).to(device)
+            
+            if self.input_projector is None: # Should have been created if needed
+                 err_msg = "StrategyGenerator: self.input_projector is None after recreation logic. This should not happen."
+                 logger.error(err_msg)
+                 raise RuntimeError(err_msg)
+
+            final_sequence_for_embedding = self.input_projector(input_sequence)
+        else:
+            final_sequence_for_embedding = input_sequence
         
-        # 輸入嵌入 - 確保輸入維度匹配
-        if input_sequence.size(-1) != self.input_dim:
-            if not hasattr(self, 'input_projector'):
-                self.input_projector = nn.Linear(input_sequence.size(-1), self.input_dim).to(input_sequence.device)
-            input_sequence = self.input_projector(input_sequence)
+        # 8. 輸入嵌入
+        # final_sequence_for_embedding 的特徵維度 = desired_embedding_input_dim (self.input_dim)
+        embedded = self.input_embedding(final_sequence_for_embedding)
         
-        embedded = self.input_embedding(input_sequence)
-        
-        # 添加位置編碼
+        # 9. 添加位置編碼
+        seq_len = final_sequence_for_embedding.size(1)
         if seq_len <= self.max_sequence_length:
-            embedded = embedded + self.position_encoding[:seq_len].unsqueeze(0)
-        
-        # Transformer編碼
+            embedded = embedded + self.position_encoding[:seq_len].unsqueeze(0) # 將位置編碼添加到批次維度
+        else:
+            logger.warning(
+                f"Input sequence length {seq_len} exceeds max_sequence_length {self.max_sequence_length}. "
+                f"Positional encoding will be applied only to the first {self.max_sequence_length} tokens."
+            )
+            # 只對與 max_sequence_length 匹配的序列部分應用位置編碼
+            embedded[:, :self.max_sequence_length, :] = embedded[:, :self.max_sequence_length, :] + self.position_encoding.unsqueeze(0)
+
+        # Transformer 編碼
         transformer_output = self.transformer(embedded)
         
-        # 使用平均池化聚合序列信息
+        # 聚合序列信息（例如，平均池化）
         aggregated = transformer_output.mean(dim=1)  # [batch_size, hidden_dim]
         
         # 生成策略組件
@@ -254,7 +346,7 @@ class StrategyGeneratorTransformer(nn.Module):
             'hyperparameters': hyperparameters,
             'feature_weights': feature_weights,
             'objective_weights': objective_weights,
-            'encoded_context': aggregated
+            'encoded_context': aggregated  # 對於下游任務或分析很有用
         }
 
 
@@ -976,7 +1068,7 @@ class KnowledgeTransferSystem(nn.Module):
                 # 如果仍然維度不匹配，展平到2D
                 if adapted_target_context.dim() != transferable_knowledge.dim() or adapted_target_context.dim() > 2:
                     adapted_target_context = adapted_target_context.view(adapted_target_context.size(0), -1)
-                    transferable_knowledge = transferable_knowledge.view(transferable_knowledge.size(0), -1)                # 確保batch維度匹配 - 適配到較小的batch大小或廣播
+                    transferable_knowledge = transferable_knowledge.view(transferable_knowledge.size(0), -1)                # 確保batch維度匹配 - 適配到較小的batch 大小或廣播
                 if adapted_target_context.size(0) != transferable_knowledge.size(0):
                     # 如果其中一個是單batch，擴展到匹配
                     if adapted_target_context.size(0) == 1:
@@ -1248,6 +1340,125 @@ class StrategyInnovationModule(nn.Module):
             'population_size': len(self.evolution_engine.current_population),
             'best_strategies_count': len(self.best_strategies)
         }
+class QuantumInspiredGenerator:
+    """量子啟發式策略生成器
+    使用量子隨機遊走算法生成創新交易策略
+    """
+    
+    def __init__(self, num_strategies: int = 10, strategy_dim: int = 256):
+        """
+        初始化量子策略生成器
+        
+        Args:
+            num_strategies: 生成的策略數量
+            strategy_dim: 策略參數的維度
+        """
+        self.num_strategies = num_strategies
+        self.strategy_dim = strategy_dim
+        self.quantum_states = None
+        self.current_position = 0
+        
+    def generate_strategy(self, market_state: torch.Tensor) -> torch.Tensor:
+        """
+        基於市場狀態生成策略組合
+        
+        Args:
+            market_state: 市場狀態張量 [batch_size, state_dim]
+            
+        Returns:
+            生成的策略參數 [batch_size, num_strategies, strategy_dim]
+        """
+        batch_size = market_state.size(0)
+        device = market_state.device
+        
+        # 初始化量子態 (如果未初始化或批次大小改變)
+        if self.quantum_states is None or self.quantum_states.size(0) != batch_size:
+            # 使用市場狀態作為初始量子態的基礎
+            self.quantum_states = torch.randn(batch_size, self.num_strategies, self.strategy_dim, device=device)
+            self.current_position = 0
+        
+        # 量子隨機遊走算法
+        # 1. 量子疊加: 混合當前量子態
+        superposition = torch.fft.fft(self.quantum_states, dim=-1)
+        
+        # 2. 相位擾動: 加入市場狀態影響
+        market_influence = market_state.unsqueeze(1)  # [batch_size, 1, state_dim]
+        # 確保維度匹配
+        if market_influence.size(-1) < self.strategy_dim:
+            padding = torch.zeros(batch_size, 1, self.strategy_dim - market_influence.size(-1),
+                                device=device)
+            market_influence = torch.cat([market_influence, padding], dim=-1)
+        elif market_influence.size(-1) > self.strategy_dim:
+            market_influence = market_influence[..., :self.strategy_dim]
+            
+        # 應用相位擾動
+        phase_shift = torch.exp(1j * market_influence * 0.1)
+        superposition = superposition * phase_shift
+        
+        # 3. 逆傅立葉變換返回時域
+        new_states = torch.fft.ifft(superposition, dim=-1).real
+        
+        # 4. 量子測量: 選取當前策略
+        strategies = new_states[:, self.current_position, :].unsqueeze(1)
+        
+        # 更新量子態和位置
+        self.quantum_states = new_states
+        self.current_position = (self.current_position + 1) % self.num_strategies
+        
+        return strategies
+
+class StateAwareAdapter:
+    """狀態感知策略適配器
+    基於市場狀態動態調整策略參數，整合波動率感知和風險偏好
+    """
+    
+    def __init__(self, volatility_factor: float = 0.5, risk_aversion: float = 0.7):
+        """
+        初始化適配器
+        
+        Args:
+            volatility_factor: 波動率影響因子 (0-1)
+            risk_aversion: 風險規避係數 (0-1)
+        """
+        self.volatility_factor = volatility_factor
+        self.risk_aversion = risk_aversion
+        
+    def adapt_strategy(self, strategy: torch.Tensor, market_state: torch.Tensor) -> torch.Tensor:
+        """
+        動態適配策略參數
+        
+        Args:
+            strategy: 原始策略參數 [batch_size, strategy_dim]
+            market_state: 市場狀態張量 [batch_size, state_dim]
+            
+        Returns:
+            適配後的策略參數 [batch_size, strategy_dim]
+        """
+        # 提取波動率信號 (假設market_state最後一個維度是波動率)
+        volatility = market_state[..., -1].unsqueeze(-1)  # [batch_size, 1]
+        
+        # 波動率感知調整
+        # 高波動率時降低策略攻擊性
+        volatility_adjustment = 1.0 - (volatility * self.volatility_factor)
+        
+        # 風險偏好調整
+        risk_adjustment = 1.0 - self.risk_aversion
+        
+        # 組合調整因子
+        adjustment_factor = volatility_adjustment * risk_adjustment
+        
+        # 確保維度匹配
+        if adjustment_factor.size(-1) < strategy.size(-1):
+            padding = torch.ones(strategy.size(0), strategy.size(-1) - adjustment_factor.size(-1),
+                               device=strategy.device)
+            adjustment_factor = torch.cat([adjustment_factor, padding], dim=-1)
+        elif adjustment_factor.size(-1) > strategy.size(-1):
+            adjustment_factor = adjustment_factor[..., :strategy.size(-1)]
+            
+        # 應用調整
+        adapted_strategy = strategy * adjustment_factor
+        
+        return adapted_strategy
 
 
 class ConfigAdapter:
@@ -1271,7 +1482,7 @@ class ConfigAdapter:
         # 從配置文件獲取
         try:
             from src.common.config import (
-                TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS, 
+                TRANSFORMER_MODEL_DIM, TRANSFORMER_NUM_LAYERS,
                 TRANSFORMER_NUM_HEADS, TRANSFORMER_FFN_DIM,
                 TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
             )
@@ -1300,6 +1511,7 @@ class ConfigAdapter:
     def invalidate_cache(self):
         """使緩存失效"""
         self._cached_config = None
+
 
 
 def create_strategy_innovation_module(enhanced_transformer=None, **kwargs) -> StrategyInnovationModule:

@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 import numpy as np
 import logging
+from .dynamic_reweighting import VolatilityAnalyzer  # 新增導入
 
 logger = logging.getLogger(__name__)
 
@@ -459,3 +460,69 @@ class RewardNormalizer:
         self.running_mean = Decimal('0')
         self.running_std = Decimal('1')
         logger.info("獎勵標準化器歷史數據已重置")
+
+class DynamicRewardNormalizer(RewardNormalizer):
+    """
+    動態獎勵標準化器（帶波動率感知）
+    
+    功能擴展：
+    1. 集成實時波動率分析模組
+    2. 實現基於市場波動的動態權重調整
+    """
+    
+    def __init__(self, volatility_window=100):
+        """
+        初始化動態獎勵標準化器
+        
+        Args:
+            volatility_window: 波動率分析窗口大小
+        """
+        super().__init__()
+        self.volatility_analyzer = VolatilityAnalyzer(window=volatility_window)
+        self.base_weights = self.component_weights.copy()  # 保存基礎權重用於恢復
+        logger.info(f"動態獎勵標準化器已初始化，波動率窗口: {volatility_window}")
+    
+    def update_weights(self, market_state):
+        """
+        基於波動率分析動態調整權重
+        
+        Args:
+            market_state: 包含市場狀態信息的字典
+        """
+        # 計算當前波動率
+        volatility = self.volatility_analyzer.calculate(market_state)
+        
+        # 基於波動率調整權重
+        if volatility > 0.015:  # 高波動
+            self._apply_high_volatility_weights()
+        elif volatility < 0.005:  # 低波動
+            self._apply_low_volatility_weights()
+        else:  # 中等波動
+            self._reset_to_base_weights()
+        
+        logger.info(f"基於波動率 {volatility:.4f} 更新權重配置")
+    
+    def _apply_high_volatility_weights(self):
+        """應用高波動環境權重配置"""
+        # 增加風險控制組件權重
+        self.component_weights['drawdown_penalty'] = self.base_weights['drawdown_penalty'] * 2.0
+        self.component_weights['quick_cut_loss'] = self.base_weights['quick_cut_loss'] * 1.8
+        self.component_weights['volatility_timing'] = self.base_weights['volatility_timing'] * 1.5
+        
+        # 減少風險較高組件權重
+        self.component_weights['profit_run'] = self.base_weights['profit_run'] * 0.7
+        self.component_weights['trend_following'] = self.base_weights['trend_following'] * 0.8
+    
+    def _apply_low_volatility_weights(self):
+        """應用低波動環境權重配置"""
+        # 增加趨勢跟隨組件權重
+        self.component_weights['trend_following'] = self.base_weights['trend_following'] * 1.5
+        self.component_weights['hold_profit'] = self.base_weights['hold_profit'] * 1.3
+        
+        # 減少風險控制組件權重
+        self.component_weights['drawdown_penalty'] = self.base_weights['drawdown_penalty'] * 0.7
+        self.component_weights['quick_cut_loss'] = self.base_weights['quick_cut_loss'] * 0.8
+    
+    def _reset_to_base_weights(self):
+        """恢復基礎權重配置"""
+        self.component_weights = self.base_weights.copy()

@@ -255,13 +255,38 @@ class StateTransitionMonitor(nn.Module):
         if len(self.state_history) < 5:  # 需要足夠的歷史數據
             self.update_state_history(current_state_probs, current_confidence)
             return None
-            
-        # 獲取最近的狀態分佈
+              # 獲取最近的狀態分佈
         recent_states = torch.stack(list(self.state_history)[-5:])  # [5, num_states]
         current_state = current_state_probs.unsqueeze(0)  # [1, num_states]
         
-        # 計算狀態分佈變化
-        state_changes = torch.abs(current_state - recent_states[-1:]).sum()
+        # 計算狀態分佈變化 - 確保張量維度匹配
+        last_state = recent_states[-1:].squeeze(0)  # [num_states] - 獲取最後一個狀態
+        current_state_flat = current_state_probs  # [num_states] - 當前狀態
+          # 確保兩個張量具有相同的維度和大小
+        if last_state.dim() != current_state_flat.dim():
+            if last_state.dim() > current_state_flat.dim():
+                current_state_flat = current_state_flat.unsqueeze(0)
+            else:
+                last_state = last_state.unsqueeze(0)
+        
+        # 確保張量大小匹配 - 處理批次大小變化
+        if last_state.shape != current_state_flat.shape:
+            min_size = min(last_state.size(0), current_state_flat.size(0))
+            last_state = last_state[:min_size]
+            current_state_flat = current_state_flat[:min_size]
+            
+            # 如果特徵維度不同，使用自適應池化
+            if last_state.size(-1) != current_state_flat.size(-1):
+                if last_state.size(-1) > current_state_flat.size(-1):
+                    last_state = torch.nn.functional.adaptive_avg_pool1d(
+                        last_state.unsqueeze(1), current_state_flat.size(-1)
+                    ).squeeze(1)
+                else:
+                    current_state_flat = torch.nn.functional.adaptive_avg_pool1d(
+                        current_state_flat.unsqueeze(1), last_state.size(-1)
+                    ).squeeze(1)
+                
+        state_changes = torch.abs(current_state_flat - last_state).sum()
         
         # 檢測顯著轉換
         if state_changes > self.transition_threshold:
@@ -380,16 +405,11 @@ class AdaptiveStrategySelector(nn.Module):
             nn.Linear(128, num_strategies),
             nn.Sigmoid()
         )
-        
-        # 動態權重調節器
-        self.weight_adjuster = nn.Sequential(
-            nn.Linear(len(MarketState) + num_strategies * 2, 256),
-            nn.GELU(),
-            nn.Linear(256, 128),
-            nn.GELU(),
-            nn.Linear(128, num_strategies),
-            nn.Softmax(dim=-1)
-        )
+          # 動態權重調節器 - 更靈活的輸入維度計算
+        # Expected input: market_state_probs + state_specific_weights + predicted_performance
+        # This will be calculated dynamically in forward pass
+        self.weight_adjuster = None
+        self._build_weight_adjuster = True  # Flag to build on first forward pass
         
         # 策略性能歷史
         self.strategy_performance_history = {i: deque(maxlen=history_window) 
@@ -433,8 +453,7 @@ class AdaptiveStrategySelector(nn.Module):
         predicted_performance = self.performance_predictor(strategy_input)
         
         # 整合歷史性能信息
-        historical_performance = self.strategy_success_rate.unsqueeze(0).expand(batch_size, -1)
-          # 動態權重調節
+        historical_performance = self.strategy_success_rate.unsqueeze(0).expand(batch_size, -1)        # 動態權重調節
         # Handle multi-dimensional market_state_probs tensor
         if market_state_probs.dim() == 3:
             # market_state_probs shape: [1, 4, 8] -> flatten to [1, 32]
@@ -454,7 +473,24 @@ class AdaptiveStrategySelector(nn.Module):
             predicted_performance
         ], dim=-1)
         
-        final_weights = self.weight_adjuster(weight_input)
+        # Build weight_adjuster dynamically if needed
+        if self.weight_adjuster is None and self._build_weight_adjuster:
+            input_size = weight_input.size(-1)
+            self.weight_adjuster = nn.Sequential(
+                nn.Linear(input_size, 256),
+                nn.GELU(),
+                nn.Linear(256, 128),
+                nn.GELU(),
+                nn.Linear(128, self.num_strategies),
+                nn.Softmax(dim=-1)
+            ).to(weight_input.device)
+            self._build_weight_adjuster = False
+        
+        if self.weight_adjuster is not None:
+            final_weights = self.weight_adjuster(weight_input)
+        else:
+            # Fallback: use state_specific_weights as final weights
+            final_weights = state_specific_weights
         
         # 加入探索因子以避免過度exploitation
         exploration_factor = 0.1
