@@ -5,248 +5,243 @@
 """
 import logging
 import sys
-from logging.handlers import RotatingFileHandler # RotatingFileHandler is imported but TimedRotatingFileHandler is used later. Consider removing if not used.
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
-from datetime import datetime # Moved import here
+from datetime import datetime
 import os
+import io # Moved import io to the top
+import time # Moved import time to the top
+import traceback # Added import traceback to fix NameError
+
+# --- 全局變量確保日誌文件名只生成一次 和 stdout/stderr 只包裝一次 ---
+_log_file_path_instance = None
+_stdout_wrapped = False # Initialize before use
+_stderr_wrapped = False # Initialize before use
 
 # 避免循環導入，直接設置日誌路徑
-# 計算項目根目錄和日誌目錄
 project_root = Path(__file__).resolve().parent.parent.parent
 logs_dir = project_root / "logs"
 
-# --- 全局變量確保日誌文件名只生成一次 ---
-_log_file_path_instance = None
-
 def get_log_file_path():
     """Return a unique log file path per process run using an environment-based timestamp."""
+    global _log_file_path_instance # Ensure we modify the global instance if needed, though current logic re-evals env var
     run_id = os.environ.get('LOG_RUN_ID')
     if run_id is None:
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f") # Added microseconds for more uniqueness
         os.environ['LOG_RUN_ID'] = run_id
-    return logs_dir / f"trading_system_{run_id}.log"
+    # If _log_file_path_instance is None, or if we want to re-evaluate every call (current behavior):
+    _log_file_path_instance = logs_dir / f"trading_system_{run_id}.log"
+    return _log_file_path_instance
 
-LOG_FILE_PATH = get_log_file_path()  # static log file path
+LOG_FILE_PATH = get_log_file_path()
 
-# 確保日誌目錄存在
 logs_dir.mkdir(parents=True, exist_ok=True)
 
-# --- 日誌級別 ---
-# DEBUG: 詳細的診斷信息，通常只在調試時開啟。
-# INFO: 確認事情按預期工作。
-# WARNING: 表明發生了一些意外情況，或者在不久的將來會出現一些問題（例如，磁盤空間不足）。程式仍在按預期工作。
-# ERROR: 由於一個更嚴重的問題，程式無法執行某些功能。
-# CRITICAL: 嚴重錯誤，表明程式本身可能無法繼續運行。
-
-# --- 全局日誌記錄器實例 ---
-# 使用專案的根記錄器，或者一個特定的名稱空間
-# 這裡我們創建一個名為 'TradingSystem' 的記錄器
 logger = logging.getLogger("TradingSystem")
-logger.setLevel(logging.DEBUG) # 設置記錄器處理的最低級別，處理程序可以有自己的級別
+logger.setLevel(logging.DEBUG)
 
-# --- 防止重複添加處理程序 ---
-# 如果記錄器已經有處理程序了（例如，在Jupyter Notebook中多次運行此儲存格），先清除它們
 if logger.hasHandlers():
     logger.handlers.clear()
 
 # --- 控制台處理程序 (Console Handler) ---
-# 將日誌輸出到標準輸出 (終端)
-# 在 Windows 上設置正確的編碼以支持中文
-import io
 if sys.platform == 'win32':
-    # 在 Windows 上使用 UTF-8 編碼的流
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    # This block should be executed only once.
+    if not _stdout_wrapped:
+        try:
+            # Check if sys.stdout is a TTY, if not, it might be already redirected (e.g. in a pipe)
+            if sys.stdout.isatty(): 
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            _stdout_wrapped = True
+        except Exception as e:
+            print(f"Initial Error wrapping stdout: {e}") 
+    if not _stderr_wrapped:
+        try:
+            if sys.stderr.isatty():
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+            _stderr_wrapped = True
+        except Exception as e:
+            print(f"Initial Error wrapping stderr: {e}")
 
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.DEBUG) # 修改：控制台顯示DEBUG及以上級別的日誌
+console_handler.setLevel(logging.INFO) # Changed from DEBUG to INFO for console
 console_formatter = logging.Formatter(
     "%(asctime)s - [%(levelname)s] - %(name)s - (%(filename)s:%(lineno)d) - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 console_handler.setFormatter(console_formatter)
-# 設置控制台處理程序的編碼
-if hasattr(console_handler.stream, 'reconfigure'):
-    console_handler.stream.reconfigure(encoding='utf-8')
 logger.addHandler(console_handler)
 
 # --- 文件處理程序 (File Handler) ---
-# 將日誌輸出到文件，並實現日誌輪轉
-# RotatingFileHandler 會在日誌文件達到一定大小時自動創建新的日誌文件
-# maxBytes: 每個日誌文件的最大大小 (這裡是 5MB)
-# backupCount: 保留的舊日誌文件數量
 try:
-    # 在多進程環境中，使用更安全的日誌配置
-    import os
-    from logging.handlers import TimedRotatingFileHandler
-    import time
-
-    # 日誌目錄已在上面創建
-
-    if os.name == 'nt':  # Windows system
-        logger.info("Windows environment detected. Using Windows-safe logging handler.")
-        
-        # Windows 安全的檔案處理器
+    if os.name == 'nt':
         class WindowsSafeRotatingFileHandler(TimedRotatingFileHandler):
-            """
-            Windows 安全的滾動檔案處理器
-            解決 Windows 系統上檔案重新命名權限問題
-            """
+            def __init__(self, filename, when='h', interval=1, backupCount=0,
+                         encoding=None, delay=False, utc=False, atTime=None):
+                # Ensure encoding is passed to parent if not None
+                super().__init__(filename, when, interval, backupCount, encoding, delay, utc, atTime)
+
             def doRollover(self):
-                """
-                覆寫滾動方法，增加錯誤處理和重試機制
-                """
                 if self.stream:
                     self.stream.close()
                     self.stream = None
                 
-                # 計算滾動後的檔案名
-                current_time = int(time.time())
-                dst_name = self.rotation_filename(self.baseFilename + "." + 
-                                                 time.strftime(self.suffix, time.localtime(current_time)))
-                
-                # 使用重試機制進行檔案重新命名
+                current_time_tuple = time.localtime(time.time())
+                dfn = self.rotation_filename(self.baseFilename + "." + time.strftime(self.suffix, current_time_tuple))
+
                 max_retries = 5
-                retry_delay = 0.1
+                retry_delay = 0.2 # Slightly increased delay
                 
                 for attempt in range(max_retries):
                     try:
                         if os.path.exists(self.baseFilename):
-                            # 如果目標檔案已存在，先刪除它
-                            if os.path.exists(dst_name):
+                            if os.path.exists(dfn):
                                 try:
-                                    os.remove(dst_name)
-                                except OSError:
-                                    pass  # 忽略刪除失敗
-                            
-                            # 嘗試重新命名
-                            os.rename(self.baseFilename, dst_name)
-                        break
-                        
-                    except (OSError, PermissionError) as e:
+                                    os.remove(dfn)
+                                except OSError as e_remove:
+                                    # Log to stderr if remove fails, as logger might be in inconsistent state
+                                    sys.stderr.write(f"WindowsSafeRotatingFileHandler: Could not remove {dfn}: {e_remove}\n")
+                                    # If removal fails, we might try to rename over it, or append unique suffix to dfn
+                                    # For now, let rename attempt it.
+                                    pass 
+                            os.rename(self.baseFilename, dfn)
+                        break 
+                    except (OSError, PermissionError) as e_rename:
+                        sys.stderr.write(f"WindowsSafeRotatingFileHandler: Rename attempt {attempt+1} failed for {self.baseFilename} to {dfn}: {e_rename}\n")
                         if attempt < max_retries - 1:
-                            time.sleep(retry_delay * (2 ** attempt))  # 指數退避
+                            time.sleep(retry_delay * (2 ** attempt))
                             continue
                         else:
-                            # 最後一次嘗試失敗，創建一個帶時間戳的新檔案
-                            timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-                            new_base = f"{self.baseFilename}_{timestamp}.log"
-                            self.baseFilename = new_base
-                            logger.warning(f"檔案滾動失敗，使用新檔案名: {new_base}")
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f") 
+                            original_base = Path(self.baseFilename).stem
+                            new_base_name = f"{original_base}_{timestamp}.log"
+                            new_full_path = Path(self.baseFilename).parent / new_base_name
+                            sys.stderr.write(f"WindowsSafeRotatingFileHandler: All rename attempts failed. Using new base: {new_full_path}\n")
+                            self.baseFilename = str(new_full_path) # Update baseFilename to the new unique name
+                            # No need to rename here, new file will be created with _open()
                 
-                # 清理舊檔案
+                # Cleanup old files based on the original base name pattern if possible, or current if changed
                 if self.backupCount > 0:
-                    self._cleanup_old_files()
+                    self._cleanup_old_files() 
                 
-                # 重新打開檔案流
                 if not self.delay:
-                    self.stream = self._open()
+                    try:
+                        self.stream = self._open() 
+                    except Exception as e_open:
+                        sys.stderr.write(f"WindowsSafeRotatingFileHandler: Error reopening stream {self.baseFilename}: {e_open}\n")
+                        self.stream = None # Ensure stream is None if open fails
             
             def _cleanup_old_files(self):
-                """清理超出保留數量的舊檔案"""
                 try:
                     log_dir = os.path.dirname(self.baseFilename)
+                    # Construct the prefix based on the original naming pattern if possible
+                    # This is tricky if baseFilename changed. For simplicity, use current baseFilename stem.
+                    base_stem = Path(self.baseFilename).stem.split('_')[0] # Attempt to get original base part
                     log_files = []
                     
                     for filename in os.listdir(log_dir):
-                        if filename.startswith(os.path.basename(self.baseFilename)):
-                            full_path = os.path.join(log_dir, filename)
-                            if os.path.isfile(full_path):
-                                log_files.append((full_path, os.path.getmtime(full_path)))
+                        if filename.startswith(base_stem) and filename.endswith(".log") and Path(filename).suffix != self.suffix:
+                            # This logic needs to be careful to match rotated files, e.g., trading_system_YYYYMMDD_HHMMSS.log.YYYY-MM-DD_HH
+                            # The default TimedRotatingFileHandler naming is baseFilename + suffix (e.g. .2023-01-01_10)
+                            # Let's rely on the parent's getFilesToDelete logic if possible, or simplify.
+                            # For now, a simple approach matching the start of the base filename:
+                            if filename.startswith(Path(self.baseFilename).name.split('.log')[0]):
+                                full_path = os.path.join(log_dir, filename)
+                                if os.path.isfile(full_path):
+                                    log_files.append((full_path, os.path.getmtime(full_path)))
                     
-                    # 按修改時間排序，保留最新的檔案
                     log_files.sort(key=lambda x: x[1], reverse=True)
                     
-                    # 刪除超出保留數量的檔案
                     if len(log_files) > self.backupCount:
                         for file_path, _ in log_files[self.backupCount:]:
                             try:
                                 os.remove(file_path)
-                            except OSError:
-                                pass  # 忽略刪除失敗
+                            except OSError as e_remove_old:
+                                sys.stderr.write(f"WindowsSafeRotatingFileHandler: Could not remove old log {file_path}: {e_remove_old}\n")
                                 
-                except Exception as e:
-                    logger.warning(f"清理舊日誌檔案失敗: {e}")
-            
+                except Exception as e_cleanup:
+                    sys.stderr.write(f"WindowsSafeRotatingFileHandler: Error during _cleanup_old_files: {e_cleanup}\n")
+
             def emit(self, record):
                 """
-                覆寫 emit 方法，增加異常處理
+                Emit a record.
+                Handles rollover safely on Windows and defers to FileHandler.emit.
+                The caller (logging.Handler.handle) is expected to call self.handleError if this method raises an exception.
                 """
                 try:
-                    super().emit(record)
-                except Exception as e:
-                    # 如果寫入失敗，嘗試重新打開檔案
-                    try:
-                        if self.stream:
-                            self.stream.close()
-                        self.stream = self._open()
-                        super().emit(record)
-                    except Exception:
-                        # 如果還是失敗，使用 handleError
-                        self.handleError(record)
-        
+                    if self.shouldRollover(record):
+                        self.doRollover() # Our custom, Windows-safe rollover
+                    
+                    # logging.FileHandler.emit will call self._open() if self.stream is None.
+                    logging.FileHandler.emit(self, record) 
+                
+                except Exception as e: # Catch any exception from rollover or emit
+                    # Log detailed error to stderr, including our class name for clarity
+                    # Ensure record and record.getMessage() are accessed safely
+                    record_message = "N/A"
+                    if record:
+                        try:
+                            record_message = record.getMessage()
+                        except Exception:
+                            record_message = "Error getting record message"
+
+                    sys.stderr.write(
+                        f"{self.__class__.__name__}: Error during emit or rollover for {self.baseFilename}. "
+                        f"Record: {record_message}. Error: {e}\\n"
+                        f"Traceback: {traceback.format_exc()}\\n"
+                    )
+                    # self.handleError(record) # Removed: Let Handler.handle() call this.
+                    raise # Re-raise the exception to be caught by logging.Handler.handle()
+
         file_handler = WindowsSafeRotatingFileHandler(
             LOG_FILE_PATH,
-            when='H',  # 改為每小時滾動，減少衝突機會
+            when='H', 
             interval=1,
-            backupCount=24,  # 保留 24 小時的日誌
+            backupCount=24, 
             encoding='utf-8',
-            delay=True
+            delay=True 
         )
-        
-    else:  # 非 Windows 系統 (Unix/Linux/MacOS等)
+        # Message moved after handler is added
+    else:  # Non-Windows
+        # ... (existing non-Windows fcntl or standard TimedRotatingFileHandler logic)
+        # For brevity, assuming the non-Windows part was okay or needs separate review.
+        # Fallback to standard if fcntl is not available or fails.
         try:
             import fcntl
-            logger.info("在非 Windows 系統上檢測到 fcntl 模組，將嘗試使用帶文件鎖的 SafeFileHandler。")
-
+            # logger.info("Non-Windows: Using SafeFileHandler with fcntl.") # Log after handler added
             class SafeFileHandler(TimedRotatingFileHandler):
                 def emit(self, record):
                     try:
-                        if self.stream is None: # 確保 stream 在使用前已打開
-                            self.stream = self._open()
-                        if self.stream: # 再次檢查 stream 是否成功打開
-                            # 在寫入前獲取文件鎖
+                        if self.stream is None: self.stream = self._open()
+                        if self.stream:
                             fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX)
-                            try:
-                                super().emit(record)
-                            finally:
-                                # 釋放文件鎖
-                                fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
-                        else: # 如果 stream 仍然是 None，則直接調用父類 emit (可能觸發錯誤處理)
-                            super().emit(record) # type: ignore
-                    except Exception: # 捕獲所有可能的異常，包括 stream 為 None 或鎖定失敗
-                        self.handleError(record) # 使用 logging 內建的錯誤處理
-
-            file_handler = SafeFileHandler( # type: ignore
-                LOG_FILE_PATH, # 確保這裡使用更新後的 LOG_FILE_PATH
-                when='midnight',
-                interval=1,
-                backupCount=7,
-                encoding='utf-8',
-                delay=True
-            )
+                            try: super().emit(record)
+                            finally: fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
+                        else: super().emit(record)
+                    except Exception: self.handleError(record)
+            file_handler = SafeFileHandler(LOG_FILE_PATH, when='midnight', interval=1, backupCount=7, encoding='utf-8', delay=True)
         except ImportError:
-            logger.warning("在非 Windows 系統上導入 fcntl 失敗，將使用標準的 TimedRotatingFileHandler。")
-            file_handler = TimedRotatingFileHandler(
-                LOG_FILE_PATH, # 確保這裡使用更新後的 LOG_FILE_PATH
-                when='midnight',
-                interval=1,
-                backupCount=7,
-                encoding='utf-8',
-                delay=True
-            )
+            # logger.warning("Non-Windows: fcntl not available, using standard TimedRotatingFileHandler.") # Log after handler added
+            file_handler = TimedRotatingFileHandler(LOG_FILE_PATH, when='midnight', interval=1, backupCount=7, encoding='utf-8', delay=True)
     
-    file_handler.setLevel(logging.DEBUG) # 文件日誌記錄所有DEBUG及以上級別的信息
+    file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter(
         "%(asctime)s - [%(levelname)s] - %(name)s - (%(module)s.%(funcName)s:%(lineno)d) - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
+
+    # Log environment detection after handlers are set up
+    if os.name == 'nt':
+        logger.info("Windows environment detected. Using Windows-safe logging handler.")
+    elif 'fcntl' in sys.modules:
+        logger.info("Non-Windows: Using SafeFileHandler with fcntl.")
+    else:
+        logger.warning("Non-Windows: fcntl not available, using standard TimedRotatingFileHandler.")
+
 except Exception as e:
-    # 如果文件處理程序創建失敗 (例如，權限問題)
-    # 記錄一個錯誤到控制台，並繼續，至少控制台日誌還能工作
-    logger.error(f"創建文件日誌處理程序失敗: {e}", exc_info=True)
+    # Use print for this critical error as logger might be the cause
+    print(f"CRITICAL: Failed to create file log handler: {e}\nTraceback: {traceback.format_exc()}\n", file=sys.stderr)
 
 
 # --- Streamlit 特定的日誌處理 (可選，如果Streamlit應用需要更精細的日誌展示) ---
@@ -287,7 +282,7 @@ except Exception as e:
 
 # --- 避免日誌傳播到根記錄器 ---
 # 如果不希望這個記錄器的日誌同時被根記錄器處理（可能導致重複輸出），可以設置 propagate = False
-# logger.propagate = False
+logger.propagate = False
 
 if __name__ == "__main__":
     # 這個部分只在直接運行 logger_setup.py 時執行，用於測試日誌配置

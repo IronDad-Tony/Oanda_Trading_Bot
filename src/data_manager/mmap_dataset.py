@@ -1,8 +1,8 @@
 # src/data_manager/mmap_dataset.py
 """
-MemoryMappedDataset 模組
-高效處理大規模時間序列數據，用於模型訓練。
-它會將預處理後的特徵數據存儲到內存映射文件中。
+MemoryMappedDataset module
+Efficiently handles large-scale time series data for model training.
+It stores the preprocessed feature data into memory-mapped files.
 """
 import numpy as np
 import pandas as pd
@@ -15,7 +15,7 @@ import hashlib
 import json
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime, timedelta, timezone
-import sys # 確保 sys 在頂層導入，以便 fallback 和 __main__ 使用
+import sys # Ensure sys is imported at the top level for fallback and __main__ usage
 import logging
 import atexit
 import glob
@@ -78,29 +78,57 @@ def cleanup_mmap_temp_files():
     1. 清理所有活躍數據集的 mmap 檔案
     2. 清理孤立的 mmap 暫存檔案
     """
-    # 更健壯地檢查 logger 是否仍然可用
     current_logger = None
+    logger_available = False
     if 'logger' in globals() and globals()['logger'] is not None:
         _logger_candidate = globals()['logger']
-        if hasattr(_logger_candidate, 'info') and callable(_logger_candidate.info) and \
-           hasattr(_logger_candidate, 'hasHandlers') and _logger_candidate.hasHandlers() and _logger_candidate.handlers and \
-           hasattr(_logger_candidate, 'isEnabledFor') and _logger_candidate.isEnabledFor(logging.INFO):
-            current_logger = _logger_candidate
+        if hasattr(_logger_candidate, 'handlers') and _logger_candidate.handlers and \
+           hasattr(_logger_candidate, 'isEnabledFor') and _logger_candidate.isEnabledFor(logging.INFO) and \
+           not getattr(_logger_candidate, 'disabled', False):
+            for handler in _logger_candidate.handlers:
+                if hasattr(handler, 'stream') and handler.stream and not handler.stream.closed:
+                    logger_available = True
+                    break
+            if logger_available:
+                current_logger = _logger_candidate
 
-    log_func = current_logger.info if current_logger else lambda msg: print(f"INFO (cleanup_mmap_temp_files fallback): {msg}")
-    warn_func = current_logger.warning if current_logger else lambda msg: print(f"WARN (cleanup_mmap_temp_files fallback): {msg}")
-    error_func = current_logger.error if current_logger else lambda msg: print(f"ERROR (cleanup_mmap_temp_files fallback): {msg}")
-    debug_func = current_logger.debug if current_logger else lambda msg: print(f"DEBUG (cleanup_mmap_temp_files fallback): {msg}")
+    original_handle_errors = {}
+    if current_logger: # current_logger is the one determined above
+        for handler in current_logger.handlers:
+            if hasattr(handler, 'handleError'):
+                original_handle_errors[handler] = handler.handleError
+                handler.handleError = lambda record: None # Suppress default error handling
+
+    # Define safer logging functions for use within this atexit handler
+    def make_safe_logger_for_cleanup(level_str, fallback_prefix):
+        def safe_log_action(msg):
+            if logger_available and current_logger: # logger_available based on initial check
+                try:
+                    log_method = getattr(current_logger, level_str)
+                    log_method(msg)
+                except Exception as e_log: # Catch any exception during the logging attempt
+                    # Since default handleError is suppressed, we print our own fallback.
+                    print(f"{fallback_prefix} [CLEANUP_LOG_ATTEMPT_FAILED - {type(e_log).__name__}]: {msg}", file=sys.stderr)
+            else:
+                # Logger was not available from the start or current_logger is None
+                print(f"{fallback_prefix} [CLEANUP_LOG_UNAVAILABLE_FALLBACK]: {msg}", file=sys.stderr)
+        return safe_log_action
+
+    log_func = make_safe_logger_for_cleanup('info', 'INFO')
+    warn_func = make_safe_logger_for_cleanup('warning', 'WARNING')
+    error_func = make_safe_logger_for_cleanup('error', 'ERROR')
+    debug_func = make_safe_logger_for_cleanup('debug', 'DEBUG')
 
     try:
+        log_func("Attempting to cleanup mmap temp files via atexit or direct call.")
         # 關閉所有活躍的數據集
         for dataset in _active_datasets[:]:  # 使用副本避免修改時的問題
             try:
                 if hasattr(dataset, 'close'):
                     dataset.close()
-                    log_func(f"已關閉數據集: {getattr(dataset, 'dataset_id', 'unknown')}")
+                    log_func(f"Closed dataset: {getattr(dataset, 'dataset_id', 'unknown')}")
             except Exception as e:
-                warn_func(f"關閉數據集時發生錯誤: {e}")
+                warn_func(f"Error closing dataset: {e}")
         
         _active_datasets.clear()
         
@@ -111,13 +139,13 @@ def cleanup_mmap_temp_files():
                 # 查找所有 .mmap 檔案
                 mmap_files = list(mmap_base_dir.rglob("*.mmap"))
                 if mmap_files:
-                    log_func(f"發現 {len(mmap_files)} 個 mmap 暫存檔案，正在清理...")
+                    log_func(f"Found {len(mmap_files)} mmap temp files, cleaning up...")
                     for mmap_file in mmap_files:
                         try:
                             mmap_file.unlink()
-                            debug_func(f"已刪除 mmap 檔案: {mmap_file}")
+                            debug_func(f"Deleted mmap file: {mmap_file}")
                         except Exception as e:
-                            warn_func(f"無法刪除 mmap 檔案 {mmap_file}: {e}")
+                            warn_func(f"Cannot delete mmap file {mmap_file}: {e}")
                     
                     # 清理空的目錄
                     for dataset_dir in mmap_base_dir.iterdir():
@@ -126,16 +154,24 @@ def cleanup_mmap_temp_files():
                                 # 如果目錄為空，則刪除
                                 if not any(dataset_dir.iterdir()):
                                     dataset_dir.rmdir()
-                                    debug_func(f"已刪除空目錄: {dataset_dir}")
+                                    debug_func(f"Deleted empty directory: {dataset_dir}")
                             except Exception as e:
-                                debug_func(f"無法刪除目錄 {dataset_dir}: {e}")
+                                # Changed from debug_func to warn_func as failure to delete a dir might be notable
+                                warn_func(f"Cannot delete directory {dataset_dir}: {e}")
                 else:
-                    log_func("未發現需要清理的 mmap 暫存檔案")
+                    log_func("No mmap temp files found for cleanup")
         except Exception as e:
-            warn_func(f"清理 mmap 暫存檔案時發生錯誤: {e}")
+            warn_func(f"Error cleaning mmap temp files: {e}")
             
     except Exception as e:
-        error_func(f"mmap 暫存檔案清理過程中發生嚴重錯誤: {e}")
+        # Use the safer error_func for the outermost catch block
+        error_func(f"Severe error during mmap temp files cleanup: {e}")
+    finally:
+        # Restore original handleError methods
+        if current_logger:
+            for handler in current_logger.handlers:
+                if handler in original_handle_errors:
+                    handler.handleError = original_handle_errors[handler]
 
 def cleanup_old_mmap_files(max_age_hours: int = 24):
     """
@@ -162,17 +198,17 @@ def cleanup_old_mmap_files(max_age_hours: int = 24):
                         # 刪除整個數據集目錄
                         shutil.rmtree(dataset_dir)
                         cleaned_count += 1
-                        logger.info(f"已清理過期的數據集目錄: {dataset_dir}")
+                        logger.info(f"Cleaned up old dataset directory: {dataset_dir}")
                 except Exception as e:
-                    logger.warning(f"清理過期目錄 {dataset_dir} 時發生錯誤: {e}")
+                    logger.warning(f"Error cleaning up old directory {dataset_dir}: {e}")
         
         if cleaned_count > 0:
-            logger.info(f"共清理了 {cleaned_count} 個過期的數據集目錄")
+            logger.info(f"Cleaned up {cleaned_count} old dataset directories")
         else:
-            logger.debug("未發現需要清理的過期數據集目錄")
+            logger.debug("No old dataset directories found for cleanup")
             
     except Exception as e:
-        logger.warning(f"清理過期 mmap 檔案時發生錯誤: {e}")
+        logger.warning(f"Error cleaning up old mmap files: {e}")
 
 # 註冊程式退出時的清理函數
 atexit.register(cleanup_mmap_temp_files)
@@ -195,9 +231,9 @@ class UniversalMemoryMappedDataset(Dataset):
         dataset_signature_str = f"{'_'.join(self.symbols)}_{self.start_time_iso}_{self.end_time_iso}_{self.granularity}"
         self.dataset_id = hashlib.md5(dataset_signature_str.encode()).hexdigest()[:16]
         self.dataset_mmap_dir = MMAP_DATA_DIR / self.dataset_id
-        logger.info(f"初始化UniversalMemoryMappedDataset: ID={self.dataset_id}, Symbols={self.symbols}")
-        logger.info(f"時間範圍: {self.start_time_iso} to {self.end_time_iso}, Granularity: {self.granularity}")
-        logger.info(f"MMap數據目錄: {self.dataset_mmap_dir}")
+        logger.info(f"UniversalMemoryMappedDataset initialized: ID={self.dataset_id}, Symbols={self.symbols}")
+        logger.info(f"Time range: {self.start_time_iso} to {self.end_time_iso}, Granularity: {self.granularity}")
+        logger.info(f"MMap data directory: {self.dataset_mmap_dir}")
         self.processed_features_memmaps: Dict[str, Optional[np.memmap]] = {sym: None for sym in self.symbols}
         self.raw_prices_memmaps: Dict[str, Optional[np.memmap]] = {sym: None for sym in self.symbols}
         self.aligned_timestamps: Optional[pd.DatetimeIndex] = None
@@ -398,42 +434,52 @@ class UniversalMemoryMappedDataset(Dataset):
         return {"features": features_tensor, "raw_prices": raw_prices_tensor}
 
     def close(self):
-        """關閉所有內存映射文件。重要：在程序退出前調用。"""
+        """關閉所有內存映射文件。重要：在程序退出前調用."""
         # 更健壯地檢查 logger 是否仍然可用
-        can_log_info = False
-        # 首先檢查 logger 是否在全局作用域中定義並且不是 None
+        logger_available = False
+        current_logger_instance = None
+
         if 'logger' in globals() and globals()['logger'] is not None:
-            # 然後檢查 logger 是否有 info 方法
-            current_logger = globals()['logger']
-            if hasattr(current_logger, 'info') and callable(current_logger.info):
-                # 再檢查是否有有效的 handlers，表明它還能輸出
-                if hasattr(current_logger, 'hasHandlers') and current_logger.hasHandlers() and current_logger.handlers:
-                     # 最後一層保護，確保 isEnabledFor INFO
-                     if hasattr(current_logger, 'isEnabledFor') and current_logger.isEnabledFor(logging.INFO): # logging 需要導入
-                        can_log_info = True
+            _logger_candidate = globals()['logger']
+            if hasattr(_logger_candidate, 'handlers') and _logger_candidate.handlers and \
+               hasattr(_logger_candidate, 'isEnabledFor') and _logger_candidate.isEnabledFor(logging.INFO) and \
+               not getattr(_logger_candidate, 'disabled', False):
+                for handler in _logger_candidate.handlers:
+                    if hasattr(handler, 'stream') and handler.stream and not handler.stream.closed:
+                        logger_available = True
+                        break
+                if logger_available:
+                    current_logger_instance = _logger_candidate
         
-        log_func = logger.info if can_log_info else lambda msg: print(f"INFO (fallback print): {msg}")
+        log_func = current_logger_instance.info if logger_available else lambda msg: print(f"INFO (UniversalMemoryMappedDataset.close fallback): {msg}", file=sys.stderr)
         
-        log_func(f"正在關閉數據集 {self.dataset_id} 的內存映射文件...") # dataset_id 可能在此時未定義如果__init__失敗
         dataset_id_to_log = getattr(self, 'dataset_id', 'UnknownDatasetID_in_close')
+        log_func(f"Closing memory-mapped files for dataset {dataset_id_to_log}...") # Translated to English
 
+        symbols_to_iterate = getattr(self, 'symbols', [])
+        processed_features_memmaps_dict = getattr(self, 'processed_features_memmaps', {})
+        raw_prices_memmaps_dict = getattr(self, 'raw_prices_memmaps', {})
 
-        log_func(f"正在關閉數據集 {dataset_id_to_log} 的內存映射文件...")
+        for symbol_item in symbols_to_iterate:
+            if processed_features_memmaps_dict.get(symbol_item) is not None:
+                # Ensure the memmap object itself is deleted to close the file
+                try:
+                    del processed_features_memmaps_dict[symbol_item] # This should trigger __del__ on memmap if ref count is 0
+                except Exception as e:
+                    print(f"FALLBACK_CLOSE_ERROR: Error deleting processed_features_memmap for {symbol_item}: {e}")
+                self.processed_features_memmaps[symbol_item] = None # Explicitly set to None
 
-
-        for symbol in self.symbols: # self.symbols 也可能未定義如果__init__失敗
-            symbols_to_iterate = getattr(self, 'symbols', [])
-            for symbol_item in symbols_to_iterate:
-                if self.processed_features_memmaps.get(symbol_item) is not None:
-                    del self.processed_features_memmaps[symbol_item]
-                    self.processed_features_memmaps[symbol_item] = None
-                if self.raw_prices_memmaps.get(symbol_item) is not None:
-                    del self.raw_prices_memmaps[symbol_item]
-                    self.raw_prices_memmaps[symbol_item] = None
+            if raw_prices_memmaps_dict.get(symbol_item) is not None:
+                try:
+                    del raw_prices_memmaps_dict[symbol_item] # This should trigger __del__ on memmap if ref count is 0
+                except Exception as e:
+                    print(f"FALLBACK_CLOSE_ERROR: Error deleting raw_prices_memmap for {symbol_item}: {e}")
+                self.raw_prices_memmaps[symbol_item] = None # Explicitly set to None
         
-        # import gc; gc.collect() # 在 __del__ 中通常不建議強制gc
+        # import gc # Generally not needed here, __del__ of memmap objects handles file closing.
+        # gc.collect()
         
-        log_func(f"數據集 {dataset_id_to_log} 的內存映射文件已關閉。")
+        log_func(f"Memory-mapped files for dataset {dataset_id_to_log} have been closed.") # Translated to English
         
         # 從活躍數據集列表中移除
         try:

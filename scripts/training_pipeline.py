@@ -10,7 +10,13 @@ This script handles:
 5. Model saving.
 6. Basic logging.
 """
+import sys
 import os
+# Add the project root to the Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import torch
 import logging
 from datetime import datetime
@@ -42,7 +48,7 @@ CONFIG = {
     "model_save_path": "trained_models/sac_universal_trader",
     "log_level": logging.INFO,
     "sac_params": {
-        "batch_size": 64,  # Further reduced batch size
+        "batch_size": 64,  # Default batch size, will be overridden in the test loop
         # Add any specific SAC params for QuantumEnhancedSAC if needed
         # e.g., "learning_rate": 0.0003, "buffer_size": 1_000_000, ...
         # These would typically be passed to QuantumEnhancedSAC constructor
@@ -153,35 +159,78 @@ def train_agent(env, total_timesteps: int, model_save_path: str, model_save_freq
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    setup_logging(log_level=CONFIG["log_level"])
+    # Create logs directory if it doesn't exist
+    log_dir = os.path.join(project_root, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Generate a timestamped log file name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file_name = f"training_pipeline_{timestamp}.log"
+    log_file_path = os.path.join(log_dir, log_file_name)
+
+    setup_logging(log_level=CONFIG["log_level"], log_file=log_file_path) # MODIFIED: Added log_file argument
+    logger.info(f"Logging to file: {log_file_path}") # ADDED: Log the path for confirmation
     logger.info("--- Starting Universal Trader Training Script ---")
     
     # Device check (optional, QuantumEnhancedSAC might handle this)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
 
-    # Create environment
-    train_env = create_training_env(
-        symbols=CONFIG["symbols"],
-        start_time_iso=CONFIG["train_start_iso"],
-        end_time_iso=CONFIG["train_end_iso"],
-        env_params=CONFIG["env_params"]
-    )
+    batch_sizes_to_test = [32, 64, 128, 256] # Example batch sizes
+    successful_batch_sizes = []
+    failed_batch_sizes = {}
+    
+    for bs in batch_sizes_to_test:
+        logger.info(f"--- Testing with Batch Size: {bs} ---")
+        CONFIG["sac_params"]["batch_size"] = bs
+        
+        try:
+            # Create environment
+            # Ensure a fresh environment for each run if necessary, or reuse if state is managed
+            # For simplicity, recreating; consider if dataset loading is too slow for this loop
+            train_env = create_training_env(
+                symbols=CONFIG["symbols"],
+                start_time_iso=CONFIG["train_start_iso"],
+                end_time_iso=CONFIG["train_end_iso"],
+                env_params=CONFIG["env_params"]
+            )
 
-    # Train agent
-    trained_agent = train_agent(
-        env=train_env,
-        total_timesteps=CONFIG["total_timesteps"],
-        model_save_path=CONFIG["model_save_path"],
-        model_save_freq=CONFIG["model_save_freq"],
-        sac_params=CONFIG["sac_params"]
-    )
+            # Train agent
+            trained_agent = train_agent(
+                env=train_env,
+                total_timesteps=CONFIG["total_timesteps"], # Consider reducing for quick tests
+                model_save_path=CONFIG["model_save_path"],
+                model_save_freq=CONFIG["model_save_freq"],
+                sac_params=CONFIG["sac_params"]
+            )
+            successful_batch_sizes.append(bs)
+            logger.info(f"--- Successfully trained with Batch Size: {bs} ---")
 
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                logger.error(f"--- CUDA OOM Error with Batch Size: {bs} ---")
+                failed_batch_sizes[bs] = "CUDA OOM"
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache() # Clear cache before next attempt
+            else:
+                logger.error(f"--- Error with Batch Size: {bs}: {e} ---", exc_info=True)
+                failed_batch_sizes[bs] = str(e)
+        except Exception as e:
+            logger.error(f"--- Unexpected Error with Batch Size: {bs}: {e} ---", exc_info=True)
+            failed_batch_sizes[bs] = str(e)
+        finally:
+            if 'train_env' in locals() and train_env is not None:
+                train_env.close() # Clean up the environment
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    
+    logger.info("--- Batch Size Test Summary ---")
+    logger.info(f"Successfully trained with batch sizes: {successful_batch_sizes}")
+    if failed_batch_sizes:
+        logger.warning(f"Failed to train with batch sizes: {failed_batch_sizes}")
     logger.info("--- Universal Trader Training Script Finished ---")
 
     # Optional: Add evaluation step here
     # logger.info("Starting evaluation...")
     # evaluate_agent(trained_agent, eval_env_config) 
     # (Requires separate eval_env setup and evaluation function)
-
-    train_env.close() # Clean up the environment

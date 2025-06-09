@@ -4,13 +4,6 @@ import torch.nn as nn
 from gymnasium import spaces
 import numpy as np
 import logging
-import sys
-from pathlib import Path
-
-# Add project root to sys.path
-project_root = Path(__file__).resolve().parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
 
 # Define these globally for fallback and tests
 TEST_TIMESTEPS = 128
@@ -151,7 +144,7 @@ def test_gradient_flow_to_transformer():
             logger.error("Could not find 'enhanced_transformer' attribute or it\\'s not an nn.Module in feature_extractor.")
     except Exception as e:
         logger.error(f"Error during gradient flow test: {e}", exc_info=True)
-    return grad_flow_successful
+    assert grad_flow_successful
 
 def test_adaptive_encoder_dimension_adaptation():
     logger.info("\\n--- Testing AdaptiveStrategyEncoder Dimension Adaptation ---")
@@ -379,7 +372,7 @@ def test_system_integrity_end_to_end():
 
     except Exception as e:
         logger.error(f"Error during system integrity test: {e}", exc_info=True)
-    return qsl_grad_successful
+    assert qsl_grad_successful
 
 def test_meta_learning_system_integration():
     logger.info("\\n--- Testing Meta Learning System Integration ---")
@@ -485,7 +478,7 @@ def test_meta_learning_system_integration():
 
     except Exception as e:
         logger.error(f"Error during meta learning system integration test: {e}", exc_info=True)
-    return meta_path_grad_successful
+    assert meta_path_grad_successful
 
 def main():
     transformer_grad_ok = test_gradient_flow_to_transformer()

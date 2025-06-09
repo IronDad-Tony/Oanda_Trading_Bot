@@ -392,7 +392,7 @@ class UniversalTrainer:
             self.env = UniversalTradingEnvV4(
                 dataset=self.dataset,
                 instrument_info_manager=self.instrument_manager,
-                active_symbols_for_episode=self.trading_symbols,
+                active_symbols_for_episode=self.trading_symbols, # ensure this is the correct parameter name
                 initial_capital=self.initial_capital,
                 max_episode_steps=self.max_episode_steps,
                 commission_percentage_override=TRADE_COMMISSION_PERCENTAGE,

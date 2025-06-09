@@ -9,36 +9,66 @@ Author: AI Trading System
 Date: 2025-06-08
 """
 
-import sys
-import os
-import time
-import torch
-import torch.nn as nn
-import numpy as np
-import pandas as pd
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Dict, List, Any, Optional, Union
-import logging
+import sys # Moved to top
+from pathlib import Path # Moved to top
+import json # Added import
+import time # Added import
+
+# Correct sys.path modification to point to the parent of 'src'
+# Assuming the script is in src/test, parent.parent is the project root (Oanda_Trading_Bot)
+# Then we add Oanda_Trading_Bot/src to the path.
+project_root = Path(__file__).resolve().parent.parent.parent 
+# Oanda_Trading_Bot (parent of src)
+actual_src_path = project_root / 'src'
+
+# Add project_root and actual_src_path to sys.path if not already present
+# and ensure they are at the beginning for priority.
+if str(actual_src_path) not in sys.path:
+    sys.path.insert(0, str(actual_src_path))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+# Remove duplicates if any, keeping the first occurrence
+seen_paths = set()
+new_sys_path = []
+for path_str in sys.path:
+    if path_str not in seen_paths:
+        new_sys_path.append(path_str)
+        seen_paths.add(path_str)
+sys.path = new_sys_path
+
+# Now, all other imports
+import torch # Moved to top
+import torch.nn as nn # Moved to top
+import logging # Keep standard logging import if other modules might use it directly, though our main logger is imported.
 from dataclasses import dataclass
-import json
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Any, Optional 
+import numpy as np
+from unittest.mock import MagicMock, patch, mock_open
 
-# 添加src路徑到系統路徑
-project_root = Path(__file__).resolve().parent
-src_path = project_root / "src"
-if str(src_path) not in sys.path:
-    sys.path.insert(0, str(src_path))
-
-# 配置日誌
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/100_percent_integration.log'),
-        logging.StreamHandler()
-    ]
+# Project-specific imports
+from agent.strategy_innovation_module import StrategyInnovationModule
+from agent.market_state_awareness_system import MarketStateAwarenessSystem
+from agent.meta_learning_optimizer import MetaLearningOptimizer, TaskBatch # TaskBatch might be defined here or in high_level_integration_system
+from agent.high_level_integration_system import (
+    HighLevelIntegrationSystem,
+    DynamicPositionManager, 
+    AnomalyDetector, 
+    EmergencyStopLoss
 )
-logger = logging.getLogger(__name__)
+from data_manager.oanda_downloader import manage_data_download_for_symbols, format_datetime_for_oanda
+from data_manager.database_manager import query_historical_data, create_tables_if_not_exist
+from environment.trading_env import UniversalTradingEnvV4
+from trainer.universal_trainer import UniversalTrainer
+
+# Import the centralized logger
+from common.logger_setup import logger # Use the centralized logger
+
+# Define logs_dir using the project_root defined earlier
+# project_root = Path(__file__).resolve().parent.parent.parent # This is already at the top
+logs_dir = project_root / "logs"
+logs_dir.mkdir(exist_ok=True) # Ensure logs directory exists
 
 @dataclass
 class PhaseCompletionStatus:
@@ -56,11 +86,14 @@ class Complete100PercentIntegration:
     """100%完成度整合系統"""
     
     def __init__(self):
-        self.project_root = Path(__file__).resolve().parent
+        self.project_root = Path(__file__).resolve().parent.parent.parent # Corrected project_root definition
         self.src_path = self.project_root / "src"
         self.data_path = self.project_root / "data"
         self.weights_path = self.project_root / "weights"
-        self.logs_path = self.project_root / "logs"
+        self.logs_path = self.project_root / "logs" # This should use the global logs_dir
+        
+        # Use the globally defined logs_dir for consistency
+        self.logs_path = logs_dir 
         
         # 創建必要目錄
         for path in [self.data_path, self.weights_path, self.logs_path]:
@@ -78,27 +111,32 @@ class Complete100PercentIntegration:
     
     def load_all_components(self):
         """載入所有必要的組件"""
+        current_phase = "Pre-initialization"
         try:
-            # Phase 1: 策略創新模組
+            current_phase = "StrategyInnovationModule Initialization"
+            logger.info(f"Loading component: {current_phase}")
             from agent.strategy_innovation_module import StrategyInnovationModule
             self.strategy_innovation = StrategyInnovationModule(
                 input_dim=768,
                 hidden_dim=768,
                 population_size=20
             )
-            
-            # Phase 2: 市場狀態感知系統
+            logger.info(f"Component loaded: {current_phase}")
+
+            current_phase = "MarketStateAwarenessSystem Initialization"
+            logger.info(f"Loading component: {current_phase}")
             from agent.market_state_awareness_system import MarketStateAwarenessSystem
             self.market_state_awareness = MarketStateAwarenessSystem(
                 input_dim=768,
                 num_strategies=20,
                 enable_real_time_monitoring=True
             )
-            
-            # Phase 3: 元學習優化器
-            from agent.meta_learning_optimizer import MetaLearningOptimizer, TaskBatch
-            
-            # 創建簡單模型用於元學習
+            logger.info(f"Component loaded: {current_phase}")
+
+            current_phase = "MetaLearningOptimizer Initialization"
+            logger.info(f"Loading component: {current_phase}")
+            from agent.meta_learning_optimizer import MetaLearningOptimizer # TaskBatch already imported at class level
+            # torch.nn as nn is imported at the top of the file
             base_model = nn.Sequential(
                 nn.Linear(768, 768),
                 nn.ReLU(),
@@ -106,46 +144,83 @@ class Complete100PercentIntegration:
                 nn.ReLU(),
                 nn.Linear(256, 1)
             )
-            
             self.meta_learning_optimizer = MetaLearningOptimizer(
                 model=base_model,
                 feature_dim=768,
                 adaptation_dim=768
             )
-              # Phase 4: 高階整合系統
-            from agent.high_level_integration_system import HighLevelIntegrationSystem
+            logger.info(f"Component loaded: {current_phase}")
             
-            # Create config with feature_dim
+            current_phase = "HighLevelIntegrationSystem Initialization"
+            logger.info(f"Loading component: {current_phase}")
+            from agent.high_level_integration_system import HighLevelIntegrationSystem # Other classes already imported at class level
+            # torch is imported at the top of the file
+            # logging module is available as 'logger' or via std 'logging'
+            
+            mock_strategy_innovation = MagicMock(spec=StrategyInnovationModule)
+            mock_market_state_awareness = MagicMock(spec=MarketStateAwarenessSystem)
+            mock_meta_learning_optimizer = MagicMock(spec=MetaLearningOptimizer)
+
+            feature_dim = 768
+
+            mock_position_manager = MagicMock(spec=DynamicPositionManager)
+            mock_anomaly_detector = MagicMock(spec=AnomalyDetector)
+            mock_emergency_stop_loss = MagicMock(spec=EmergencyStopLoss)
+
             integration_config = {
-                'feature_dim': 768,
-                'enable_dynamic_adaptation': True,
-                'expected_maml_input_dim': 768
+                "feature_dim": feature_dim,
+                "expected_maml_input_dim": feature_dim,
+                "num_maml_tasks": 3,
+                "maml_shots": 2,
+                "enable_dynamic_adaptation": False,
+                "default_input_tensor_key": "features_768", 
+                "strategy_input_min_dim": 256, "strategy_input_max_dim": 1024,
+                "market_state_input_min_dim": 256, 
+                "meta_features_input_min_dim": 128, "meta_features_input_max_dim": feature_dim,
+                "meta_task_input_min_dim": 128, "meta_task_input_max_dim": feature_dim,
+                "position_manager_input_min_dim": 256, "position_manager_input_max_dim": 1024,
+                "anomaly_input_min_dim": 256, "anomaly_input_max_dim": 1024,
+                "emergency_input_min_dim": 1, "emergency_input_max_dim": 128,
             }
             
-            self.high_level_integration = HighLevelIntegrationSystem(
-                strategy_innovation_module=self.strategy_innovation,
-                market_state_awareness_system=self.market_state_awareness,
-                meta_learning_optimizer=self.meta_learning_optimizer,
-                config=integration_config
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            log_file_path_hlis = Path(logs_dir) / "hlis_integration_test.log"
+
+            logger.info("Initializing HighLevelIntegrationSystem (sub-step)...")
+            self.high_level_integration = HighLevelIntegrationSystem( # Corrected assignment to self.high_level_integration
+                strategy_innovation_module=mock_strategy_innovation,
+                market_state_awareness_system=mock_market_state_awareness,
+                meta_learning_optimizer=mock_meta_learning_optimizer,
+                position_manager=mock_position_manager,
+                anomaly_detector=mock_anomaly_detector,
+                emergency_stop_loss_system=mock_emergency_stop_loss,
+                config=integration_config,
+                device=device,
+                enable_logging=True,
+                log_level=logging.DEBUG, # Standard logging from logging module
+                log_file=log_file_path_hlis
             )
+            logger.info("HighLevelIntegrationSystem initialized (sub-step).")
+            logger.info(f"Component loaded: {current_phase}")
             
-            # Phase 5: 數據管理和交易環境
+            current_phase = "Data Management and Environment Setup"
+            logger.info(f"Loading component: {current_phase}")
             from data_manager.oanda_downloader import manage_data_download_for_symbols, format_datetime_for_oanda
             from data_manager.database_manager import query_historical_data, create_tables_if_not_exist
-            from environment.trading_env import UniversalTradingEnvV4
-            from trainer.universal_trainer import UniversalTrainer
             
             self.data_downloader = manage_data_download_for_symbols
             self.data_query = query_historical_data
             self.format_datetime = format_datetime_for_oanda
             
-            # 確保數據庫表存在
+            logger.info("Ensuring database tables exist (sub-step)...")
             create_tables_if_not_exist()
+            logger.info("Database tables ensured (sub-step).")
+            logger.info(f"Component loaded: {current_phase}")
             
             logger.info("✅ 所有核心組件載入完成")
             
         except Exception as e:
-            logger.error(f"❌ 組件載入失敗: {e}")
+            logger.error(f"❌ 組件載入失敗 during phase '{current_phase}': {e}", exc_info=True)
             raise
     
     def run_complete_100_percent_test(self) -> Dict[str, Any]:
@@ -232,6 +307,7 @@ class Complete100PercentIntegration:
             
             for key in required_keys:
                 strategy_tests[f'has_{key}'] = key in innovation_output
+            logger.info(f"策略創新模組輸出包含必要鍵: {strategy_tests}")
             
             strategy_tests['output_shape_valid'] = (
                 innovation_output['generated_strategies'].shape[0] == 4 and
@@ -277,6 +353,7 @@ class Complete100PercentIntegration:
             
             for key in required_keys:
                 state_tests[f'has_{key}'] = key in state_output
+            logger.info(f"市場狀態感知系統輸出包含必要鍵: {state_tests}")
             
             state_tests['market_state_valid'] = (
                 'current_state' in state_output['market_state'] and
@@ -340,6 +417,7 @@ class Complete100PercentIntegration:
             
             for key in required_keys:
                 meta_tests[f'has_{key}'] = key in meta_output
+            logger.info(f"元學習優化器輸出包含必要鍵: {meta_tests}")
             
             meta_tests['adapted_features_shape'] = (
                 meta_output['adapted_features'].shape[0] == 4 and
@@ -402,6 +480,7 @@ class Complete100PercentIntegration:
             
             for key in required_keys:
                 integration_tests[f'has_{key}'] = key in integration_output
+            logger.info(f"高階整合系統輸出包含必要鍵: {integration_tests}")
             
             integration_tests['processing_time_reasonable'] = (
                 integration_output['processing_time'] < 5.0  # 5秒內完成
@@ -564,7 +643,7 @@ class Complete100PercentIntegration:
             from environment.trading_env import UniversalTradingEnvV4
             
             trading_env = UniversalTradingEnvV4(
-                symbols=test_symbols,
+                active_symbols_for_episode=test_symbols, # Changed from symbols
                 start_time=start_time,
                 end_time=end_time,
                 initial_capital=100000.0,
@@ -834,7 +913,7 @@ class Complete100PercentIntegration:
             from environment.trading_env import UniversalTradingEnvV4
             
             sim_env = UniversalTradingEnvV4(
-                symbols=test_symbols,
+                active_symbols_for_episode=test_symbols, # Changed from symbols
                 start_time=start_time,
                 end_time=end_time,
                 initial_capital=100000.0,
@@ -878,6 +957,7 @@ class Complete100PercentIntegration:
                         if done:
                             break
                             
+
                 except Exception as e:
                     logger.error(f"交易模擬步驟 {step} 失敗: {e}")
                     break

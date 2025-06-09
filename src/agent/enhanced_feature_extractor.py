@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import numpy as np
 
 try:
@@ -76,15 +76,20 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
     """
     
     def __init__(self, observation_space: spaces.Dict, 
+                 model_config: Optional[Dict[str, Any]] = None, # ADDED: model_config argument
                  enhanced_transformer_output_dim_per_symbol: int = TRANSFORMER_OUTPUT_DIM_PER_SYMBOL):
         """
         初始化增強版特徵提取器
         
         參數:
             observation_space: 觀察空間 (必須是gymnasium.spaces.Dict)
+            model_config: 可選的模型配置字典，用於覆蓋默認的Transformer參數
             enhanced_transformer_output_dim_per_symbol: 每個交易對的增強版Transformer輸出維度
         """
         # 計算總特徵維度
+        # This uses enhanced_transformer_output_dim_per_symbol,
+        # which is managed separately from the internal model_config's hidden_dim, num_layers etc.
+        # The EnhancedUniversalTradingTransformer will use the passed output_dim_per_symbol.
         total_features = (MAX_SYMBOLS_ALLOWED * enhanced_transformer_output_dim_per_symbol) + \
                          (MAX_SYMBOLS_ALLOWED * 3) + 1  # 位置+盈虧+保證金+遮罩
         
@@ -98,28 +103,37 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             logger.info(f"- GPU記憶體: {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f}GB")
             
         # 初始化增強版Transformer模型
+        # Pass the received model_config to the EnhancedUniversalTradingTransformer
         self.enhanced_transformer = EnhancedUniversalTradingTransformer(
             num_input_features=observation_space.spaces["features_from_dataset"].shape[2],
             num_symbols_possible=MAX_SYMBOLS_ALLOWED,
-            model_dim=TRANSFORMER_MODEL_DIM,
-            num_layers=TRANSFORMER_NUM_LAYERS,
-            num_heads=TRANSFORMER_NUM_HEADS,
-            ffn_dim=TRANSFORMER_FFN_DIM,
-            dropout_rate=TRANSFORMER_DROPOUT_RATE,
-            max_seq_len=observation_space.spaces["features_from_dataset"].shape[1],
-            output_dim_per_symbol=enhanced_transformer_output_dim_per_symbol,
+            model_config=model_config,  # PASS THE MODEL_CONFIG HERE
+            # Default values below will be overridden by model_config if provided to EnhancedUniversalTradingTransformer
+            model_dim=TRANSFORMER_MODEL_DIM, # Default, will be overridden by model_config if model_config['hidden_dim'] exists
+            num_layers=TRANSFORMER_NUM_LAYERS, # Default, will be overridden by model_config if model_config['num_layers'] exists
+            num_heads=TRANSFORMER_NUM_HEADS, # Default, will be overridden by model_config if model_config['num_heads'] exists
+            ffn_dim=TRANSFORMER_FFN_DIM, # Default, will be overridden by model_config if model_config['intermediate_dim'] exists
+            dropout_rate=TRANSFORMER_DROPOUT_RATE, # Default, will be overridden by model_config if model_config['dropout_rate'] exists
+            max_seq_len=observation_space.spaces["features_from_dataset"].shape[1], # Default, will be overridden by model_config if model_config['max_sequence_length'] exists
+            output_dim_per_symbol=enhanced_transformer_output_dim_per_symbol, # This is passed directly
             use_multi_scale=ENHANCED_TRANSFORMER_USE_MULTI_SCALE,
             use_cross_time_fusion=ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION
         ).to(device)
         
+        # Get the actual config used by the transformer for logging
+        transformer_actual_config = self.enhanced_transformer.get_dynamic_config()
+
         logger.info(f"增強版特徵提取器初始化完成:")
-        logger.info(f"- 輸入維度: {observation_space.spaces['features_from_dataset'].shape}")
-        logger.info(f"- 輸出維度: {total_features}")
-        logger.info(f"- Transformer模型維度: {TRANSFORMER_MODEL_DIM}")
-        logger.info(f"- Transformer層數: {TRANSFORMER_NUM_LAYERS}")
-        logger.info(f"- 注意力頭數: {TRANSFORMER_NUM_HEADS}")
-        logger.info(f"- 多尺度特徵提取: {ENHANCED_TRANSFORMER_USE_MULTI_SCALE}")
-        logger.info(f"- 跨時間尺度融合: {ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION}")
+        logger.info(f"- 輸入維度 (features_from_dataset): {observation_space.spaces['features_from_dataset'].shape}")
+        logger.info(f"- 計算出的總輸出特徵維度 (total_features for SB3): {self._features_dim}") # Use self._features_dim for the value passed to super
+        logger.info(f"--- Transformer 內部實際配置 ---")
+        logger.info(f"- Transformer實際模型維度 (model_dim): {transformer_actual_config.get('model_dim')}")
+        logger.info(f"- Transformer實際層數 (num_layers): {transformer_actual_config.get('num_layers')}")
+        logger.info(f"- Transformer實際注意力頭數 (num_heads): {transformer_actual_config.get('num_heads')}")
+        logger.info(f"- Transformer實際FFN維度 (ffn_dim): {transformer_actual_config.get('ffn_dim')}")
+        logger.info(f"- Transformer實際每個Symbol輸出維度: {transformer_actual_config.get('output_dim_per_symbol')}")
+        logger.info(f"- 多尺度特徵提取: {transformer_actual_config.get('use_multi_scale')}")
+        logger.info(f"- 跨時間尺度融合: {transformer_actual_config.get('use_cross_time_fusion')}")
         
         # 顯示模型參數量
         total_params = sum(p.numel() for p in self.enhanced_transformer.parameters())

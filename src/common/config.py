@@ -82,6 +82,12 @@ ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION = True  # 啟用跨時間尺度融合
 ENHANCED_TRANSFORMER_MULTI_SCALE_KERNELS = [3, 5, 7, 11]  # 多尺度卷積核大小
 ENHANCED_TRANSFORMER_TIME_SCALES = [5, 15, 30, 60]  # 跨時間尺度
 
+# 新增：Fourier 和 Wavelet 特徵配置
+FOURIER_NUM_MODES = 16  # Fourier 特徵的模式數量 (可調整)
+WAVELET_LEVELS = 4      # Wavelet 分解的層級 (可調整)
+WAVELET_NAME = 'db4'    # Wavelet 母波名稱 (可調整, e.g., 'db4', 'haar', 'sym5')
+
+
 # src/common/config.py
 # ... (其他配置) ...
 

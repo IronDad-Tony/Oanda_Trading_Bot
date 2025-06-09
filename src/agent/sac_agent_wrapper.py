@@ -18,10 +18,12 @@ from pathlib import Path
 import time
 import os
 import numpy as np # <--- 在文件頂部導入 numpy
-from datetime import datetime # <--- 在文件頂部導入 datetime
+from datetime import datetime # <--- 在文件頂部導入 pandas
 import pandas as pd # <--- 在文件頂部導入 pandas
 import sys # 確保導入
 import gc  # 垃圾回收
+import warnings # To issue warnings
+import logging # Ensure logging is imported
 
 try:
     from src.agent.sac_policy import CustomSACPolicy
@@ -52,7 +54,6 @@ except ImportError:
         from src.common.logger_setup import logger
         logger.info("Direct run SACAgentWrapper: Successfully re-imported modules.")
     except ImportError as e_retry_wrapper:
-        import logging
         logger = logging.getLogger("sac_agent_wrapper_fallback")  # type: ignore
         logger.setLevel(logging.INFO)
         _ch_wrapper = logging.StreamHandler(sys.stdout)
@@ -70,6 +71,16 @@ except ImportError:
         SAC_TRAIN_FREQ_STEPS = 1; SAC_GRADIENT_STEPS = 1; SAC_TAU = 0.005; TIMESTEPS = 128
         LOGS_DIR = Path("./logs_fallback"); MAX_SYMBOLS_ALLOWED = 20; USE_AMP = False
 
+
+# Attempt to import QuantumEnhancedTransformer, handling potential import errors
+try:
+    from src.models.enhanced_transformer import QuantumEnhancedTransformer
+except ImportError as e:
+    logger.warning(f"Importing QuantumEnhancedTransformer failed: {e}")
+    QuantumEnhancedTransformer = None # Define as None if import fails
+
+# Import the new model configuration
+from configs.enhanced_model_config import ModelConfig as EnhancedModelConfig
 
 class QuantumEnhancedSAC:
     def __init__(self,
