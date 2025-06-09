@@ -7,6 +7,10 @@ from src.models.enhanced_transformer import MultiScaleFeatureExtractor, Enhanced
 from src.common.config import DEVICE, TIMESTEPS, MAX_SYMBOLS_ALLOWED, FOURIER_NUM_MODES, WAVELET_LEVELS, WAVELET_NAME
 # Added imports for Adaptive Attention components
 from src.models.enhanced_transformer import MarketStateDetector, AdaptiveAttentionLayer, EnhancedTransformerLayer, EnhancedTransformer
+from src.features.market_state_detector import GMMMarketStateDetector # Added for GMM testing
+import joblib # Added for saving mock GMM
+import pandas as pd # Added for GMM input
+import os # Added for path operations
 
 # Check for pywavelets availability (can be used for conditional skipping of wavelet tests)
 try:
@@ -173,6 +177,11 @@ def test_msfe_conv_layers_output(default_msfe_config):
             f"Output shape of conv layer for scale {scales[i]} is incorrect. Expected: {(batch_size, expected_out_chans, expected_conv_seq_len)}, Got: {scale_feat.shape}"
 
 # --- Fixtures for EnhancedTransformer ---
+
+@pytest.fixture
+def mock_gmm_model_path(tmp_path):
+    """Provides a temporary path for a mock GMM model."""
+    return tmp_path / "mock_gmm_model.joblib"
 
 @pytest.fixture
 def default_et_config():
