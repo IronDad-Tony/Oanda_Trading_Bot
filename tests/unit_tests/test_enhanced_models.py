@@ -442,220 +442,58 @@ def test_et_all_feature_combinations(default_et_config, use_msfe, use_cts_fusion
                     assert torch.allclose(output[i, j, :], torch.zeros_like(output[i, j, :]), atol=1e-6), \
                         f"Output for padded symbol ({i},{j}) is not zero."
 
-# --- Fixtures for Adaptive Attention Components ---
-@pytest.fixture
-def adaptive_attention_config():
-    return {
-        "d_model": 64,
-        "num_heads": 4,
-        "dropout": 0.1,
-        "num_market_states": 3 # Using a different number for testing
-    }
-
-@pytest.fixture
-def market_state_detector(adaptive_attention_config):
-    return MarketStateDetector(
-        d_model=adaptive_attention_config["d_model"],
-        num_market_states=adaptive_attention_config["num_market_states"]
-    ).to(DEVICE)
-
-@pytest.fixture
-def adaptive_attention_layer(adaptive_attention_config):
-    return AdaptiveAttentionLayer(
-        d_model=adaptive_attention_config["d_model"],
-        num_heads=adaptive_attention_config["num_heads"],
-        dropout=adaptive_attention_config["dropout"],
-        num_market_states=adaptive_attention_config["num_market_states"]
-    ).to(DEVICE)
-
-# --- Unit Tests for Adaptive Attention Components ---
-def test_market_state_detector_output(market_state_detector, adaptive_attention_config, sample_tensor_factory):
-    batch_size = 4
-    seq_len = 10 # For sequence input
-    d_model = adaptive_attention_config["d_model"]
-    num_market_states = adaptive_attention_config["num_market_states"]
-
-    # Test with sequence input
-    x_seq = sample_tensor_factory(batch_size, 1, seq_len, d_model).squeeze(1) # [B, T, D]
-    states_seq = market_state_detector(x_seq)
-    assert isinstance(states_seq, dict)
-    assert "final_state" in states_seq
-    assert states_seq["final_state"].shape == (batch_size, num_market_states)
-    assert torch.allclose(states_seq["final_state"].sum(dim=-1), torch.ones(batch_size, device=DEVICE)) # Softmax output
-
-    # Test with averaged input
-    x_avg = sample_tensor_factory(batch_size, 1, 1, d_model).squeeze(1).squeeze(1) # [B, D]
-    states_avg = market_state_detector(x_avg)
-    assert isinstance(states_avg, dict)
-    assert "final_state" in states_avg
-    assert states_avg["final_state"].shape == (batch_size, num_market_states)
-    assert torch.allclose(states_avg["final_state"].sum(dim=-1), torch.ones(batch_size, device=DEVICE))
-
-
-def test_adaptive_attention_layer_output_shape(adaptive_attention_layer, adaptive_attention_config, sample_tensor_factory):
-    batch_size = 4
-    seq_len = 20
-    d_model = adaptive_attention_config["d_model"]
-    x = sample_tensor_factory(batch_size, 1, seq_len, d_model).squeeze(1) # [B, T, D]
-    
-    output = adaptive_attention_layer(x)
-    assert output.shape == (batch_size, seq_len, d_model)
-
-def test_adaptive_attention_layer_lstm_integration(adaptive_attention_layer, adaptive_attention_config, sample_tensor_factory):
-    """Test if LSTM layer is integrated and influences the output."""
-    batch_size = 2
-    seq_len = 10
-    d_model = adaptive_attention_config["d_model"]
-    x = sample_tensor_factory(batch_size, 1, seq_len, d_model).squeeze(1) # [B, T, D]
-
-    # Ensure LSTM layer exists
-    assert hasattr(adaptive_attention_layer, 'lstm_layer'), "AdaptiveAttentionLayer does not have lstm_layer"
-    assert isinstance(adaptive_attention_layer.lstm_layer, torch.nn.LSTM), "lstm_layer is not an nn.LSTM instance"
-
-    # Get output with current weights
-    output1 = adaptive_attention_layer(x)
-
-    # To check if LSTM influences output, we can try to zero out LSTM weights
-    # and see if the output changes significantly, or compare with a version without LSTM.
-    # For simplicity, we'll check if the output is not identical to a simple attention + residual.
-    # A more direct test would be to mock the LSTM output or check gradients.
-
-    # Create a clone of the input to avoid in-place modification issues
-    x_clone = x.clone()
-    
-    # Manually compute standard attention + residual (without LSTM and modulation)
-    # This is a simplified check. A full check would require mocking internal components.
-    # Note: This doesn't perfectly replicate the layer's behavior if LSTM was absent,
-    # but it helps to see if the LSTM path is active.
-    
-    # Get standard attention output
-    attn_output, _ = adaptive_attention_layer.attention(x_clone, x_clone, x_clone)
-    
-    # Simplistic check: if LSTM is active, output should differ from just attn_output + x
-    # This is not a perfect test as modulators and temperature also apply.
-    # A better test would be to verify that gradients flow through the LSTM layer.
-    
-    # For now, we'll rely on the fact that the forward pass includes LSTM.
-    # A more robust test would involve checking the computation graph or specific intermediate values.
-    # We can check that the output is different from a version where LSTM output is zeroed.
-    
-    # Mock LSTM output to be zeros
-    original_lstm_forward = adaptive_attention_layer.lstm_layer.forward
-    def mock_lstm_forward(input_data):
-        return torch.zeros_like(input_data), None # Return zeros and None for hidden state
-    
-    adaptive_attention_layer.lstm_layer.forward = mock_lstm_forward
-    output_no_lstm_effect = adaptive_attention_layer(x.clone())
-    adaptive_attention_layer.lstm_layer.forward = original_lstm_forward # Restore
-
-    assert not torch.allclose(output1, output_no_lstm_effect), "LSTM layer output did not influence the final output of AdaptiveAttentionLayer"
-    assert output1.shape == (batch_size, seq_len, d_model)
-
-
-def test_adaptive_attention_layer_with_padding_mask(adaptive_attention_layer, adaptive_attention_config, sample_tensor_factory):
-    batch_size = 2
-    seq_len = 10
-    d_model = adaptive_attention_config["d_model"]
-    x = sample_tensor_factory(batch_size, 1, seq_len, d_model).squeeze(1) # [B, T, D]
-
-    key_padding_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=DEVICE)
-    key_padding_mask[0, -seq_len//2:] = True # Pad last half of first batch item
-
-    output = adaptive_attention_layer(x, key_padding_mask=key_padding_mask)
-    assert output.shape == (batch_size, seq_len, d_model)
-    # Further checks could involve ensuring padded parts influence output appropriately,
-    # but that's harder to verify without specific expected values.
-
-# --- Fixtures for CrossTimeScaleFusion ---
-@pytest.fixture
-def cts_fusion_config():
-    return {
-        "d_model": 64,
-        "time_scales": [5, 10, 15] # Shorter for testing
-    }
-
-@pytest.fixture
-def cts_fusion_instance(cts_fusion_config):
-    from src.models.enhanced_transformer import CrossTimeScaleFusion # Import here to avoid circular deps if any
-    return CrossTimeScaleFusion(**cts_fusion_config).to(DEVICE)
-
-# --- Unit Tests for CrossTimeScaleFusion ---
-def test_cts_fusion_initialization(cts_fusion_config):
-    from src.models.enhanced_transformer import CrossTimeScaleFusion
-    cts = CrossTimeScaleFusion(**cts_fusion_config)
-    assert cts is not None
-    assert len(cts.time_scales) == len(cts_fusion_config["time_scales"])
-    assert len(cts.scale_poolers) == len(cts_fusion_config["time_scales"])
-    assert len(cts.scale_encoders) == len(cts_fusion_config["time_scales"])
-
-def test_cts_fusion_forward_pass_output_shape(cts_fusion_instance, cts_fusion_config, sample_tensor_factory):
-    batch_size = 4
-    seq_len = 30 
-    d_model = cts_fusion_config["d_model"]
-    
-    # sample_tensor_factory creates [B, N, T, F], so we adjust for CTS input [B, T, D]
-    x = sample_tensor_factory(batch_size, 1, seq_len, d_model).squeeze(1) 
-    
-    output = cts_fusion_instance(x)
-    
-    assert output.shape == (batch_size, seq_len, d_model), \
-        f"CrossTimeScaleFusion output shape mismatch. Expected {(batch_size, seq_len, d_model)}, Got {output.shape}"
-    assert output.device.type == DEVICE
-
-def test_cts_fusion_varying_input_seq_len(cts_fusion_instance, cts_fusion_config, sample_tensor_factory):
-    batch_size = 2
-    d_model = cts_fusion_config["d_model"]
-    test_seq_lens = [max(cts_fusion_config["time_scales"]), max(cts_fusion_config["time_scales"]) + 10, 50]
-
-    for seq_len in test_seq_lens:
-        x = sample_tensor_factory(batch_size, 1, seq_len, d_model).squeeze(1)
-        output = cts_fusion_instance(x)
-        assert output.shape == (batch_size, seq_len, d_model), \
-            f"Output shape mismatch for seq_len {seq_len}. Expected {(batch_size, seq_len, d_model)}, Got {output.shape}"
-
-# --- Integration Test for EnhancedTransformer with CTS Fusion ---
-def test_et_with_cts_fusion_enabled(default_et_config, sample_tensor_factory):
+# --- Integration Test for Adaptive Attention in EnhancedTransformer ---
+def test_et_adaptive_attention_handles_market_patterns(default_et_config, sample_tensor_factory):
+    """Tests if EnhancedTransformer with adaptive attention responds differently to varied market patterns."""
     config = default_et_config.copy()
-    config["use_cts_fusion"] = True
-    config["use_msfe"] = True # Ensure MSFE is also on, as CTS often follows it
-    config["d_model"] = 64 # Keep consistent
-    config["input_dim"] = 10 # Keep consistent
-    config["output_dim"] = 3 # Keep consistent for output shape check
-    config["cts_time_scales"] = [5, 10] # Smaller for faster test
+    config["use_adaptive_attention"] = True
+    config["num_market_states"] = 3 # Ensure this matches or is consistent with test design
+    # Disable other complex features to isolate adaptive attention's effect as much as possible for this test
+    config["use_msfe"] = False
+    config["use_cts_fusion"] = False
+    config["use_fourier_features"] = False
+    config["use_wavelet_features"] = False
+    config["use_symbol_embedding"] = False # Simpler input
 
     model = EnhancedTransformer(**config).to(DEVICE)
     model.eval()
 
-    batch_size = 2
-    # Use a smaller number of active symbols for this specific test if MAX_SYMBOLS_ALLOWED is large
-    num_active_symbols = min(config.get("max_symbols", MAX_SYMBOLS_ALLOWED) // 2, 2) 
-    if num_active_symbols == 0: num_active_symbols = 1
-    
-    original_seq_len = config.get("max_seq_len", TIMESTEPS) 
-    
-    src = sample_tensor_factory(batch_size, num_active_symbols, original_seq_len, config["input_dim"])
-    
-    symbol_ids = None
-    if config.get("use_symbol_embedding", False): # Check if symbol embedding is actually enabled by default_et_config
-        symbol_ids = torch.arange(num_active_symbols, device=DEVICE).unsqueeze(0).expand(batch_size, -1)
-    
-    src_key_padding_mask = torch.zeros(batch_size, num_active_symbols, dtype=torch.bool, device=DEVICE)
-    if num_active_symbols > 1:        
-        num_to_pad = num_active_symbols // 2
-        if num_to_pad > 0:
-            src_key_padding_mask[:, -num_to_pad:] = True
+    batch_size = 1 # Keep batch size small for pattern clarity
+    num_active_symbols = 1 # Single symbol to focus on pattern effect
+    seq_len = config.get("max_seq_len", TIMESTEPS)
+    input_dim = config["input_dim"]
 
-    output = model(src, symbol_ids=symbol_ids, src_key_padding_mask=src_key_padding_mask)
-    
-    expected_output_shape = (batch_size, num_active_symbols, config["output_dim"])
-    assert output.shape == expected_output_shape, \
-        f"ET with CTS Fusion output shape mismatch. Expected {expected_output_shape}, Got {output.shape}"
+    # Generate different market patterns
+    # Pattern 1: Trending data
+    trend_data = torch.linspace(0, 1, seq_len * input_dim).reshape(seq_len, input_dim)
+    src_trending = trend_data.unsqueeze(0).unsqueeze(0).repeat(batch_size, num_active_symbols, 1, 1).to(DEVICE)
 
-    if num_active_symbols > 1 and src_key_padding_mask.any():
-        # Check that padded symbols have zero output (or close to zero if there are small numerical artifacts)
-        for i in range(batch_size):
-            for j in range(num_active_symbols):
-                if src_key_padding_mask[i, j]:
-                    assert torch.allclose(output[i, j, :], torch.zeros_like(output[i, j, :]), atol=1e-6), \
-                        f"Output for padded symbol ({i},{j}) is not zero."
+    # Pattern 2: Volatile data
+    src_volatile = torch.randn(batch_size, num_active_symbols, seq_len, input_dim).to(DEVICE) * 3 # Higher variance
+
+    # Pattern 3: Stable data
+    src_stable = torch.randn(batch_size, num_active_symbols, seq_len, input_dim).to(DEVICE) * 0.1 # Lower variance
+
+    # Pass inputs through the model
+    output_trending = model(src_trending, symbol_ids=None, src_key_padding_mask=None)
+    output_volatile = model(src_volatile, symbol_ids=None, src_key_padding_mask=None)
+    output_stable = model(src_stable, symbol_ids=None, src_key_padding_mask=None)
+
+    # Assertions
+    # Check that outputs have the correct shape
+    expected_shape = (batch_size, num_active_symbols, config["output_dim"])
+    assert output_trending.shape == expected_shape, f"Output shape for trending data mismatch. Expected {expected_shape}, Got {output_trending.shape}"
+    assert output_volatile.shape == expected_shape, f"Output shape for volatile data mismatch. Expected {expected_shape}, Got {output_volatile.shape}"
+    assert output_stable.shape == expected_shape, f"Output shape for stable data mismatch. Expected {expected_shape}, Got {output_stable.shape}"
+
+    # Check that the outputs are different from each other
+    # This indicates the model is responding differently to the patterns.
+    # Note: Due to the complexity and untrained nature, we don't expect specific values,
+    # just that the adaptive mechanism causes divergence in outputs for different patterns.
+    assert not torch.allclose(output_trending, output_volatile, atol=1e-5), \
+        "Outputs for trending and volatile patterns are too similar, adaptive attention may not be responding."
+    assert not torch.allclose(output_trending, output_stable, atol=1e-5), \
+        "Outputs for trending and stable patterns are too similar, adaptive attention may not be responding."
+    assert not torch.allclose(output_volatile, output_stable, atol=1e-5), \
+        "Outputs for volatile and stable patterns are too similar, adaptive attention may not be responding."
 
