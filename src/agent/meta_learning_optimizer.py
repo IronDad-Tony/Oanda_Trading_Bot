@@ -364,49 +364,70 @@ class FastAdaptationMechanism(nn.Module):
     
     def __init__(
         self,
-        feature_dim: int = 512,
+        feature_dim: int = 512, 
         adaptation_dim: int = 256,
-        num_adaptation_layers: int = 3
+        num_adaptation_layers: int = 3,
+        num_heads: int = 8 # Added num_heads for MultiheadAttention
     ):
         super().__init__()
         self.feature_dim = feature_dim
         self.adaptation_dim = adaptation_dim
         self.num_adaptation_layers = num_adaptation_layers
-        
+        self.num_heads = num_heads # Store num_heads
+
+        # Ensure adaptation_dim is divisible by num_heads
+        if adaptation_dim % num_heads != 0:
+            # Adjust adaptation_dim to be divisible by num_heads
+            # Or raise an error, or log a warning and proceed with caution
+            original_adaptation_dim = adaptation_dim
+            adaptation_dim = (adaptation_dim // num_heads) * num_heads
+            if adaptation_dim == 0 and original_adaptation_dim > 0: # Avoid adaptation_dim becoming 0 if it was >0
+                adaptation_dim = num_heads # Smallest possible non-zero divisible value
+            logger.warning(
+                f"adaptation_dim ({original_adaptation_dim}) was not divisible by num_heads ({num_heads}). "
+                f"Adjusted adaptation_dim to {adaptation_dim}."
+            )
+            self.adaptation_dim = adaptation_dim # Update the class attribute
+
         # Feature encoder
         self.feature_encoder = nn.Sequential(
-            nn.Linear(feature_dim, adaptation_dim),
-            nn.LayerNorm(adaptation_dim),
+            nn.Linear(feature_dim, self.adaptation_dim),
+            nn.LayerNorm(self.adaptation_dim),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
         
-        # Adaptation layers
+        self.context_encoder_input_dim = None 
+        self.context_encoder = nn.Sequential(
+            nn.Linear(1, self.adaptation_dim), 
+            nn.LayerNorm(self.adaptation_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
         self.adaptation_layers = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(adaptation_dim, adaptation_dim),
-                nn.LayerNorm(adaptation_dim),
+                nn.Linear(self.adaptation_dim, self.adaptation_dim),
+                nn.LayerNorm(self.adaptation_dim),
                 nn.ReLU(),
                 nn.Dropout(0.1)
             ) for _ in range(num_adaptation_layers)
         ])
         
-        # Context attention
+        # Context attention - ensure embed_dim is correctly set to the potentially adjusted adaptation_dim
         self.context_attention = nn.MultiheadAttention(
-            embed_dim=adaptation_dim,
-            num_heads=8,
+            embed_dim=self.adaptation_dim, # Use the (potentially adjusted) self.adaptation_dim
+            num_heads=self.num_heads, # Use self.num_heads
             dropout=0.1,
             batch_first=True
         )
         
-        # Adaptation output
-        self.adaptation_output = nn.Linear(adaptation_dim, feature_dim)
+        self.adaptation_output = nn.Linear(self.adaptation_dim, feature_dim)
         
-        # Adaptation gate
         self.adaptation_gate = nn.Sequential(
-            nn.Linear(feature_dim * 2, adaptation_dim),
+            nn.Linear(feature_dim * 2, self.adaptation_dim),
             nn.ReLU(),
-            nn.Linear(adaptation_dim, feature_dim),
+            nn.Linear(self.adaptation_dim, feature_dim),
             nn.Sigmoid()
         )
     
@@ -418,10 +439,49 @@ class FastAdaptationMechanism(nn.Module):
     ) -> torch.Tensor:
         """Perform fast adaptation"""
         
-        batch_size, seq_len, _ = features.shape
+        batch_size, seq_len, feat_dim = features.shape # feat_dim is self.feature_dim
         
         # Encode features
         encoded_features = self.feature_encoder(features)
+        
+        # Dynamically adjust context_encoder if context's feature dimension has changed
+        current_context_dim = context.size(-1)
+        if self.context_encoder_input_dim is None or self.context_encoder_input_dim != current_context_dim:
+            logger.info(f"Adjusting context_encoder input dimension from {self.context_encoder_input_dim} to {current_context_dim}")
+            self.context_encoder_input_dim = current_context_dim
+            self.context_encoder[0] = nn.Linear(current_context_dim, self.adaptation_dim).to(context.device)
+            for i in range(1, len(self.context_encoder)):
+                self.context_encoder[i] = self.context_encoder[i].to(context.device)
+
+        # Ensure context has proper dimensions for attention
+        original_context_shape = context.shape
+        if context.dim() == 1:
+            context = context.unsqueeze(0).unsqueeze(0) # [C] -> [1, 1, C]
+        elif context.dim() == 2:
+            # [B, C] -> [B, 1, C] or [S, C] -> [1, S, C]
+            # Assuming if first dim matches features batch_size, it's [B,C]
+            if context.size(0) == batch_size:
+                 context = context.unsqueeze(1) # [B, C] -> [B, 1, C]
+            else: # Assuming it's [S,C] where S is sequence length, needs a batch dim
+                 context = context.unsqueeze(0) # [S, C] -> [1, S, C]
+        # If context is already 3D [B, S, C], no change needed here for unsqueezing
+
+        # Expand context to match features batch and sequence dimensions if necessary
+        # This part needs to be careful not to break the logic for different original context shapes
+        if context.size(0) != batch_size and context.size(0) == 1: # Expand batch if context had batch_size 1
+            context = context.expand(batch_size, -1, -1)
+        if context.size(1) != seq_len and context.size(1) == 1: # Expand sequence if context had seq_len 1
+            context = context.expand(-1, seq_len, -1)
+        
+        # Final check for shape compatibility before encoding
+        if context.size(0) != batch_size or context.size(1) != seq_len:
+            logger.warning(f"Context shape {original_context_shape} (processed to {context.shape}) still not fully compatible with features shape ({features.shape}) after expansion attempts. This might lead to issues.")
+            # Fallback: if context is [B, S_ctx, C] and S_ctx != S_feat, average over S_ctx to make it [B, 1, C] then expand
+            if context.size(0) == batch_size and context.size(1) != seq_len:
+                context = context.mean(dim=1, keepdim=True).expand(-1, seq_len, -1)
+                logger.info(f"Averaged context over its sequence dim and expanded to match features seq_len. New context shape: {context.shape}")
+
+        encoded_context = self.context_encoder(context) # [B, S, D_adapt]
         
         # Apply adaptation layers with residual connections
         adapted_features = encoded_features
@@ -429,9 +489,9 @@ class FastAdaptationMechanism(nn.Module):
             residual = adapted_features
             adapted_features = layer(adapted_features) + residual
         
-        # Apply context attention
+        # Apply context attention (now all tensors have adaptation_dim and proper 3D shape)
         attended_features, attention_weights = self.context_attention(
-            adapted_features, context, context
+            adapted_features, encoded_context, encoded_context
         )
         
         # Generate adaptation output
@@ -537,7 +597,8 @@ class MetaLearningOptimizer(nn.Module):
         adaptation_dim: int = 256,
         inner_lr: float = 0.01,
         outer_lr: float = 0.001,
-        inner_steps: int = 5
+        inner_steps: int = 5,
+        num_attention_heads: int = 8 # Added for FastAdaptationMechanism
     ):
         super().__init__()
         
@@ -550,8 +611,9 @@ class MetaLearningOptimizer(nn.Module):
         )
         
         self.fast_adaptation = FastAdaptationMechanism(
-            feature_dim=feature_dim,
-            adaptation_dim=adaptation_dim
+            feature_dim=feature_dim, 
+            adaptation_dim=adaptation_dim,
+            num_heads=num_attention_heads # Pass num_heads
         )
         
         # 遺傳算法超參數優化器
@@ -604,30 +666,33 @@ class MetaLearningOptimizer(nn.Module):
         
         # Perform meta-update
         meta_results = self.maml_optimizer.meta_update(task_batches)
-        
-        # Handle context conversion to tensor if needed
+          # Handle context conversion to tensor if needed
         if isinstance(context, dict):
             # Convert dict context to tensor
             context_tensor = self._dict_to_tensor(context, features.device)
         else:
             context_tensor = context
             
-        # Ensure context_tensor has proper dimensions for strategy selector
-        if context_tensor.dim() == 1:        context_tensor = context_tensor.unsqueeze(0)  # [1, F]
-        if context_tensor.dim() > 2:
-            context_tensor = context_tensor.mean(dim=tuple(range(1, context_tensor.dim()-1)))  # Keep batch and feature dims
-            
-        # Select adaptation strategy - ensure proper tensor dimensionality
-        if context_tensor.dim() > 1:
+        # Preserve original context tensor for fast adaptation (needs 3D)
+        context_tensor_3d = context_tensor.clone()
+        
+        # Create 2D version for strategy selector
+        strategy_context = context_tensor.clone()
+        if strategy_context.dim() == 1:
+            strategy_context = strategy_context.unsqueeze(0)  # [1, F]
+        if strategy_context.dim() > 2:
+            strategy_context = strategy_context.mean(dim=tuple(range(1, strategy_context.dim()-1)))  # Keep batch and feature dims
+              # Select adaptation strategy - ensure proper tensor dimensionality
+        if strategy_context.dim() > 1:
             # Take mean across sequence dimension but ensure we maintain batch dimension
-            strategy_input = context_tensor.mean(dim=1)  # [batch, features]
+            strategy_input = strategy_context.mean(dim=1)  # [batch, features]
             if strategy_input.size(-1) != self.strategy_selector[0].in_features:
                 # Project to correct input size if needed
                 strategy_input = torch.nn.functional.adaptive_avg_pool1d(
                     strategy_input.unsqueeze(1), self.strategy_selector[0].in_features
                 ).squeeze(1)
         else:
-            strategy_input = context_tensor
+            strategy_input = strategy_context
             if strategy_input.size(-1) != self.strategy_selector[0].in_features:
                 # Expand to correct dimensions 
                 strategy_input = strategy_input.expand(-1, self.strategy_selector[0].in_features)
@@ -635,8 +700,8 @@ class MetaLearningOptimizer(nn.Module):
         strategy_probs = self.strategy_selector(strategy_input)
         selected_strategy_idx = torch.argmax(strategy_probs, dim=-1)
         selected_strategy = list(AdaptationStrategy)[selected_strategy_idx[0].item()]
-          # Perform fast adaptation
-        adapted_features = self.fast_adaptation(features, context_tensor)
+          # Perform fast adaptation using original 3D context tensor
+        adapted_features = self.fast_adaptation(features, context_tensor_3d)
         
         # Collect results
         results = {
@@ -659,89 +724,81 @@ class MetaLearningOptimizer(nn.Module):
     def _dict_to_tensor(self, context_dict: Dict[str, Any], device: torch.device) -> torch.Tensor:
         """Convert dictionary context to tensor representation"""
         try:
-            # Extract relevant numeric values from dictionary
             context_values = []
-            
-            # Handle common dictionary keys that might contain tensors or numbers
             for key, value in context_dict.items():
-                if isinstance(value, torch.Tensor):
+                if isinstance(value, (int, float)):
+                    context_values.append(float(value))
+                elif isinstance(value, torch.Tensor):
                     if value.numel() == 1:
                         context_values.append(value.item())
                     else:
-                        # For multi-element tensors, take mean
-                        context_values.append(value.mean().item())
-                elif isinstance(value, (int, float)):
-                    context_values.append(float(value))
-                elif isinstance(value, dict):
-                    # Recursively handle nested dictionaries
-                    nested_tensor = self._dict_to_tensor(value, device)
-                    context_values.append(nested_tensor.mean().item())
-                
-            # If no valid values found, create a default tensor
-            if not context_values:
-                context_values = [0.0]  # Default value
-                
-            # Create tensor with appropriate size for strategy selector
-            context_tensor = torch.tensor(context_values, dtype=torch.float32, device=device)
-            
-            # Ensure minimum size for strategy selector (expects at least 512-dim input)
-            min_size = 512
-            if context_tensor.size(0) < min_size:
-                # Pad with zeros or repeat values
-                padding_size = min_size - context_tensor.size(0)
-                padding = torch.zeros(padding_size, dtype=torch.float32, device=device)
-                context_tensor = torch.cat([context_tensor, padding], dim=0)
-            elif context_tensor.size(0) > min_size:
-                # Truncate to expected size
-                context_tensor = context_tensor[:min_size]
-                
-            return context_tensor
-            
-        except Exception as e:
-            logger.warning(f"Failed to convert context dict to tensor: {e}. Using default.")
-            # Return a default tensor of appropriate size
-            return torch.zeros(512, dtype=torch.float32, device=device)
-    
-    def _assess_adaptation_quality(
-        self,
-        original_features: torch.Tensor,
-        adapted_features: torch.Tensor
-    ) -> float:
-        """Assess quality of adaptation"""
-        
-        # Calculate adaptation magnitude
-        adaptation_magnitude = torch.norm(adapted_features - original_features).item()
-        
-        # Calculate feature diversity (higher is better for adaptation)
-        feature_std = torch.std(adapted_features).item()
-        
-        # Combine metrics
-        quality_score = min(1.0, feature_std / (adaptation_magnitude + 1e-8))
-        
-        return quality_score
-    
-    def get_optimization_metrics(self) -> Dict[str, float]:
-        """Get comprehensive optimization metrics"""
-        
-        maml_metrics = self.maml_optimizer.get_performance_metrics()
-        
-        if self.performance_history:
-            recent_history = list(self.performance_history)[-50:]  # Last 50 entries
-            
-            history_metrics = {
-                'avg_meta_loss': np.mean([h['meta_loss'] for h in recent_history]),
-                'avg_adaptation_quality': np.mean([h['adaptation_quality'] for h in recent_history]),
-                'strategy_diversity': len(set([h['strategy'] for h in recent_history])) / len(AdaptationStrategy)
-            }
-        else:
-            history_metrics = {
-                'avg_meta_loss': 0.0,
-                'avg_adaptation_quality': 0.0,
-                'strategy_diversity': 0.0
-            }
-        
-        return {**maml_metrics, **history_metrics}
+                        # For multi-element tensors, take mean and ensure it's a float
+                        context_values.append(value.float().mean().item())
+                # Add other type checks if necessary, e.g., for lists or np.arrays
 
+            if not context_values: # Handle empty dict or no numeric values
+                logger.warning("Context dictionary is empty or contains no numeric values. Returning zero tensor.")
+                # Return a tensor of a default small dimension to avoid errors downstream
+                # The dynamic adjustment in FastAdaptationMechanism should handle this
+                return torch.zeros(1, device=device) 
+
+            return torch.tensor(context_values, dtype=torch.float32, device=device)
+        except Exception as e:
+            logger.error(f"Error converting context_dict to tensor: {e}. Context dict: {context_dict}")
+            # Fallback to a zero tensor of a default small dimension
+            return torch.zeros(1, device=device)
+    
+    def _assess_adaptation_quality(self, original_features: torch.Tensor, adapted_features: torch.Tensor) -> float:
+        """
+        Assesses the quality of the adaptation.
+        Placeholder implementation.
+        """
+        # Example: Calculate the cosine similarity or a distance metric
+        # For now, returning a dummy value
+        logger.info("Placeholder: _assess_adaptation_quality called")
+        if original_features.shape != adapted_features.shape:
+            logger.warning(f"Shape mismatch in _assess_adaptation_quality: {original_features.shape} vs {adapted_features.shape}")
+            return 0.5 # Or handle error appropriately
+        
+        # Ensure tensors are on the same device and of the same dtype
+        if original_features.device != adapted_features.device:
+            adapted_features = adapted_features.to(original_features.device)
+        if original_features.dtype != adapted_features.dtype:
+            # This might be too strict, consider converting or logging
+            logger.warning(f"Dtype mismatch: {original_features.dtype} vs {adapted_features.dtype}. Attempting conversion.")
+            try:
+                adapted_features = adapted_features.to(original_features.dtype)
+            except Exception as e:
+                logger.error(f"Could not convert dtypes for quality assessment: {e}")
+                return 0.3
+
+        try:
+            # Flatten if necessary, preserving batch
+            if original_features.ndim > 2:
+                original_flat = original_features.reshape(original_features.size(0), -1)
+                adapted_flat = adapted_features.reshape(adapted_features.size(0), -1)
+            else:
+                original_flat = original_features
+                adapted_flat = adapted_features
+
+            # Pad if feature dimensions are different after flattening (should not happen if shapes were same)
+            if original_flat.size(-1) != adapted_flat.size(-1):
+                logger.warning(f"Feature dimension mismatch after flattening: {original_flat.size(-1)} vs {adapted_flat.size(-1)}")
+                # This case indicates a more fundamental issue if shapes were initially equal.
+                # For a placeholder, we might return a low score or try to make them compatible if it makes sense.
+                # However, for a quality assessment, this usually means something is wrong.
+                return 0.4 # Low score due to unexpected dimension change
+
+            if original_flat.numel() == 0 or adapted_flat.numel() == 0:
+                logger.warning("Empty tensor(s) in _assess_adaptation_quality.")
+                return 0.0
+
+            similarity = F.cosine_similarity(original_flat, adapted_flat, dim=-1).mean().item()
+            return (similarity + 1) / 2 # Normalize to [0, 1]
+        except Exception as e:
+            logger.error(f"Error during _assess_adaptation_quality: {e}")
+            return 0.2 # Low score on error
+            
 def test_meta_learning_optimizer():
     """Test the meta-learning optimizer system"""
     

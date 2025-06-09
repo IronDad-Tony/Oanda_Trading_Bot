@@ -158,8 +158,8 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         
         # 拼接其他特徵
         other_features = torch.cat([
-            observations["current_positions"],
-            observations["unrealized_pnl"],
+            observations["current_positions_nominal_ratio_ac"],
+            observations["unrealized_pnl_ratio_ac"],
             observations["margin_level"],
             padding_mask.float()
         ], dim=1)

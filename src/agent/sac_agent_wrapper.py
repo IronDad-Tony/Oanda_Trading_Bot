@@ -622,7 +622,7 @@ class QuantumEnhancedSAC:
         Process market data through the High-Level Integration System
         
         Args:
-            market_data: Market data tensor
+            market_data: Market data tensor (expected to be the primary features)
             position_data: Position data dictionary
             portfolio_metrics: Portfolio metrics tensor
             
@@ -634,11 +634,19 @@ class QuantumEnhancedSAC:
             return {}
         
         try:
+            # Construct the market_data_raw dictionary
+            # The HighLevelIntegrationSystem._get_tensor_from_market_data will look for 'features_768', 'features', etc.
+            # We should pass the main market_data tensor with a common key.
+            # Other data like position_data and portfolio_metrics are also expected to be in this dict.
+            market_data_raw_dict = {
+                "features": market_data, # Assuming market_data is the primary feature tensor
+                "current_positions": position_data if position_data is not None else [],
+                "portfolio_metrics": portfolio_metrics if portfolio_metrics is not None else {}
+            }
+            
             # Process through the high-level integration system
             integration_results = self.high_level_integration.process_market_data(
-                market_data=market_data,
-                position_data=position_data,
-                portfolio_metrics=portfolio_metrics
+                market_data_raw=market_data_raw_dict
             )
             
             # Log key metrics

@@ -58,11 +58,11 @@ except ImportError:
                 raise NotImplementedError("Fallback MetaLearningOptimizer cannot be used.")
 
 try:
-    from .dynamic_dimension_adapter import DynamicDimensionAdapter, ComponentSpec
+    from .dynamic_dimension_adapter import DynamicDimensionAdapter, DimensionSpec # Changed ComponentSpec to DimensionSpec
 except ImportError:
-    global_logger.warning("DynamicDimensionAdapter not found. Dynamic adaptation features will be limited.") # Use global_logger
+    global_logger.warning("DynamicDimensionAdapter or DimensionSpec not found. Dynamic adaptation features will be limited.") # Use global_logger
     DynamicDimensionAdapter = None
-    ComponentSpec = None 
+    DimensionSpec = None # Changed ComponentSpec to DimensionSpec
 
 try:
     from .intelligent_dimension_adapter import IntelligentDimensionAdapter
@@ -254,17 +254,17 @@ class HighLevelIntegrationSystem(nn.Module):
                 self.logger.info("Using IntelligentDimensionAdapter for dynamic adaptation.")
                 # Register components with their expected input dimension ranges
                 # These ranges are examples and should be defined based on actual component needs
-                # Ensure ComponentSpec is available
-                if ComponentSpec:
-                    self.adapter.register_component("strategy_innovation", ComponentSpec(input_range=(self.config.get('strategy_input_min_dim', 256), self.config.get('strategy_input_max_dim',1024))))
-                    self.adapter.register_component("market_state_awareness", ComponentSpec(input_range=(self.config.get('market_state_input_min_dim', 256), self.feature_dim)))
-                    self.adapter.register_component("meta_learning_features", ComponentSpec(input_range=(self.config.get('meta_features_input_min_dim',128), self.config.get('meta_features_input_max_dim',768)))) # For meta_input features
-                    self.adapter.register_component("meta_learning_task", ComponentSpec(input_range=(self.config.get('meta_task_input_min_dim',128), self.config.get('meta_task_input_max_dim',768)))) # For task_tensor
-                    self.adapter.register_component("position_manager", ComponentSpec(input_range=(self.config.get('position_manager_input_min_dim',256), self.config.get('position_manager_input_max_dim',1024))))
-                    self.adapter.register_component("anomaly_detector", ComponentSpec(input_range=(self.config.get('anomaly_input_min_dim',256), self.config.get('anomaly_input_max_dim',1024))))
-                    self.adapter.register_component("emergency_stop_loss", ComponentSpec(input_range=(self.config.get('emergency_input_min_dim',1), self.config.get('emergency_input_max_dim',128)))) # e.g., for risk scores
+                # Ensure DimensionSpec is available
+                if DimensionSpec: # Changed ComponentSpec to DimensionSpec
+                    self.adapter.register_component("strategy_innovation", DimensionSpec(input_range=(self.config.get('strategy_input_min_dim', 256), self.config.get('strategy_input_max_dim',1024)))) # Changed ComponentSpec to DimensionSpec
+                    self.adapter.register_component("market_state_awareness", DimensionSpec(input_range=(self.config.get('market_state_input_min_dim', 256), self.feature_dim))) # Changed ComponentSpec to DimensionSpec
+                    self.adapter.register_component("meta_learning_features", DimensionSpec(input_range=(self.config.get('meta_features_input_min_dim',128), self.config.get('meta_features_input_max_dim',768)))) # Changed ComponentSpec to DimensionSpec
+                    self.adapter.register_component("meta_learning_task", DimensionSpec(input_range=(self.config.get('meta_task_input_min_dim',128), self.config.get('meta_task_input_max_dim',768)))) # Changed ComponentSpec to DimensionSpec
+                    self.adapter.register_component("position_manager", DimensionSpec(input_range=(self.config.get('position_manager_input_min_dim',256), self.config.get('position_manager_input_max_dim',1024)))) # Changed ComponentSpec to DimensionSpec
+                    self.adapter.register_component("anomaly_detector", DimensionSpec(input_range=(self.config.get('anomaly_input_min_dim',256), self.config.get('anomaly_input_max_dim',1024)))) # Changed ComponentSpec to DimensionSpec
+                    self.adapter.register_component("emergency_stop_loss", DimensionSpec(input_range=(self.config.get('emergency_input_min_dim',1), self.config.get('emergency_input_max_dim',128)))) # Changed ComponentSpec to DimensionSpec
                 else:
-                    self.logger.warning("ComponentSpec not available, cannot register components with IntelligentDimensionAdapter.")
+                    self.logger.warning("DimensionSpec not available, cannot register components with IntelligentDimensionAdapter.") # Changed ComponentSpec to DimensionSpec
             elif DynamicDimensionAdapter is not None: # Fallback to DynamicDimensionAdapter
                 self.adapter = DynamicDimensionAdapter(
                     default_adapter_type=self.config.get('dynamic_adapter_type', "linear"),

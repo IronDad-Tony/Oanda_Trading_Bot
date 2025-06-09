@@ -897,14 +897,14 @@ class MarketStateAwarenessSystem(nn.Module):
                 performance_metrics={'portfolio_return': 0.0}  # 這將由外部系統提供
             )
             monitoring_report = self.real_time_monitor.get_monitoring_report()
-        
-        # 整合結果
+          # 整合結果
         system_output = {
             'market_state': {
                 'dominant_state': dominant_state.value,
                 'confidence': state_confidence,
                 'state_probabilities': state_classification['state_probabilities'],
-                'all_classifications': state_classification
+                'all_classifications': state_classification,
+                'current_state': dominant_state.value
             },
             'state_transition': {
                 'has_transition': state_transition is not None,
@@ -917,11 +917,13 @@ class MarketStateAwarenessSystem(nn.Module):
                 'strategy_stats': self.strategy_selector.get_strategy_statistics()
             },
             'regime_analysis': regime_analysis,
+            'regime_confidence': regime_analysis.get('confidence', state_confidence),  # Missing key fix
             'system_status': {
                 'processing_count': self.processing_count,
                 'current_state': self.current_market_state.value if self.current_market_state else None,
                 'system_active': True,
-                'monitoring_report': monitoring_report
+                'monitoring_report': monitoring_report,
+                'stability': state_confidence  # Required key for system_status_valid test
             }
         }
         

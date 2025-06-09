@@ -96,12 +96,14 @@ class AdaptiveStrategyEncoder(nn.Module):
         self.adaptive_layers = adaptive_layers
         
         # 構建初始網絡
-        self._build_network(initial_input_dim)
+        # Determine device from parameters if possible, else use global DEVICE
+        device_to_use = next(self.parameters()).device if list(self.parameters()) else torch.device(DEVICE)
+        self._build_network(initial_input_dim, device_to_use)
         
         # 記錄維度變化歷史
         self.dimension_history = []
         
-    def _build_network(self, input_dim: int):
+    def _build_network(self, input_dim: int, device: torch.device):
         """構建或重建網絡結構"""
         layers = []
         current_dim = input_dim
@@ -124,7 +126,7 @@ class AdaptiveStrategyEncoder(nn.Module):
         # 輸出層
         layers.append(nn.Linear(current_dim, self.output_dim))
         
-        self.network = nn.Sequential(*layers)
+        self.network = nn.Sequential(*layers).to(device) # Ensure network is on the correct device
         
     def adapt_input_dimension(self, new_input_dim: int, 
                             preserve_weights: bool = True) -> bool:
@@ -163,7 +165,9 @@ class AdaptiveStrategyEncoder(nn.Module):
         
         # 重建網絡
         self.current_input_dim = new_input_dim
-        self._build_network(new_input_dim)
+        # Determine device from existing network or fall back to global DEVICE
+        current_device = next(self.network.parameters()).device if list(self.network.parameters()) else torch.device(DEVICE)
+        self._build_network(new_input_dim, current_device)
         
         # 權重遷移
         if preserve_weights and old_network:
@@ -232,7 +236,12 @@ class AdaptiveStrategyEncoder(nn.Module):
         if x.size(-1) != self.current_input_dim:
             logger.warning(f"輸入維度不匹配: 期望 {self.current_input_dim}, 得到 {x.size(-1)}")
             # 自動適應
+            # Ensure adaptation happens on the correct device
             self.adapt_input_dimension(x.size(-1))
+            # After adaptation, the network might be on a different device if not handled carefully.
+            # The _build_network method now handles moving the new network to the correct device.
+            # We also need to ensure the current instance of the encoder is on the correct device if it was moved.
+            self.to(x.device) # Ensure the encoder module itself is on the same device as input x
             
         return self.network(x)
     

@@ -7,7 +7,7 @@
 1. 15種專業交易策略實現
 2. 動態策略生成器
 3. 量子策略組合優化
-4. 自適應權重學習機制
+4. 自適應權重極習機制
 5. 策略創新引擎（基礎版）
 """
 
@@ -60,7 +60,7 @@ if 'QuantumEncoder' not in globals():
     class QuantumEncoder(nn.Module):
         def __init__(self, input_dim: int, latent_dim: int, num_qubits: int = 8):
             super().__init__()
-            self.encoding_layers = nn.Sequential(
+            self.encoding_layers =nn.Sequential(
                 nn.Linear(input_dim, latent_dim),
                 nn.GELU()
             )
@@ -333,7 +333,8 @@ class QuantitativeStrategy(BaseStrategy):
             nn.ReLU(),
             nn.LayerNorm(128),
             nn.Linear(128, 96),
-            nn.ReLU(),            nn.Linear(96, 64),
+            nn.ReLU(),            
+            nn.Linear(96, 64),
             nn.ReLU(),
             nn.Linear(64, action_dim),
             nn.Tanh()
@@ -523,14 +524,91 @@ class DynamicStrategyGenerator(nn.Module):
         decoder = self.strategy_decoder[f"decoder_{strategy_id}"]
         return decoder(genes)
     
-    def mutate_genes(self, genes: torch.Tensor, 
-                    mutation_rate: Optional[float] = None) -> torch.Tensor:
-        """對基因進行突變"""
+    def roulette_wheel_selection(self, fitness_scores: torch.Tensor) -> torch.Tensor:
+        """
+        基於適應度的輪盤賭選擇算子（支持批量處理）
+        Args:
+            fitness_scores: 個體適應度分數，形狀 [batch_size, population_size]
+        Returns:
+            選擇的個體索引，形狀 [batch_size]
+        """
+        # 計算選擇概率
+        probs = fitness_scores / fitness_scores.sum(dim=1, keepdim=True)
+        
+        # 逐样本处理以避免广播问题
+        selected_indices = []
+        for i in range(probs.shape[0]):
+            # 生成随机数
+            r = torch.rand(1, device=probs.device)
+            # 累積概率
+            cumulative_probs = torch.cumsum(probs[i], dim=0)
+            # 找到第一个大于等于随机数的索引
+            idx = torch.nonzero(cumulative_probs >= r, as_tuple=True)[0]
+            if idx.numel() > 0:
+                selected_indices.append(idx[0])
+            else:
+                selected_indices.append(torch.tensor(len(cumulative_probs)-1, device=probs.device))
+        
+        return torch.stack(selected_indices)
+    
+    def validate_architecture(self, state: torch.Tensor) -> float:
+        """驗證架構搜索性能並返回搜索時間"""
+        import time
+        start_time = time.time()
+        
+        # 編碼市場基因
+        genes = self.encode_market_genes(state)
+        
+        # 測試所有NAS模塊
+        for i in range(self.max_generated_strategies):
+            _ = self.decode_strategy(genes, i)
+        
+        end_time = time.time()
+        return end_time - start_time
+    
+    def single_point_crossover(self, parent1: torch.Tensor, parent2: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        單點交叉算子（支持批量處理）
+        Args:
+            parent1: 父代基因1，形狀 [batch_size, gene_length]
+            parent2: 父代基因2，形狀 [batch_size, gene_length]
+        Returns:
+            (child1, child2): 兩個子代基因
+        """
+        batch_size, gene_length = parent1.shape
+        # 隨機選擇交叉點（每個樣本不同）
+        crossover_points = torch.randint(1, gene_length-1, (batch_size,), device=parent1.device)
+        
+        # 創建掩碼矩陣
+        mask = torch.arange(gene_length, device=parent1.device).expand(batch_size, -1)
+        mask = mask < crossover_points.unsqueeze(1)
+        
+        # 執行交叉
+        child1 = torch.where(mask, parent1, parent2)
+        child2 = torch.where(mask, parent2, parent1)
+        return child1, child2
+    
+    def gaussian_mutation(self, genes: torch.Tensor, 
+                         mutation_rate: Optional[float] = None,
+                         mutation_scale: float = 0.1) -> torch.Tensor:
+        """
+        高斯變異算子（支持自動微分和批量處理）
+        Args:
+            genes: 輸入基因，形狀 [batch_size, gene_length]
+            mutation_rate: 變異率（每個基因變異的概率）
+            mutation_scale: 變異強度（高斯噪聲的標準差）
+        Returns:
+            變異後的基因
+        """
         if mutation_rate is None:
             mutation_rate = self.mutation_controller.item()
         
-        noise = torch.randn_like(genes) * mutation_rate
-        mutated_genes = genes + noise
+        # 創建突變掩碼
+        mutation_mask = torch.rand_like(genes) < mutation_rate
+        # 生成高斯噪聲
+        noise = torch.randn_like(genes) * mutation_scale
+        # 應用突變
+        mutated_genes = genes + mutation_mask * noise
         return torch.clamp(mutated_genes, -2.0, 2.0)
     
     def evaluate_strategy_fitness(self, state: torch.Tensor, 
@@ -541,38 +619,83 @@ class DynamicStrategyGenerator(nn.Module):
     
     def generate_strategies(self, state: torch.Tensor) -> Tuple[List[torch.Tensor], torch.Tensor]:
         """
-        生成動態策略
+        使用遺傳算法生成動態策略（包含選擇、交叉、變異）
         
         Returns:
-            Tuple[策略輸出列表, 基因編碼]
+            Tuple[策略輸出列表, 適應度分數]
         """
         batch_size = state.size(0)
         
         # 編碼市場基因
-        market_genes = self.encode_market_genes(state)
+        market_genes = self.encode_market_genes(state)  # [batch_size, gene_length]
         
-        # 生成多個策略變體
-        generated_strategies = []
-        fitness_scores = []
-        
+        # 初始化種群（基於市場基因的變異）
+        population = []
         for i in range(self.max_generated_strategies):
-            # 基因突變
-            mutated_genes = self.mutate_genes(market_genes)
-            
-            # 解碼策略
-            strategy_output = self.decode_strategy(mutated_genes, i)
-            generated_strategies.append(strategy_output)
-            
-            # 評估適應度
-            fitness = self.evaluate_strategy_fitness(state, strategy_output)
+            # 每個策略使用不同的解碼器
+            mutated_genes = self.gaussian_mutation(market_genes)
+            population.append(mutated_genes)
+        
+        # 評估初始適應度
+        fitness_scores = []
+        strategy_outputs = []
+        for i, genes in enumerate(population):
+            output = self.decode_strategy(genes, i)  # 使用對應解碼器
+            fitness = self.evaluate_strategy_fitness(state, output)
             fitness_scores.append(fitness)
+            strategy_outputs.append(output)
         
-        # 選擇最佳策略組合
-        fitness_tensor = torch.stack(fitness_scores, dim=1)  # [batch, num_strategies]
+        fitness_tensor = torch.stack(fitness_scores, dim=1)  # [batch, population]
         
-        return generated_strategies, fitness_tensor
+        # 遺傳算法迭代
+        for generation in range(3):  # 進行3代進化
+            new_population = []
+            
+            # 選擇父代（輪盤賭選擇）
+            parent_indices = []
+            for _ in range(self.max_generated_strategies):
+                selected_idx = self.roulette_wheel_selection(fitness_tensor)
+                parent_indices.append(selected_idx)
+            
+            # 交叉和變異
+            for i in range(0, self.max_generated_strategies, 2):
+                if i+1 >= self.max_generated_strategies:
+                    break
+                    
+                # 獲取父代基因
+                parent1_idx = parent_indices[i]
+                parent1 = torch.stack([population[j][b] for b, j in enumerate(parent1_idx)], dim=0)
+                
+                parent2_idx = parent_indices[i+1]
+                parent2 = torch.stack([population[j][b] for b, j in enumerate(parent2_idx)], dim=0)
+                
+                # 執行交叉
+                child1, child2 = self.single_point_crossover(parent1, parent2)
+                
+                # 變異
+                child1 = self.gaussian_mutation(child1)
+                child2 = self.gaussian_mutation(child2)
+                
+                new_population.append(child1)
+                new_population.append(child2)
+            
+            # 更新種群（保留前N個）
+            population = new_population[:self.max_generated_strategies]
+            
+            # 重新評估適應度
+            fitness_scores = []
+            strategy_outputs = []
+            for i, genes in enumerate(population):
+                output = self.decode_strategy(genes, i)
+                fitness = self.evaluate_strategy_fitness(state, output)
+                fitness_scores.append(fitness)
+                strategy_outputs.append(output)
+            
+            fitness_tensor = torch.stack(fitness_scores, dim=1)
+        
+        return strategy_outputs, fitness_tensor
     
-    def evolve_strategies(self, performance_feedback: torch.Tensor):
+    def evolve_strateg极(self, performance_feedback: torch.Tensor):
         """基於性能反饋進化策略"""
         # 更新性能歷史
         self.strategy_performance = 0.9 * self.strategy_performance + 0.1 * performance_feedback
@@ -728,7 +851,7 @@ class EnhancedStrategySuperposition(nn.Module):
         if current_last_dim > expected_dim:
             # 維度過大：使用線性投影降維
             if not hasattr(self, f'_adaptive_projector_{operation_name}_{current_last_dim}_{expected_dim}'):
-                projector = nn.Linear(current_last_dim, expected_dim).to(tensor.device)
+                projector = nn.Linear(current_last_dim, expected_dim).to(tensor.dev极)
                 setattr(self, f'_adaptive_projector_{operation_name}_{current_last_dim}_{expected_dim}', projector)
                 logger.info(f"🔧 創建動態投影器: {operation_name} {current_last_dim}→{expected_dim}")
             
@@ -805,6 +928,7 @@ class EnhancedStrategySuperposition(nn.Module):
                     raise e
         
         strategy_outputs = base_strategy_outputs.copy()
+        num_base_strategies = len(strategy_outputs)
         
         # 動態策略生成
         dynamic_fitness = None
@@ -816,10 +940,21 @@ class EnhancedStrategySuperposition(nn.Module):
                 if "mat1 and mat2 shapes cannot be multiplied" in str(e):
                     logger.warning("⚠️ 動態策略生成維度不匹配，使用自適應處理")
                     adapted_state = self._adaptive_dimension_handler(state, self.dynamic_generator.state_dim, "dynamic_generator")
-                    dynamic_strategies, dynamic_fitness = self.dynamic_generator.generate_strategies(adapted_state)
+                    dynamic_strategies, dynamic_fitness = self.dynamic_generator.generate极ategies(adapted_state)
                     strategy_outputs.extend(dynamic_strategies)
                 else:
                     raise e
+        
+        # 確保策略數量一致
+        if len(strategy_outputs) != self.total_strategies:
+            logger.warning(f"⚠️ 策略數量不一致: 實際 {len(strategy_outputs)} vs 預期 {self.total_strategies}")
+            # 調整策略輸出數量以匹配預期
+            if len(strategy_outputs) > self.total_strategies:
+                strategy_outputs = strategy_outputs[:self.total_strategies]
+            else:
+                # 添加空策略以補足數量
+                for i in range(self.total_strategies - len(strategy_outputs)):
+                    strategy_outputs.append(torch.zeros_like(strategy_outputs[0]))
         
         # 堆疊所有策略輸出
         strategy_tensor = torch.stack(strategy_outputs, dim=1)  # [batch, num_strategies, action_dim]
@@ -939,4 +1074,66 @@ if __name__ == "__main__":
         
     except Exception as e:
         logger.error(f"測試失敗: {e}")
+        raise e
+
+    # ==============================================
+    # 測試動態策略生成器的遺傳算法功能
+    # ==============================================
+    logger.info("\n開始測試動態策略生成器的遺傳算法功能...")
+    
+    # 加載真實數據
+    try:
+        import pandas as pd
+        # 加載EUR/USD 5秒數據
+        data_path = "data/EUR_USD_5S_20250601.csv"
+        df = pd.read_csv(data_path)
+        logger.info(f"成功加載數據: {data_path}, 形狀: {df.shape}")
+        
+        # 數據預處理
+        # 使用收盤價作為狀態特徵
+        prices = df['close'].values
+        # 計算波動率
+        returns = np.diff(prices) / prices[:-1]
+        volatility = np.std(returns)
+        
+        # 轉換為PyTorch張量
+        state_tensor = torch.tensor(prices[-state_dim:], dtype=torch.float32).unsqueeze(0)
+        volatility_tensor = torch.tensor([volatility], dtype=torch.float32)
+        
+        # 初始化動態策略生成器
+        generator = DynamicStrategyGenerator(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            base_strategies=enhanced_strategy_layer.base_strategies,
+            max_generated_strategies=5
+        )
+        
+        # 測試策略生成
+        strategies, fitness_scores = generator.generate_strategies(state_tensor)
+        logger.info(f"生成策略數量: {len(strategies)}")
+        logger.info(f"策略輸出形狀: {strategies[0].shape}")
+        logger.info(f"適應度分數形狀: {fitness_scores.shape}")
+        
+        # 測試遺傳算法操作
+        logger.info("\n測試遺傳算法操作:")
+        logger.info("1. 測試輪盤賭選擇...")
+        selected_idx = generator.roulette_wheel_selection(fitness_scores)
+        logger.info(f"選擇的索引: {selected_idx.item()}")
+        
+        logger.info("2. 測試單點交叉...")
+        parent1 = torch.randn(1, generator.gene_latent_dim)
+        parent2 = torch.randn(1, generator.gene_latent_dim)
+        child1, child2 = generator.single_point_crossover(parent1, parent2)
+        logger.info(f"父代1形狀: {parent1.shape}, 父代2形狀: {parent2.shape}")
+        logger.info(f"子代1形狀: {child1.shape}, 子代2形狀: {child2.shape}")
+        
+        logger.info("3. 測試高斯變異...")
+        genes = torch.randn(1, generator.gene_latent_dim)
+        mutated_genes = generator.gaussian_mutation(genes)
+        logger.info(f"變異前: {genes.mean().item():.4f}, 變異後: {mutated_genes.mean().item():.4f}")
+        
+        logger.info("✅ 動態策略生成器測試通過")
+        
+    except Exception as e:
+        logger.error(f"動態策略生成器測試失敗: {e}")
         raise e

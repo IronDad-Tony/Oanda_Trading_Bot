@@ -930,7 +930,7 @@ class KnowledgeTransferSystem(nn.Module):
           # 知識庫
         self.knowledge_bank = {}
         
-        logger.info(f"初始化動態知識遷移系統 - 源市場: {len(self.source_markets)}, "
+        logger.info(f"初始化動态知識遷移系統 - 源市場: {len(self.source_markets)}, "
                    f"目標市場: {len(self.target_markets)}, 知識維度: {self.knowledge_dim}")
     
     def _get_transfer_evaluator(self, input_tensor: torch.Tensor) -> callable:
@@ -1155,7 +1155,8 @@ class StrategyInnovationModule(nn.Module):
         self.hidden_dim = hidden_dim or base_dim
         self.population_size = population_size
         self.max_generations = max_generations
-          # 動態計算策略維度
+        
+        # 動態計算策略維度
         strategy_dim = max(256, base_dim // 3)
         knowledge_dim = max(256, base_dim // 3)
         
@@ -1180,12 +1181,12 @@ class StrategyInnovationModule(nn.Module):
         
         self.feature_engineer = AutomaticFeatureEngineer(
             base_feature_dim=self.input_dim,
-            engineered_feature_dim=strategy_dim,
+            engineered_feature_dim=strategy_dim, # 確保維度一致
             config_adapter=config_adapter
         )
         
         self.knowledge_transfer = KnowledgeTransferSystem(
-            knowledge_dim=knowledge_dim,
+            knowledge_dim=knowledge_dim, # 確保維度一致
             config_adapter=config_adapter
         )
         
@@ -1193,10 +1194,10 @@ class StrategyInnovationModule(nn.Module):
         self.innovation_history = []
         self.best_strategies = []
         
-        logger.info(f"初始化動態策略創新模組 - 輸入維度: {self.input_dim}, "
+        logger.info(f"初始化動态策略創新模組 - 輸入維度: {self.input_dim}, "
                    f"隱藏維度: {self.hidden_dim}, 策略維度: {strategy_dim}, "
                    f"種群大小: {population_size}")
-    
+
     def get_dynamic_config(self) -> Dict[str, Any]:
         """獲取動態配置信息"""
         return {
@@ -1206,7 +1207,34 @@ class StrategyInnovationModule(nn.Module):
             'feature_dim': getattr(self.feature_engineer, 'engineered_feature_dim', 256),
             'knowledge_dim': getattr(self.knowledge_transfer, 'knowledge_dim', 256)
         }
-    
+
+    def _calculate_strategy_diversity(self, strategies_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        計算策略張量的多樣性。
+        一個簡單的實現是計算策略表示的標準差。
+        """
+        if strategies_tensor is None or strategies_tensor.numel() == 0:
+            return torch.tensor(0.0, device=strategies_tensor.device if strategies_tensor is not None else 'cpu')
+        
+        if strategies_tensor.dim() < 2: # 至少需要 batch_size x strategy_dim
+            return torch.tensor(0.0, device=strategies_tensor.device)
+            
+        # 沿策略維度計算標準差，然後取平均值
+        # 假設 strategies_tensor 的形狀是 [batch_size, num_strategies, strategy_dim] 或 [batch_size, strategy_dim]
+        if strategies_tensor.dim() == 3: # batch_size x num_strategies x strategy_dim
+            if strategies_tensor.shape[1] <= 1: # 單一策略或沒有策略
+                 return torch.tensor(0.0, device=strategies_tensor.device)
+            diversity = torch.std(strategies_tensor, dim=1).mean() # 計算不同策略之間的標準差的平均值
+        elif strategies_tensor.dim() == 2: # batch_size x features (每個 batch item 是一個策略)
+            if strategies_tensor.shape[0] <= 1: # 單個策略或空
+                 return torch.tensor(0.0, device=strategies_tensor.device)
+            diversity = torch.std(strategies_tensor, dim=0).mean() # 特徵間的標準差的平均
+        else: # 其他情況，無法明確計算
+            diversity = torch.tensor(0.0, device=strategies_tensor.device)
+            
+        return diversity.squeeze()
+
+
     def forward(self, market_context: torch.Tensor,
                 existing_strategies: Optional[torch.Tensor] = None) -> Dict[str, Any]:
         """
@@ -1265,12 +1293,14 @@ class StrategyInnovationModule(nn.Module):
             'innovation_score': float(evaluation_result['innovation_score'].mean()),
             'feature_importance': feature_result['importance_weights'].mean(dim=0).tolist(),
             'transfer_score': float(transfer_result['transfer_scores'].mean()) 
-                            if transfer_result['transfer_scores'] is not None else 0.0        }
+                            if transfer_result['transfer_scores'] is not None else 0.0
+        }
         self.innovation_history.append(innovation_record)
         
         return {
             'generated_strategies': generated_strategies_tensor,
-            'innovation_confidence': evaluation_result['innovation_score'],  # Add expected key
+            'innovation_confidence': evaluation_result['innovation_score'],
+            'strategy_diversity': self._calculate_strategy_diversity(generated_strategies_tensor),
             'generation_details': generation_result,
             'evaluation': evaluation_result,
             'feature_engineering': feature_result,

@@ -78,15 +78,29 @@ def cleanup_mmap_temp_files():
     1. 清理所有活躍數據集的 mmap 檔案
     2. 清理孤立的 mmap 暫存檔案
     """
+    # 更健壯地檢查 logger 是否仍然可用
+    current_logger = None
+    if 'logger' in globals() and globals()['logger'] is not None:
+        _logger_candidate = globals()['logger']
+        if hasattr(_logger_candidate, 'info') and callable(_logger_candidate.info) and \
+           hasattr(_logger_candidate, 'hasHandlers') and _logger_candidate.hasHandlers() and _logger_candidate.handlers and \
+           hasattr(_logger_candidate, 'isEnabledFor') and _logger_candidate.isEnabledFor(logging.INFO):
+            current_logger = _logger_candidate
+
+    log_func = current_logger.info if current_logger else lambda msg: print(f"INFO (cleanup_mmap_temp_files fallback): {msg}")
+    warn_func = current_logger.warning if current_logger else lambda msg: print(f"WARN (cleanup_mmap_temp_files fallback): {msg}")
+    error_func = current_logger.error if current_logger else lambda msg: print(f"ERROR (cleanup_mmap_temp_files fallback): {msg}")
+    debug_func = current_logger.debug if current_logger else lambda msg: print(f"DEBUG (cleanup_mmap_temp_files fallback): {msg}")
+
     try:
         # 關閉所有活躍的數據集
         for dataset in _active_datasets[:]:  # 使用副本避免修改時的問題
             try:
                 if hasattr(dataset, 'close'):
                     dataset.close()
-                    logger.info(f"已關閉數據集: {getattr(dataset, 'dataset_id', 'unknown')}")
+                    log_func(f"已關閉數據集: {getattr(dataset, 'dataset_id', 'unknown')}")
             except Exception as e:
-                logger.warning(f"關閉數據集時發生錯誤: {e}")
+                warn_func(f"關閉數據集時發生錯誤: {e}")
         
         _active_datasets.clear()
         
@@ -97,13 +111,13 @@ def cleanup_mmap_temp_files():
                 # 查找所有 .mmap 檔案
                 mmap_files = list(mmap_base_dir.rglob("*.mmap"))
                 if mmap_files:
-                    logger.info(f"發現 {len(mmap_files)} 個 mmap 暫存檔案，正在清理...")
+                    log_func(f"發現 {len(mmap_files)} 個 mmap 暫存檔案，正在清理...")
                     for mmap_file in mmap_files:
                         try:
                             mmap_file.unlink()
-                            logger.debug(f"已刪除 mmap 檔案: {mmap_file}")
+                            debug_func(f"已刪除 mmap 檔案: {mmap_file}")
                         except Exception as e:
-                            logger.warning(f"無法刪除 mmap 檔案 {mmap_file}: {e}")
+                            warn_func(f"無法刪除 mmap 檔案 {mmap_file}: {e}")
                     
                     # 清理空的目錄
                     for dataset_dir in mmap_base_dir.iterdir():
@@ -112,16 +126,16 @@ def cleanup_mmap_temp_files():
                                 # 如果目錄為空，則刪除
                                 if not any(dataset_dir.iterdir()):
                                     dataset_dir.rmdir()
-                                    logger.debug(f"已刪除空目錄: {dataset_dir}")
+                                    debug_func(f"已刪除空目錄: {dataset_dir}")
                             except Exception as e:
-                                logger.debug(f"無法刪除目錄 {dataset_dir}: {e}")
+                                debug_func(f"無法刪除目錄 {dataset_dir}: {e}")
                 else:
-                    logger.info("未發現需要清理的 mmap 暫存檔案")
+                    log_func("未發現需要清理的 mmap 暫存檔案")
         except Exception as e:
-            logger.warning(f"清理 mmap 暫存檔案時發生錯誤: {e}")
+            warn_func(f"清理 mmap 暫存檔案時發生錯誤: {e}")
             
     except Exception as e:
-        logger.error(f"mmap 暫存檔案清理過程中發生嚴重錯誤: {e}")
+        error_func(f"mmap 暫存檔案清理過程中發生嚴重錯誤: {e}")
 
 def cleanup_old_mmap_files(max_age_hours: int = 24):
     """
