@@ -15,21 +15,79 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Union
 import logging
 from abc import ABC, abstractmethod
 import math
-from dataclasses import dataclass
 
 try:
     from src.common.logger_setup import logger
     from src.common.config import DEVICE, MAX_SYMBOLS_ALLOWED
-    from src.agent.quantum_strategy_layer import BaseStrategy, QuantumEncoder
-except ImportError:
+    from .strategies import BaseStrategy, StrategyConfig
+    from .strategies import (
+        MomentumStrategy,
+        BreakoutStrategy,
+        TrendFollowingStrategy,
+        ReversalStrategy,
+        StatisticalArbitrageStrategy,
+        VolatilityStrategy,
+        PairsTradeStrategy,
+        MeanReversionStrategy,
+        CointegrationStrategy,
+        VolatilityArbitrageStrategy,
+        ReinforcementLearningStrategy,
+        DeepLearningPredictionStrategy,
+        EnsembleLearningStrategy,
+        TransferLearningStrategy,
+        DynamicHedgingStrategy,
+        RiskParityStrategy,
+        VaRControlStrategy,
+        MaxDrawdownControlStrategy,
+        OptionFlowStrategy,
+        MicrostructureStrategy,
+        CarryTradeStrategy,
+        MacroEconomicStrategy,
+        EventDrivenStrategy,
+        SentimentStrategy,
+        QuantitativeStrategy,
+        MarketMakingStrategy,
+        HighFrequencyStrategy,
+        AlgorithmicStrategy
+    )
+
+except ImportError as e:
     logger = logging.getLogger(__name__)
+    logger.error(f"Import error in enhanced_quantum_strategy_layer: {e}")
     DEVICE = "cpu"
     MAX_SYMBOLS_ALLOWED = 5
+    class BaseStrategy(nn.Module, ABC):
+        def __init__(self, params: dict = None, config: Optional[Any] = None):
+            super().__init__()
+            self.params = params if params is not None else {}
+            self.config = config
+            self.strategy_id = self.__class__.__name__ if config is None else config.name
 
+        @abstractmethod
+        def forward(self, market_data: pd.DataFrame, portfolio_context: dict = None) -> pd.DataFrame:
+            pass
+
+        @abstractmethod
+        def generate_signals(self, processed_data: pd.DataFrame, portfolio_context: dict = None) -> pd.DataFrame:
+            pass
+
+        def get_strategy_name(self) -> str:
+            return self.strategy_id
+    
+    from dataclasses import dataclass
+    @dataclass
+    class StrategyConfig:
+        name: str
+        description: str
+        risk_level: float
+        market_regime: str
+        complexity: int
+        base_performance: float = 0.5
 
 # 自定義激活函數實現
 class Swish(nn.Module):
@@ -44,673 +102,146 @@ class Mish(nn.Module):
         return x * torch.tanh(F.softplus(x))
 
 
-# 基礎策略類（如果導入失敗則定義）
-if 'BaseStrategy' not in globals():
-    class BaseStrategy(nn.Module, ABC):
-        @abstractmethod
-        def forward(self, state: torch.Tensor) -> torch.Tensor:
-            pass
-        
-        @abstractmethod
-        def get_strategy_name(self) -> str:
-            pass
-
-
-if 'QuantumEncoder' not in globals():
-    class QuantumEncoder(nn.Module):
-        def __init__(self, input_dim: int, latent_dim: int, num_qubits: int = 8):
-            super().__init__()
-            self.encoding_layers =nn.Sequential(
-                nn.Linear(input_dim, latent_dim),
-                nn.GELU()
-            )
-        
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.encoding_layers(x)
-
-
-@dataclass
-class StrategyConfig:
-    """策略配置類"""
-    name: str
-    description: str
-    risk_level: float  # 0.0-1.0
-    market_regime: str  # "trending", "ranging", "volatile", "all"
-    complexity: int    # 1-5
-    base_performance: float = 0.5
-
-
 # ===============================
 # 15種專業交易策略實現
 # ===============================
 
-class MomentumStrategy(BaseStrategy):
-    """動量策略：基於價格動量進行交易"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.momentum_amplifier = nn.Parameter(torch.tensor(1.5))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        base_output = self.strategy_net(state)
-        return base_output * self.momentum_amplifier
-    
-    def get_strategy_name(self) -> str:
-        return "Momentum"
+# All original strategy class definitions (MomentumStrategy, BreakoutStrategy, ..., AlgorithmicStrategy)
+# have been moved to their respective files under src/agent/strategies/
+# and are now imported above.
 
-
-class BreakoutStrategy(BaseStrategy):
-    """突破策略：識別並跟隨價格突破"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.GELU(),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),
-            nn.GELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.breakout_threshold = nn.Parameter(torch.tensor(0.3))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        raw_signal = self.strategy_net(state)
-        # 應用突破閾值
-        breakout_mask = torch.abs(raw_signal) > self.breakout_threshold
-        return raw_signal * breakout_mask.float() * 1.3
-    
-    def get_strategy_name(self) -> str:
-        return "Breakout"
-
-
-class StatisticalArbitrageStrategy(BaseStrategy):
-    """統計套利策略：基於統計模型的套利機會"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            Swish(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 96),
-            Swish(),
-            nn.Linear(96, 64),
-            Swish(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.correlation_matrix = nn.Parameter(torch.eye(action_dim) * 0.1)
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        base_signal = self.strategy_net(state)
-        # 應用統計相關性調整
-        adjusted_signal = torch.matmul(base_signal.unsqueeze(1), self.correlation_matrix).squeeze(1)
-        return adjusted_signal * 0.8  # 保守的套利信號
-    
-    def get_strategy_name(self) -> str:
-        return "StatisticalArbitrage"
-
-
-class OptionFlowStrategy(BaseStrategy):
-    """期權流策略：基於期權市場信號"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ELU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            nn.ELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.option_sensitivity = nn.Parameter(torch.tensor(0.7))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.option_sensitivity
-    
-    def get_strategy_name(self) -> str:
-        return "OptionFlow"
-
-
-class MicrostructureStrategy(BaseStrategy):
-    """市場微觀結構策略：基於高頻交易信號"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.GELU(),
-            nn.GroupNorm(8, 128),
-            nn.Linear(128, 64),
-            nn.GELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.microstructure_weight = nn.Parameter(torch.tensor(0.6))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.microstructure_weight
-    
-    def get_strategy_name(self) -> str:
-        return "Microstructure"
-
-
-class VolatilityStrategy(BaseStrategy):
-    """波動率策略：基於波動率模式的交易"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            Mish(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            Mish(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.vol_scaling = nn.Parameter(torch.tensor(1.1))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.vol_scaling
-    
-    def get_strategy_name(self) -> str:
-        return "Volatility"
-
-
-class CarryTradeStrategy(BaseStrategy):
-    """利差交易策略：基於利率差異"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.LeakyReLU(0.1),
-            nn.BatchNorm1d(128),
-            nn.Linear(128, 64),
-            nn.LeakyReLU(0.1),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.carry_multiplier = nn.Parameter(torch.tensor(0.9))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.carry_multiplier
-    
-    def get_strategy_name(self) -> str:
-        return "CarryTrade"
-
-
-class MacroEconomicStrategy(BaseStrategy):
-    """宏觀經濟策略：基於宏觀經濟指標"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.SELU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            nn.SELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.macro_influence = nn.Parameter(torch.tensor(0.8))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.macro_influence
-    
-    def get_strategy_name(self) -> str:
-        return "MacroEconomic"
-
-
-class EventDrivenStrategy(BaseStrategy):
-    """事件驅動策略：基於市場事件和新聞"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.GELU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            nn.GELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.event_intensity = nn.Parameter(torch.tensor(1.2))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.event_intensity
-    
-    def get_strategy_name(self) -> str:
-        return "EventDriven"
-
-
-class SentimentStrategy(BaseStrategy):
-    """市場情緒策略：基於市場情緒指標"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            Swish(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            Swish(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.sentiment_factor = nn.Parameter(torch.tensor(0.7))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.sentiment_factor
-    
-    def get_strategy_name(self) -> str:
-        return "Sentiment"
-
-
-class QuantitativeStrategy(BaseStrategy):
-    """量化因子策略：基於量化因子模型"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 96),
-            nn.ReLU(),            
-            nn.Linear(96, 64),
-            nn.ReLU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.factor_loadings = nn.Parameter(torch.randn(action_dim, 5) * 0.1)
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        base_signal = self.strategy_net(state)
-        # 應用因子載荷 - 修復維度問題
-        factor_effect = torch.matmul(base_signal, self.factor_loadings).mean(dim=-1, keepdim=True)
-        enhanced_signal = base_signal + factor_effect * 0.1
-        return enhanced_signal * 0.9
-    
-    def get_strategy_name(self) -> str:
-        return "Quantitative"
-
-
-class PairsTradeStrategy(BaseStrategy):
-    """配對交易策略：基於配對股票的相對價值"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.GELU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            nn.GELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.pairs_correlation = nn.Parameter(torch.eye(action_dim) * 0.2)
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        base_signal = self.strategy_net(state)
-        pairs_adjusted = torch.matmul(base_signal.unsqueeze(1), self.pairs_correlation).squeeze(1)
-        return pairs_adjusted * 0.85
-    
-    def get_strategy_name(self) -> str:
-        return "PairsTrade"
-
-
-class MarketMakingStrategy(BaseStrategy):
-    """做市策略：提供流動性獲取差價"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ELU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            nn.ELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.spread_sensitivity = nn.Parameter(torch.tensor(0.5))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.spread_sensitivity
-    
-    def get_strategy_name(self) -> str:
-        return "MarketMaking"
-
-
-class HighFrequencyStrategy(BaseStrategy):
-    """高頻交易策略：基於微秒級市場動態"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            Mish(),
-            nn.GroupNorm(8, 128),
-            nn.Linear(128, 64),
-            Mish(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.hft_multiplier = nn.Parameter(torch.tensor(0.4))
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.strategy_net(state) * self.hft_multiplier
-    
-    def get_strategy_name(self) -> str:
-        return "HighFrequency"
-
-
-class AlgorithmicStrategy(BaseStrategy):
-    """算法交易策略：基於預定義交易算法"""
-    
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.strategy_net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.SELU(),
-            nn.LayerNorm(128),
-            nn.Linear(128, 64),
-            nn.SELU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh()
-        )
-        self.algo_parameters = nn.Parameter(torch.randn(3) * 0.1)
-        
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        base_signal = self.strategy_net(state)
-        # 應用算法參數調整
-        algo_adjustment = torch.sum(self.algo_parameters) * 0.1
-        return base_signal * (1.0 + algo_adjustment)
-    
-    def get_strategy_name(self) -> str:
-        return "Algorithmic"
-
+# Placeholder classes like CointegrationStrategy, VolatilityArbitrageStrategy, 
+# ReinforcementLearningStrategy, etc., are also imported from their new locations.
+# Ensure these placeholder classes are properly defined in their respective files 
+# (e.g., statistical_arbitrage_strategies.py, ml_strategies.py)
+# and inherit from the new BaseStrategy.
 
 # ===============================
 # 動態策略生成器
 # ===============================
 
-class DynamicStrategyGenerator(nn.Module):
+class DynamicStrategyGenerator:
     """
-    動態策略生成器：實時創建和調整交易策略
-    基於遺傳算法和神經進化的混合方法
-    支持完全動態自適應維度配置
+    Generates and manages trading strategies dynamically based on market conditions
+    and other factors.
     """
-    
-    def __init__(self, state_dim: int, action_dim: int, 
-                 base_strategies: List[BaseStrategy],
-                 max_generated_strategies: int = 5):
-        super().__init__()
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.base_strategies = base_strategies
-        self.max_generated_strategies = max_generated_strategies
-        
-        # 動態計算中間層維度 - 自適應縮放
-        self.gene_hidden_dim = max(16, min(128, state_dim // 4))  # 動態隱藏層維度
-        self.gene_latent_dim = max(8, min(64, state_dim // 8))   # 動態潛在維度
-        self.decoder_hidden_1 = max(32, min(256, action_dim * 2))  # 解碼器第一層
-        self.decoder_hidden_2 = max(64, min(512, action_dim * 4))  # 解碼器第二層
-        self.fitness_hidden_1 = max(32, min(128, (state_dim + action_dim) // 2))
-        self.fitness_hidden_2 = max(16, min(64, (state_dim + action_dim) // 4))
-        
-        # 策略基因編碼器 - 動態維度
-        self.gene_encoder = nn.Sequential(
-            nn.Linear(state_dim, self.gene_hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.gene_hidden_dim, self.gene_hidden_dim // 2),
-            nn.GELU(),
-            nn.Linear(self.gene_hidden_dim // 2, self.gene_latent_dim)
-        )
-        
-        # 策略解碼器網絡 - 動態維度
-        self.strategy_decoder = nn.ModuleDict({
-            f"decoder_{i}": nn.Sequential(
-                nn.Linear(self.gene_latent_dim, self.decoder_hidden_1),
-                nn.GELU(),
-                nn.Linear(self.decoder_hidden_1, self.decoder_hidden_2),
-                nn.GELU(),
-                nn.Linear(self.decoder_hidden_2, action_dim),
-                nn.Tanh()
-            ) for i in range(max_generated_strategies)
-        })
-        
-        # 策略適應度評估器 - 動態維度
-        self.fitness_evaluator = nn.Sequential(
-            nn.Linear(state_dim + action_dim, self.fitness_hidden_1),
-            nn.ReLU(),
-            nn.Linear(self.fitness_hidden_1, self.fitness_hidden_2),
-            nn.ReLU(),
-            nn.Linear(self.fitness_hidden_2, 1),
-            nn.Sigmoid()
-        )
-        
-        # 基因突變控制器
-        self.mutation_controller = nn.Parameter(torch.tensor(0.1))
-        
-        # 生成策略的性能歷史
-        self.register_buffer('strategy_performance', torch.zeros(max_generated_strategies))
-        self.register_buffer('generation_counter', torch.tensor(0))
-        
-    def encode_market_genes(self, state: torch.Tensor) -> torch.Tensor:
-        """將市場狀態編碼為策略基因"""
-        return self.gene_encoder(state)
-    
-    def decode_strategy(self, genes: torch.Tensor, strategy_id: int) -> torch.Tensor:
-        """將基因解碼為策略輸出"""
-        decoder = self.strategy_decoder[f"decoder_{strategy_id}"]
-        return decoder(genes)
-    
-    def roulette_wheel_selection(self, fitness_scores: torch.Tensor) -> torch.Tensor:
-        """
-        基於適應度的輪盤賭選擇算子（支持批量處理）
-        Args:
-            fitness_scores: 個體適應度分數，形狀 [batch_size, population_size]
-        Returns:
-            選擇的個體索引，形狀 [batch_size]
-        """
-        # 計算選擇概率
-        probs = fitness_scores / fitness_scores.sum(dim=1, keepdim=True)
-        
-        # 逐样本处理以避免广播问题
-        selected_indices = []
-        for i in range(probs.shape[0]):
-            # 生成随机数
-            r = torch.rand(1, device=probs.device)
-            # 累積概率
-            cumulative_probs = torch.cumsum(probs[i], dim=0)
-            # 找到第一个大于等于随机数的索引
-            idx = torch.nonzero(cumulative_probs >= r, as_tuple=True)[0]
-            if idx.numel() > 0:
-                selected_indices.append(idx[0])
-            else:
-                selected_indices.append(torch.tensor(len(cumulative_probs)-1, device=probs.device))
-        
-        return torch.stack(selected_indices)
-    
-    def validate_architecture(self, state: torch.Tensor) -> float:
-        """驗證架構搜索性能並返回搜索時間"""
-        import time
-        start_time = time.time()
-        
-        # 編碼市場基因
-        genes = self.encode_market_genes(state)
-        
-        # 測試所有NAS模塊
-        for i in range(self.max_generated_strategies):
-            _ = self.decode_strategy(genes, i)
-        
-        end_time = time.time()
-        return end_time - start_time
-    
-    def single_point_crossover(self, parent1: torch.Tensor, parent2: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        單點交叉算子（支持批量處理）
-        Args:
-            parent1: 父代基因1，形狀 [batch_size, gene_length]
-            parent2: 父代基因2，形狀 [batch_size, gene_length]
-        Returns:
-            (child1, child2): 兩個子代基因
-        """
-        batch_size, gene_length = parent1.shape
-        # 隨機選擇交叉點（每個樣本不同）
-        crossover_points = torch.randint(1, gene_length-1, (batch_size,), device=parent1.device)
-        
-        # 創建掩碼矩陣
-        mask = torch.arange(gene_length, device=parent1.device).expand(batch_size, -1)
-        mask = mask < crossover_points.unsqueeze(1)
-        
-        # 執行交叉
-        child1 = torch.where(mask, parent1, parent2)
-        child2 = torch.where(mask, parent2, parent1)
-        return child1, child2
-    
-    def gaussian_mutation(self, genes: torch.Tensor, 
-                         mutation_rate: Optional[float] = None,
-                         mutation_scale: float = 0.1) -> torch.Tensor:
-        """
-        高斯變異算子（支持自動微分和批量處理）
-        Args:
-            genes: 輸入基因，形狀 [batch_size, gene_length]
-            mutation_rate: 變異率（每個基因變異的概率）
-            mutation_scale: 變異強度（高斯噪聲的標準差）
-        Returns:
-            變異後的基因
-        """
-        if mutation_rate is None:
-            mutation_rate = self.mutation_controller.item()
-        
-        # 創建突變掩碼
-        mutation_mask = torch.rand_like(genes) < mutation_rate
-        # 生成高斯噪聲
-        noise = torch.randn_like(genes) * mutation_scale
-        # 應用突變
-        mutated_genes = genes + mutation_mask * noise
-        return torch.clamp(mutated_genes, -2.0, 2.0)
-    
-    def evaluate_strategy_fitness(self, state: torch.Tensor, 
-                                action: torch.Tensor) -> torch.Tensor:
-        """評估策略的適應度"""
-        combined_input = torch.cat([state, action], dim=-1)
-        return self.fitness_evaluator(combined_input)
-    
-    def generate_strategies(self, state: torch.Tensor) -> Tuple[List[torch.Tensor], torch.Tensor]:
-        """
-        使用遺傳算法生成動態策略（包含選擇、交叉、變異）
-        
-        Returns:
-            Tuple[策略輸出列表, 適應度分數]
-        """
-        batch_size = state.size(0)
-        
-        # 編碼市場基因
-        market_genes = self.encode_market_genes(state)  # [batch_size, gene_length]
-        
-        # 初始化種群（基於市場基因的變異）
-        population = []
-        for i in range(self.max_generated_strategies):
-            # 每個策略使用不同的解碼器
-            mutated_genes = self.gaussian_mutation(market_genes)
-            population.append(mutated_genes)
-        
-        # 評估初始適應度
-        fitness_scores = []
-        strategy_outputs = []
-        for i, genes in enumerate(population):
-            output = self.decode_strategy(genes, i)  # 使用對應解碼器
-            fitness = self.evaluate_strategy_fitness(state, output)
-            fitness_scores.append(fitness)
-            strategy_outputs.append(output)
-        
-        fitness_tensor = torch.stack(fitness_scores, dim=1)  # [batch, population]
-        
-        # 遺傳算法迭代
-        for generation in range(3):  # 進行3代進化
-            new_population = []
-            
-            # 選擇父代（輪盤賭選擇）
-            parent_indices = []
-            for _ in range(self.max_generated_strategies):
-                selected_idx = self.roulette_wheel_selection(fitness_tensor)
-                parent_indices.append(selected_idx)
-            
-            # 交叉和變異
-            for i in range(0, self.max_generated_strategies, 2):
-                if i+1 >= self.max_generated_strategies:
-                    break
-                    
-                # 獲取父代基因
-                parent1_idx = parent_indices[i]
-                parent1 = torch.stack([population[j][b] for b, j in enumerate(parent1_idx)], dim=0)
-                
-                parent2_idx = parent_indices[i+1]
-                parent2 = torch.stack([population[j][b] for b, j in enumerate(parent2_idx)], dim=0)
-                
-                # 執行交叉
-                child1, child2 = self.single_point_crossover(parent1, parent2)
-                
-                # 變異
-                child1 = self.gaussian_mutation(child1)
-                child2 = self.gaussian_mutation(child2)
-                
-                new_population.append(child1)
-                new_population.append(child2)
-            
-            # 更新種群（保留前N個）
-            population = new_population[:self.max_generated_strategies]
-            
-            # 重新評估適應度
-            fitness_scores = []
-            strategy_outputs = []
-            for i, genes in enumerate(population):
-                output = self.decode_strategy(genes, i)
-                fitness = self.evaluate_strategy_fitness(state, output)
-                fitness_scores.append(fitness)
-                strategy_outputs.append(output)
-            
-            fitness_tensor = torch.stack(fitness_scores, dim=1)
-        
-        return strategy_outputs, fitness_tensor
-    
-    def evolve_strateg极(self, performance_feedback: torch.Tensor):
-        """基於性能反饋進化策略"""
-        # 更新性能歷史
-        self.strategy_performance = 0.9 * self.strategy_performance + 0.1 * performance_feedback
-        
-        # 調整突變率
-        avg_performance = torch.mean(self.strategy_performance)
-        if avg_performance < 0.5:
-            self.mutation_controller.data *= 1.1  # 增加探索
+    def __init__(self, config: Optional[Dict] = None, strategies: Optional[List[BaseStrategy]] = None):
+        self.config = config if config is not None else {}
+        # self.strategies = strategies if strategies is not None else [] # This will be populated by available strategies
+        self.available_strategies_classes = { 
+            strategy_cls.get_strategy_name(strategy_cls) if hasattr(strategy_cls, 'get_strategy_name') and callable(strategy_cls.get_strategy_name) else strategy_cls.__name__: strategy_cls
+            for strategy_cls in [
+                MomentumStrategy,
+                BreakoutStrategy,
+                TrendFollowingStrategy,
+                ReversalStrategy,
+                StatisticalArbitrageStrategy,
+                VolatilityStrategy,
+                PairsTradeStrategy,
+                MeanReversionStrategy,
+                CointegrationStrategy, 
+                VolatilityArbitrageStrategy, 
+                ReinforcementLearningStrategy, 
+                DeepLearningPredictionStrategy, 
+                EnsembleLearningStrategy, 
+                TransferLearningStrategy, 
+                DynamicHedgingStrategy,
+                RiskParityStrategy,
+                VaRControlStrategy,
+                MaxDrawdownControlStrategy,
+                OptionFlowStrategy,
+                MicrostructureStrategy,
+                CarryTradeStrategy,
+                MacroEconomicStrategy,
+                EventDrivenStrategy,
+                SentimentStrategy,
+                QuantitativeStrategy,
+                MarketMakingStrategy,
+                HighFrequencyStrategy,
+                AlgorithmicStrategy
+            ]
+        }
+        self.active_strategies_instances: List[BaseStrategy] = [] # Store instances of strategies
+        if strategies:
+            for s_instance in strategies:
+                if isinstance(s_instance, BaseStrategy):
+                    self.active_strategies_instances.append(s_instance)
+                elif isinstance(s_instance, type) and issubclass(s_instance, BaseStrategy): # if a class is passed
+                    try:
+                        self.active_strategies_instances.append(s_instance()) # Basic instantiation
+                    except Exception as e:
+                        logger.error(f"Could not instantiate {s_instance.__name__}: {e}")
+
+        self.genetic_optimizer = None  # Placeholder for GeneticOptimizer
+        self.nas_optimizer = None      # Placeholder for NeuralArchitectureSearch
+        logger.info("DynamicStrategyGenerator initialized.")
+
+    def add_strategy(self, strategy_instance: BaseStrategy):
+        """Adds a strategy instance to the generator."""
+        if strategy_instance not in self.active_strategies_instances:
+            self.active_strategies_instances.append(strategy_instance)
+            logger.info(f"Strategy instance {strategy_instance.get_strategy_name()} added to DynamicStrategyGenerator.")
         else:
-            self.mutation_controller.data *= 0.95  # 減少探索
+            logger.warning(f"Strategy instance {strategy_instance.get_strategy_name()} already exists.")
+
+    def generate_new_strategy(self, market_data: pd.DataFrame, current_context: Dict) -> Optional[BaseStrategy]:
+        """
+        Generates or selects a new strategy based on the provided market data and context.
+        """
+        logger.info(f"Attempting to generate new strategy based on market_data and context.")
+        if not self.available_strategies_classes:
+            logger.warning("No strategy classes available to select from.")
+            return None
         
-        # 限制突變率範圍
-        self.mutation_controller.data = torch.clamp(self.mutation_controller.data, 0.01, 0.3)
+        market_regime = current_context.get("market_regime", "all")
+        suitable_strategy_names = []
         
-        self.generation_counter += 1
+        # This part needs access to StrategyConfig for each strategy type
+        # Assuming strategy_configs are passed in self.config or accessible otherwise
+        strategy_configs_list = self.config.get("strategy_configs_list", [])
+        strategy_config_map = {cfg.name: cfg for cfg in strategy_configs_list if isinstance(cfg, StrategyConfig)}
+
+        for name, s_class in self.available_strategies_classes.items():
+            s_config = strategy_config_map.get(name)
+            if s_config and (s_config.market_regime == market_regime or s_config.market_regime == "all"):
+                suitable_strategy_names.append(name)
+            elif not s_config: # If no specific config, consider it suitable for now
+                suitable_strategy_names.append(name)
+
+        if suitable_strategy_names:
+            import random
+            selected_strategy_name = random.choice(suitable_strategy_names)
+            StrategyClassToInstantiate = self.available_strategies_classes[selected_strategy_name]
+            try:
+                # Here, we need parameters for the strategy. This is a simplification.
+                # In a real scenario, params might come from GA, NAS, or predefined sets.
+                strategy_params = current_context.get("default_params", {}).get(selected_strategy_name, {})
+                strategy_config_obj = strategy_config_map.get(selected_strategy_name)
+                
+                new_strategy_instance = StrategyClassToInstantiate(params=strategy_params, config=strategy_config_obj)
+                logger.info(f"Selected and instantiated strategy: {new_strategy_instance.get_strategy_name()}")
+                # self.add_strategy(new_strategy_instance) # Optionally add to active list
+                return new_strategy_instance
+            except Exception as e:
+                logger.error(f"Error instantiating strategy {selected_strategy_name}: {e}")
+                return None
+        else:
+            logger.warning(f"No suitable strategy class found for market regime: {market_regime}")
+            return None
+
+    def integrate_genetic_optimizer(self, optimizer_config: Dict):
+        """
+        Integrates and configures the GeneticOptimizer.
+        """
+        # self.genetic_optimizer = GeneticOptimizer(**optimizer_config) # To be implemented
+        logger.info("GeneticOptimizer integration placeholder.")
+
+    def integrate_nas(self, nas_config: Dict):
+        """
+        Integrates and configures Neural Architecture Search.
+        """
+        # self.nas_optimizer = NeuralArchitectureSearch(**nas_config) # To be implemented
+        logger.info("NeuralArchitectureSearch integration placeholder.")
 
 
 # ===============================
@@ -725,45 +256,70 @@ class EnhancedStrategySuperposition(nn.Module):
     """
     
     def __init__(self, state_dim: int, action_dim: int, 
-                 enable_dynamic_generation: bool = True):
+                 enable_dynamic_generation: bool = True,
+                 initial_strategy_params: Optional[Dict[str, Dict]] = None,
+                 strategy_configs_list: Optional[List[StrategyConfig]] = None):
         super().__init__()
         self.state_dim = state_dim
-        self.action_dim = action_dim
+        self.action_dim = action_dim # Note: action_dim for PyTorch layers, but strategies now use pandas
         self.enable_dynamic_generation = enable_dynamic_generation
+        self.initial_strategy_params = initial_strategy_params if initial_strategy_params else {}
+        self.strategy_configs_list = strategy_configs_list if strategy_configs_list else []
+        self.strategy_config_map = {cfg.name: cfg for cfg in self.strategy_configs_list}
+
+        # Initialize all strategies based on the new structure
+        self.base_strategies_instances = nn.ModuleList()
         
-        # 初始化所有15種基礎策略
-        self.base_strategies = nn.ModuleList([
-            # 原有策略
-            MomentumStrategy(state_dim, action_dim),
-            BreakoutStrategy(state_dim, action_dim),
-            StatisticalArbitrageStrategy(state_dim, action_dim),
-            # 新增策略
-            OptionFlowStrategy(state_dim, action_dim),
-            MicrostructureStrategy(state_dim, action_dim),
-            VolatilityStrategy(state_dim, action_dim),
-            CarryTradeStrategy(state_dim, action_dim),
-            MacroEconomicStrategy(state_dim, action_dim),
-            EventDrivenStrategy(state_dim, action_dim),
-            SentimentStrategy(state_dim, action_dim),
-            QuantitativeStrategy(state_dim, action_dim),
-            PairsTradeStrategy(state_dim, action_dim),
-            MarketMakingStrategy(state_dim, action_dim),
-            HighFrequencyStrategy(state_dim, action_dim),
-            AlgorithmicStrategy(state_dim, action_dim),
-        ])
+        strategy_classes_to_instantiate = [
+            MomentumStrategy, BreakoutStrategy, TrendFollowingStrategy, ReversalStrategy,
+            StatisticalArbitrageStrategy, VolatilityStrategy, PairsTradeStrategy, MeanReversionStrategy,
+            CointegrationStrategy, VolatilityArbitrageStrategy, 
+            ReinforcementLearningStrategy, DeepLearningPredictionStrategy, EnsembleLearningStrategy, TransferLearningStrategy,
+            DynamicHedgingStrategy, RiskParityStrategy, VaRControlStrategy, MaxDrawdownControlStrategy,
+            OptionFlowStrategy, MicrostructureStrategy, CarryTradeStrategy, MacroEconomicStrategy,
+            EventDrivenStrategy, SentimentStrategy, QuantitativeStrategy, MarketMakingStrategy,
+            HighFrequencyStrategy, AlgorithmicStrategy
+        ]
+
+        for SClass in strategy_classes_to_instantiate:
+            strategy_name = SClass.get_strategy_name(SClass) if hasattr(SClass, 'get_strategy_name') else SClass.__name__
+            params = self.initial_strategy_params.get(strategy_name, {})
+            config = self.strategy_config_map.get(strategy_name)
+            if not config:
+                 # Create a default config if not provided - this might need more robust handling
+                logger.warning(f"StrategyConfig not found for {strategy_name}, using default placeholder.")
+                config = StrategyConfig(name=strategy_name, description="Default", risk_level=0.5, market_regime="all", complexity=3)
+
+            try:
+                self.base_strategies_instances.append(SClass(params=params, config=config))
+            except Exception as e:
+                logger.error(f"Error instantiating {strategy_name} in Superposition: {e}")
         
-        self.num_base_strategies = len(self.base_strategies)
+        self.num_base_strategies = len(self.base_strategies_instances)
         
         # 動態策略生成器
         if enable_dynamic_generation:
+            # Pass available strategy classes and their configs to the generator
+            generator_config = {
+                'strategy_configs_list': self.strategy_configs_list,
+                # Potentially other configs for GA/NAS if they are part of the generator directly
+            }
             self.dynamic_generator = DynamicStrategyGenerator(
-                state_dim, action_dim, self.base_strategies, max_generated_strategies=5
+                config=generator_config, 
+                strategies=None # Generator will use its available_strategies_classes
             )
-            self.total_strategies = self.num_base_strategies + 5
+            # Max generated strategies needs to be managed by the generator itself or via config
+            self.max_generated_strategies = self.config.get('max_generated_strategies', 5) 
+            self.total_strategies = self.num_base_strategies + self.max_generated_strategies
         else:
+            self.dynamic_generator = None
+            self.max_generated_strategies = 0
             self.total_strategies = self.num_base_strategies
         
         # 動態計算權重網絡的隱藏層維度 - 自適應縮放
+        # These nn.Linear layers expect PyTorch tensors, but strategies now output pandas DataFrames.
+        # The forward pass will need significant changes to reconcile this.
+        # For now, keeping the layer definitions, but their inputs will be problematic.
         self.vol_hidden_dim = max(16, min(64, self.total_strategies))
         self.regime_hidden_dim = max(32, min(128, state_dim // 4))
         self.corr_hidden_dim = max(32, min(128, (state_dim + 1) // 4))
@@ -893,111 +449,322 @@ class EnhancedStrategySuperposition(nn.Module):
         
         return adapted_state, volatility.squeeze(-1)
     
-    def forward(self, state: torch.Tensor, volatility: torch.Tensor, 
-                market_regime: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def forward(self, market_data_dict: Dict[str, pd.DataFrame], 
+                portfolio_context: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
-        前向傳播：計算增強策略疊加輸出
-        支持動態維度適配
+        核心前向傳播邏輯，整合所有策略並計算最終行動建議
         
         Args:
-            state: 量子編碼的市場狀態
-            volatility: 市場波動率
-            market_regime: 市場環境指標
-            
+            market_data_dict: 包含各個交易對市場數據的字典，鍵為交易對名稱，值為Pandas DataFrame。
+                              DataFrame應包含 'close', 'volume', 'high', 'low' 等列。
+            portfolio_context: 包含投資組合當前狀態和上下文信息的字典。
+                               例如: {'cash': 10000, 'positions': {'EUR_USD': 100}, 
+                                     'market_regime': 'trending', 'overall_volatility': 0.02,
+                                     'risk_appetite': 'high'}
+
         Returns:
-            Tuple[疊加策略輸出, 詳細信息字典]
+            Tuple containing:
+            - final_action_distribution (torch.Tensor): 最終的行動分佈 (e.g., [batch_size, num_assets, num_actions])
+                                                        or a more abstract representation.
+            - strategy_weights (torch.Tensor): 各策略的計算權重 (e.g., [batch_size, total_strategies])
+            - diagnostic_info (Dict[str, Any]): 包含診斷信息的字典
         """
-        # 動態維度適配
-        state, volatility = self._validate_and_adapt_inputs(state, volatility)
-        batch_size = state.size(0)
+        batch_size = 1 # Assuming batch_size of 1 for now, as market_data_dict is not batched.
+                       # This needs to be generalized if batch processing is intended.
+
+        # 0. Prepare data for strategies
+        # Assuming all strategies operate on a common primary market data (e.g., a specific symbol or aggregated data)
+        # This is a simplification. In reality, each strategy might need different parts of market_data_dict
+        # or specific pre-processing.
+        # For now, let's assume strategies can handle the raw dict or we pick one primary symbol.
+        # Let's assume 'EUR_USD' is a primary symbol if available, otherwise the first one.
+        primary_symbol = next(iter(market_data_dict)) if market_data_dict else None
+        if not primary_symbol:
+            logger.error("Market data dictionary is empty. Cannot proceed.")
+            # Return dummy tensors of appropriate (though possibly incorrect) shape
+            # This part needs careful consideration for robust error handling
+            dummy_action = torch.zeros(batch_size, self.action_dim, device=DEVICE) 
+            dummy_weights = torch.zeros(batch_size, self.total_strategies, device=DEVICE)
+            return dummy_action, dummy_weights, {}
+
+        primary_market_data_df = market_data_dict[primary_symbol]
+
+        # 1. 執行所有基礎策略和動態生成策略
+        strategy_outputs_dfs: List[pd.DataFrame] = []
+        active_strategies_for_forward = list(self.base_strategies_instances)
+
+        # Handle dynamically generated strategies if enabled
+        if self.enable_dynamic_generation and self.dynamic_generator:
+            # This part is conceptual. Dynamic generation might happen less frequently
+            # or be triggered by specific conditions, not necessarily every forward pass.
+            # For now, let's assume we might have some pre-generated dynamic strategies.
+            # Or, if we want to generate one on the fly (less likely for every forward pass):
+            # new_dynamic_strategy = self.dynamic_generator.generate_new_strategy(primary_market_data_df, portfolio_context)
+            # if new_dynamic_strategy:
+            #     active_strategies_for_forward.append(new_dynamic_strategy)
+            # For simplicity, let's assume dynamic_generator.active_strategies_instances holds them
+            active_strategies_for_forward.extend(self.dynamic_generator.active_strategies_instances)
         
-        # 執行所有基礎策略
-        base_strategy_outputs = []
-        for strategy in self.base_strategies:
+        current_num_strategies = len(active_strategies_for_forward)
+        if current_num_strategies == 0:
+            logger.error("No active strategies available. Cannot proceed.")
+            dummy_action = torch.zeros(batch_size, self.action_dim, device=DEVICE)
+            dummy_weights = torch.zeros(batch_size, self.total_strategies, device=DEVICE) # total_strategies might be > 0
+            return dummy_action, dummy_weights, {}
+
+        for i, strategy_instance in enumerate(active_strategies_for_forward):
             try:
-                output = strategy(state)
-                base_strategy_outputs.append(output)
-            except RuntimeError as e:
-                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
-                    logger.warning(f"⚠️ 策略 {strategy.get_strategy_name()} 維度不匹配，使用自適應處理")
-                    # 嘗試自適應處理
-                    adapted_state = self._adaptive_dimension_handler(state, strategy.strategy_net[0].in_features, f"strategy_{strategy.get_strategy_name()}")
-                    output = strategy(adapted_state)
-                    base_strategy_outputs.append(output)
-                else:
-                    raise e
+                # Each strategy's forward method processes market_data and returns processed_data (pd.DataFrame)
+                # Then generate_signals uses this processed_data to output signals (pd.DataFrame)
+                # The signals DataFrame should ideally have a consistent format, e.g., a 'signal' column.
+                # For multi-asset strategies, it might have signals per asset.
+                
+                # Pass the full market_data_dict and portfolio_context to each strategy
+                processed_data = strategy_instance.forward(market_data_dict, portfolio_context)
+                signals_df = strategy_instance.generate_signals(processed_data, portfolio_context)
+                
+                # Ensure signals_df is not empty and has expected structure
+                if signals_df is None or signals_df.empty:
+                    logger.warning(f"Strategy {strategy_instance.get_strategy_name()} produced empty signals. Using zeros.")
+                    # Assuming signals are for the primary_symbol and a single 'signal' column
+                    # This needs to be robust: define expected output structure for strategies
+                    num_timesteps = len(primary_market_data_df) # Or a fixed lookback window
+                    signals_df = pd.DataFrame({'signal': np.zeros(num_timesteps)}, index=primary_market_data_df.index)
+
+                strategy_outputs_dfs.append(signals_df)
+
+            except Exception as e:
+                logger.error(f"Error executing strategy {strategy_instance.get_strategy_name()}: {e}", exc_info=True)
+                # Append a DataFrame of zeros or handle error appropriately
+                num_timesteps = len(primary_market_data_df)
+                error_signals_df = pd.DataFrame({'signal': np.zeros(num_timesteps)}, index=primary_market_data_df.index)
+                strategy_outputs_dfs.append(error_signals_df)
         
-        strategy_outputs = base_strategy_outputs.copy()
-        num_base_strategies = len(strategy_outputs)
+        # Pad with zero signals if current_num_strategies < self.total_strategies (due to dynamic part)
+        num_padding_strategies = self.total_strategies - current_num_strategies
+        if num_padding_strategies < 0: # Should not happen if total_strategies is correctly managed
+            logger.error(f"Current number of strategies ({current_num_strategies}) exceeds total_strategies ({self.total_strategies}). Truncating.")
+            strategy_outputs_dfs = strategy_outputs_dfs[:self.total_strategies]
+            current_num_strategies = self.total_strategies
+            num_padding_strategies = 0
+            
+        for _ in range(num_padding_strategies):
+            num_timesteps = len(primary_market_data_df)
+            padding_signals_df = pd.DataFrame({'signal': np.zeros(num_timesteps)}, index=primary_market_data_df.index)
+            strategy_outputs_dfs.append(padding_signals_df)
+
+        # 2. Convert strategy outputs (List[pd.DataFrame]) to a PyTorch tensor `strategy_tensor`
+        # Assumption: Each DataFrame in strategy_outputs_dfs contains a 'signal' column 
+        # for the primary_symbol, representing the strategy's output (e.g., -1, 0, 1).
+        # We'll take the latest signal from each strategy.
+        # Shape: [batch_size, total_strategies, num_features_per_strategy]
+        # For now, num_features_per_strategy = 1 (the signal itself)
         
-        # 動態策略生成
-        dynamic_fitness = None
-        if self.enable_dynamic_generation:
-            try:
-                dynamic_strategies, dynamic_fitness = self.dynamic_generator.generate_strategies(state)
-                strategy_outputs.extend(dynamic_strategies)
-            except RuntimeError as e:
-                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
-                    logger.warning("⚠️ 動態策略生成維度不匹配，使用自適應處理")
-                    adapted_state = self._adaptive_dimension_handler(state, self.dynamic_generator.state_dim, "dynamic_generator")
-                    dynamic_strategies, dynamic_fitness = self.dynamic_generator.generate极ategies(adapted_state)
-                    strategy_outputs.extend(dynamic_strategies)
-                else:
-                    raise e
-        
-        # 確保策略數量一致
-        if len(strategy_outputs) != self.total_strategies:
-            logger.warning(f"⚠️ 策略數量不一致: 實際 {len(strategy_outputs)} vs 預期 {self.total_strategies}")
-            # 調整策略輸出數量以匹配預期
-            if len(strategy_outputs) > self.total_strategies:
-                strategy_outputs = strategy_outputs[:self.total_strategies]
+        latest_signals = []
+        for df in strategy_outputs_dfs:
+            if not df.empty and 'signal' in df.columns:
+                latest_signals.append(df['signal'].iloc[-1] if not df['signal'].empty else 0.0)
             else:
-                # 添加空策略以補足數量
-                for i in range(self.total_strategies - len(strategy_outputs)):
-                    strategy_outputs.append(torch.zeros_like(strategy_outputs[0]))
+                logger.warning(f"Signal DataFrame is empty or missing 'signal' column. Appending 0.0.")
+                latest_signals.append(0.0)
         
-        # 堆疊所有策略輸出
-        strategy_tensor = torch.stack(strategy_outputs, dim=1)  # [batch, num_strategies, action_dim]
+        # Ensure latest_signals has self.total_strategies elements
+        if len(latest_signals) != self.total_strategies:
+            logger.error(f"Mismatch in number of signals ({len(latest_signals)}) and total_strategies ({self.total_strategies}). This indicates an issue in padding or strategy execution.")
+            # Fallback: pad or truncate latest_signals to match self.total_strategies
+            if len(latest_signals) < self.total_strategies:
+                latest_signals.extend([0.0] * (self.total_strategies - len(latest_signals)))
+            else:
+                latest_signals = latest_signals[:self.total_strategies]
+
+        strategy_tensor = torch.tensor(latest_signals, dtype=torch.float32, device=DEVICE).unsqueeze(0) # [1, total_strategies]
+        strategy_tensor = strategy_tensor.unsqueeze(-1) # [1, total_strategies, 1] (feature_dim=1)
+
+        # 3. Derive `state_features_for_weighting` from market_data_dict and portfolio_context
+        # Shape: [batch_size, self.state_dim]
+        # This is a placeholder. Actual feature engineering will be more complex.
+        # Example: use 'close' price of primary_symbol, and some portfolio context.
+        if self.state_dim > 0:
+            # Example features: latest price, moving average, portfolio cash
+            # These features must match what the weighting networks were trained on or expect.
+            # This part is highly dependent on the definition of `state_dim`
+            
+            # Placeholder: Use last N closing prices of the primary symbol, padded/truncated to fit state_dim
+            # This is a very naive approach and needs proper design.
+            lookback_for_state = self.state_dim 
+            if primary_market_data_df is not None and 'close' in primary_market_data_df.columns:
+                close_prices = primary_market_data_df['close'].values
+                if len(close_prices) >= lookback_for_state:
+                    state_features_raw = close_prices[-lookback_for_state:]
+                else: # Pad if not enough data
+                    state_features_raw = np.pad(close_prices, (lookback_for_state - len(close_prices), 0), 'edge')
+            else: # Fallback if no market data
+                state_features_raw = np.zeros(lookback_for_state)
+
+            state_features_for_weighting = torch.tensor(state_features_raw, dtype=torch.float32, device=DEVICE).unsqueeze(0) # [1, state_dim]
+            
+            # Ensure the dimension matches self.state_dim exactly
+            if state_features_for_weighting.shape[1] != self.state_dim:
+                logger.warning(f"Constructed state_features_for_weighting shape {state_features_for_weighting.shape} does not match self.state_dim {self.state_dim}. Adjusting/Padding.")
+                if state_features_for_weighting.shape[1] < self.state_dim:
+                    padding = torch.zeros(batch_size, self.state_dim - state_features_for_weighting.shape[1], device=DEVICE)
+                    state_features_for_weighting = torch.cat((state_features_for_weighting, padding), dim=1)
+                else:
+                    state_features_for_weighting = state_features_for_weighting[:, :self.state_dim]
+        else: # No state features if state_dim is 0
+             state_features_for_weighting = torch.empty(batch_size, 0, device=DEVICE)
+
+
+        # 4. Derive `volatility_for_weighting` (e.g., from portfolio_context or market_data)
+        # Shape: [batch_size, 1]
+        # Placeholder: Use overall_volatility from portfolio_context if available, else calculate from primary_market_data
+        if 'overall_volatility' in portfolio_context:
+            volatility_value = float(portfolio_context['overall_volatility'])
+        elif primary_market_data_df is not None and 'close' in primary_market_data_df.columns and len(primary_market_data_df['close']) > 1:
+            # Calculate simple volatility (e.g., std of log returns over a short window)
+            log_returns = np.log(primary_market_data_df['close'] / primary_market_data_df['close'].shift(1)).dropna()
+            if len(log_returns) > 1:
+                volatility_value = float(log_returns.std())
+            else:
+                volatility_value = 0.01 # Default small volatility
+        else:
+            volatility_value = 0.01 # Default small volatility
+            
+        volatility_for_weighting = torch.tensor([[volatility_value]], dtype=torch.float32, device=DEVICE) # [1, 1]
+
+        # 5. 計算策略權重 (Unchanged from original logic, but inputs are now derived)
+        # Ensure inputs to networks have correct batch_size if it's > 1 in the future.
+        # For now, batch_size is 1.
         
-        # 計算多層次權重 - 使用動態適配
-        vol_weights = self.weight_networks['volatility_net'](volatility.unsqueeze(-1))
-        regime_weights = self.weight_networks['regime_net'](state)
-        corr_input = torch.cat([state, volatility.unsqueeze(-1)], dim=-1)
-        corr_weights = self.weight_networks['correlation_net'](corr_input)
+        weights_vol = self.weight_networks['volatility_net'](volatility_for_weighting) # Input: [1,1], Output: [1, total_strategies]
         
-        # 量子振幅正規化
-        quantum_amps = F.softmax(self.quantum_amplitudes, dim=0)
+        weights_regime = torch.zeros(batch_size, self.total_strategies, device=DEVICE)
+        if self.state_dim > 0 :
+            weights_regime = self.weight_networks['regime_net'](state_features_for_weighting) # Input: [1, state_dim], Output: [1, total_strategies]
+        else: # If state_dim is 0, regime_net might not be meaningful or should be handled differently
+            weights_regime = torch.ones(batch_size, self.total_strategies, device=DEVICE) / self.total_strategies # Equal weights
+
+        # For correlation_net, input is state_features + volatility
+        if self.state_dim > 0:
+            corr_net_input = torch.cat([state_features_for_weighting, volatility_for_weighting], dim=1) # [1, state_dim + 1]
+        else: # If state_dim is 0, only use volatility
+            corr_net_input = volatility_for_weighting # [1,1] - this might require correlation_net to adapt input size or a different handling
+            # Adjusting correlation_net input layer if state_dim is 0
+            # This is a runtime check; ideally, network structure is fixed at init.
+            # For now, let's assume correlation_net's first layer input dim was set considering this.
+            # If self.weight_networks['correlation_net'][0].in_features != corr_net_input.shape[1]:
+            #    logger.warning("Correlation net input dim mismatch due to state_dim=0. This might lead to errors.")
+            #    # A more robust solution would be to have a separate net or logic for state_dim=0
+            #    # Or ensure the Linear layer can handle it, which it can't directly if fixed.
+            #    # Fallback: use regime weights or equal weights if corr_net cannot run.
+            #    weights_corr = weights_regime 
+            pass # The nn.Linear will throw an error if input size is wrong.
+                 # This needs to be handled by ensuring state_dim + 1 (or 1 if state_dim=0) matches the Linear layer's in_features.
+                 # The __init__ already sets this up based on state_dim.
+                 # If state_dim is 0, then correlation_net's input is nn.Linear(1, self.corr_hidden_dim)
+
+        weights_corr = self.weight_networks['correlation_net'](corr_net_input) # Output: [1, total_strategies]
         
-        # 組合權重（考慮量子效應）
-        combined_weights = quantum_amps.unsqueeze(0) * vol_weights * regime_weights * corr_weights
-        combined_weights = F.softmax(combined_weights, dim=-1)
+        # 基礎權重組合
+        base_weights = (weights_vol + weights_regime + weights_corr) / 3.0
         
-        # 策略相互作用效應
-        interaction_effect = torch.matmul(combined_weights.unsqueeze(1), self.interaction_matrix).squeeze(1)
-        final_weights = combined_weights + self.entanglement_strength * interaction_effect
-        final_weights = F.softmax(final_weights, dim=-1)
+        # 應用量子振幅 (歸一化)
+        normalized_amplitudes = F.softmax(self.quantum_amplitudes, dim=0) # Ensure they sum to 1
+        weighted_amplitudes = base_weights * normalized_amplitudes.unsqueeze(0) # [1, total_strategies]
         
-        # 加權疊加策略輸出
-        superposition_output = torch.sum(
-            strategy_tensor * final_weights.unsqueeze(-1), dim=1
-        )
+        # 策略相互作用調整
+        # Ensure interaction_matrix is on the correct device
+        interaction_matrix_device = self.interaction_matrix.to(DEVICE)
+        interacted_weights = torch.matmul(weighted_amplitudes, interaction_matrix_device) # [1, total_strategies]
         
-        # 構建詳細信息
-        info_dict = {
-            'strategy_weights': final_weights,
-            'quantum_amplitudes': quantum_amps,
-            'vol_weights': vol_weights,
-            'regime_weights': regime_weights,
-            'corr_weights': corr_weights,
-            'num_active_strategies': torch.sum(final_weights > 0.01, dim=-1).float(),
-            'dimensions_info': self.get_dynamic_dimensions()
+        # 考慮策略歷史表現 (簡化版 - 可以擴展為更複雜的動態調整)
+        # Placeholder: current_performance should be calculated based on recent PnL or other metrics
+        # For now, let's assume a simple mechanism or skip if not fully designed.
+        # Example: if strategy_performance_history has recent returns, use them.
+        # This part needs more design for how performance is measured and incorporated.
+        # performance_adjustment = torch.tanh(self.strategy_performance_history.mean(dim=1)).unsqueeze(0) # [1, total_strategies]
+        # strategy_weights = F.softmax(interacted_weights + performance_adjustment * 0.1, dim=1) # Small adjustment
+        
+        strategy_weights = F.softmax(interacted_weights, dim=1) # [1, total_strategies]
+
+        # 量子糾纏效應 (簡化版)
+        # This is a conceptual step. How entanglement affects weights or actions needs clear definition.
+        # Example: slightly bias weights towards a 'consensus' or average.
+        # mean_weight = strategy_weights.mean(dim=1, keepdim=True)
+        # entanglement_effect = (mean_weight - strategy_weights) * self.entanglement_strength
+        # strategy_weights = F.softmax(strategy_weights + entanglement_effect, dim=1)
+
+        # 6. 組合策略輸出得到最終行動
+        # strategy_tensor is [batch_size, total_strategies, num_features_per_strategy]
+        # strategy_weights is [batch_size, total_strategies]
+        
+        # Reshape weights for broadcasting: [batch_size, total_strategies, 1]
+        weights_reshaped = strategy_weights.unsqueeze(-1)
+        
+        # Weighted sum of strategy outputs (signals)
+        # final_output_features is [batch_size, num_features_per_strategy]
+        final_output_features = (strategy_tensor * weights_reshaped).sum(dim=1)
+        
+        # Convert final_output_features to an action distribution.
+        # This is highly dependent on the nature of `action_dim` and what the agent is supposed to output.
+        # If action_dim represents [buy, hold, sell] probabilities for ONE asset:
+        #   And final_output_features is a single value (e.g. signal strength from -1 to 1)
+        #   We need a mapping layer or logic.
+        # If action_dim is for multiple assets, strategy_tensor should also be multi-asset.
+        
+        # Placeholder: Assuming final_output_features (shape [batch_size, 1]) is a raw signal strength.
+        # We need to map this to the defined self.action_dim.
+        # If action_dim is, for example, 3 (buy, hold, sell probabilities for one asset):
+        if self.action_dim == 3: # Example: Buy, Hold, Sell probabilities
+            # This is a very simplistic mapping and needs proper design
+            signal_strength = final_output_features[:, 0] # Assuming feature_dim was 1
+            
+            # Map signal_strength (-1 to 1) to probabilities
+            buy_prob = torch.sigmoid(signal_strength * 2.0) # Scaled to make it more responsive
+            sell_prob = torch.sigmoid(-signal_strength * 2.0)
+            hold_prob = 1.0 - (buy_prob + sell_prob) # This can be problematic if sum > 1
+            
+            # A better way for probabilities that sum to 1:
+            # Use softmax on logits derived from signal_strength
+            # e.g., logits for buy, hold, sell
+            buy_logit = signal_strength 
+            sell_logit = -signal_strength
+            hold_logit = torch.zeros_like(signal_strength) # Neutral for hold
+            
+            action_logits = torch.stack([buy_logit, hold_logit, sell_logit], dim=1) # [batch_size, 3]
+            final_action_distribution = F.softmax(action_logits, dim=1) # [batch_size, 3]
+        
+        elif self.action_dim == 1: # Example: Direct output of the signal as action
+            final_action_distribution = final_output_features # [batch_size, 1]
+        else:
+            # Default: if action_dim is different, create a zero tensor.
+            # This part MUST be implemented according to the specific meaning of action_dim.
+            logger.warning(f"Action_dim {self.action_dim} handling is not fully implemented. Returning zeros.")
+            final_action_distribution = torch.zeros(batch_size, self.action_dim, device=DEVICE)
+
+        # 7. 更新策略性能歷史 (簡化)
+        # This requires a measure of actual performance post-action, which is not available here.
+        # This should ideally be done in a separate update/learning step.
+        # For now, we can log the signals or a proxy.
+        # self.performance_index = (self.performance_index + 1) % self.strategy_performance_history.size(1)
+        # self.strategy_performance_history[:, self.performance_index] = strategy_tensor.squeeze().detach() # Log raw signals
+
+        diagnostic_info = {
+            "raw_strategy_signals": strategy_tensor.squeeze(0).detach().cpu().numpy().tolist() if strategy_tensor is not None else [],
+            "weights_volatility": weights_vol.squeeze(0).detach().cpu().numpy().tolist(),
+            "weights_regime": weights_regime.squeeze(0).detach().cpu().numpy().tolist(),
+            "weights_correlation": weights_corr.squeeze(0).detach().cpu().numpy().tolist(),
+            "base_combined_weights": base_weights.squeeze(0).detach().cpu().numpy().tolist(),
+            "quantum_amplitudes_normalized": normalized_amplitudes.detach().cpu().numpy().tolist(),
+            "interacted_weights": interacted_weights.squeeze(0).detach().cpu().numpy().tolist(),
+            "final_strategy_weights": strategy_weights.squeeze(0).detach().cpu().numpy().tolist(),
+            "state_features_input": state_features_for_weighting.squeeze(0).detach().cpu().numpy().tolist() if self.state_dim > 0 else "N/A",
+            "volatility_input": volatility_for_weighting.item(),
+            "final_output_features_before_action_mapping": final_output_features.squeeze(0).detach().cpu().numpy().tolist()
         }
         
-        if dynamic_fitness is not None:
-            info_dict['dynamic_fitness'] = dynamic_fitness
-        
-        return superposition_output, info_dict
-    
+        return final_action_distribution, strategy_weights, diagnostic_info
+
     def update_strategy_performance(self, performance_scores: torch.Tensor):
         """更新策略性能歷史"""
         current_idx = self.performance_index.item() % 100
@@ -1015,12 +782,12 @@ class EnhancedStrategySuperposition(nn.Module):
         recent_performance = self.strategy_performance_history[:, :min(100, self.performance_index.item())]
         
         return {
-            'num_strategies': len(self.base_strategies) + (5 if self.enable_dynamic_generation else 0),
+            'num_strategies': len(self.base_strategies_instances) + (5 if self.enable_dynamic_generation else 0),
             'avg_performance': recent_performance.mean(dim=-1),
             'performance_std': recent_performance.std(dim=-1),
             'best_strategy_idx': recent_performance.mean(dim=-1).argmax().item(),
             'worst_strategy_idx': recent_performance.mean(dim=-1).argmin().item(),
-            'strategy_names': [s.get_strategy_name() for s in self.base_strategies] + 
+            'strategy_names': [s.get_strategy_name() for s in self.base_strategies_instances] + 
                             ([f"Dynamic_{i}" for i in range(5)] if self.enable_dynamic_generation else []),
             'quantum_amplitude_distribution': F.softmax(self.quantum_amplitudes, dim=0),
             'entanglement_strength': self.entanglement_strength.item(),
@@ -1137,3 +904,16 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"動態策略生成器測試失敗: {e}")
         raise e
+
+# Placeholder for GeneticOptimizer and NeuralArchitectureSearch if they are to be defined in this file
+# class GeneticOptimizer:
+#     def __init__(self, ...):
+#         pass
+#     def evolve_strategy(self, ...):
+#         pass
+
+# class NeuralArchitectureSearch:
+#     def __init__(self, ...):
+#         pass
+#     def search_architecture(self, ...):
+#         pass

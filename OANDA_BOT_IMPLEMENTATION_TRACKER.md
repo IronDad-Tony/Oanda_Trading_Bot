@@ -53,26 +53,42 @@
         - **單元測試**: [x] 驗證不同時間尺度數據的融合結果。
         - **整合測試**: [x] 測試模型在處理多時間尺度輸入時的表現。
 
-- [ ] **整合市場狀態檢測**
+- [x] **整合市場狀態檢測**
     - [x] 開發用於檢測市場狀態（如趨勢、震盪）的模組。 (初步實現 GMMMarketStateDetector)
     - [x] 將此模組整合到 Transformer 模型中，以影響其決策。 <!-- MODIFIED -->
     - **測試**:
         - [x] **單元測試**: 驗證市場狀態檢測模組在不同市場數據下的準確性。 (已創建 `test_market_state_detector.py` 並加入初步測試架構, 所有測試已通過, 包括 EWM ATR 調整和 save/load 功能)
-        - [ ] **整合測試**: 觀察模型行為是否根據檢測到的市場狀態做出相應調整。
+        - [x] **整合測試**: 觀察模型行為是否根據檢測到的市場狀態做出相應調整。 (已在 `test_enhanced_models.py` 中添加 GMM 整合測試，包括成功案例和多種回退情境的驗證) <!-- MODIFIED -->
 
 ### 1.2 擴展量子策略層
-- [ ] **創建 `src/agent/enhanced_quantum_strategy_layer.py` 檔案**
-    - [ ] 根據藍圖定義 `DynamicStrategyGenerator` 類的基本結構。
+- [x] **創建 `src/agent/enhanced_quantum_strategy_layer.py` 檔案**
+    - [x] 根據藍圖定義 `DynamicStrategyGenerator` 類的基本結構。
     - **測試**:
-        - **單元測試**: 檔案可被 Python 解譯器成功導入。
+        - [x] **單元測試**: 檔案可被 Python 解譯器成功導入。
 
-- [ ] **實施 15+ 預定義策略**
-    - [ ] 趨勢策略 (動量、突破、趨勢跟隨、反轉)。
-    - [ ] 統計套利 (均值回歸、協整、統計配對、波動率套利)。
-    - [ ] 機器學習策略 (強化學習、深度學習預測、集成學習、遷移學習)。
-    - [ ] 風險管理策略 (動態對沖、風險平價、VaR控制、最大回撤控制)。
+- [x] **實施 15+ 預定義策略** <!-- MODIFIED -->
+    - [x] 趨勢策略 (動量、突破、趨勢跟隨、反轉) - *All strategies fully implemented.*
+    - [x] 統計套利 (均值回歸、協整、統計配對、波動率套利) - *All strategies fully implemented.*
+    - [x] 機器學習策略 (強化學習、深度學習預測、集成學習、遷移學習) - *All strategies fully implemented.*
+    - [x] 風險管理策略 (動態對沖、風險平價、VaR控制、最大回撤控制) - *All strategies fully implemented.*
+    - [x] **Refactor Strategy File Structure for Improved Organization:** <!-- MODIFIED -->
+        - [x] Move `BaseStrategy` to `src/agent/strategies/base_strategy.py`. <!-- MODIFIED -->
+        - [x] Create `src/agent/strategies/trend_strategies.py` and migrate relevant strategies. <!-- MODIFIED -->
+        - [x] Create `src/agent/strategies/statistical_arbitrage_strategies.py` and migrate relevant strategies. <!-- MODIFIED -->
+        - [x] Create `src/agent/strategies/ml_strategies.py` and migrate relevant strategies. <!-- MODIFIED -->
+        - [x] Create `src/agent/strategies/risk_management_strategies.py` and migrate relevant strategies. <!-- MODIFIED -->
+        - [x] Create `src/agent/strategies/other_strategies.py` and migrate relevant strategies. <!-- MODIFIED -->
+        - [x] Update imports in `src/agent/enhanced_quantum_strategy_layer.py` to reflect new strategy locations. <!-- MODIFIED -->
+        - [x] Ensure `src/agent/strategies/__init__.py` correctly exports all strategies for easy import. <!-- MODIFIED -->
+    - [x] **Implement Detailed Logic for All Refactored Strategies:** <!-- MODIFIED -->
+        - [x] Implement logic for strategies in `trend_strategies.py`. <!-- MODIFIED -->
+        - [x] Implement logic for strategies in `statistical_arbitrage_strategies.py`. <!-- MODIFIED -->
+        - [x] Implement logic for strategies in `ml_strategies.py`. <!-- MODIFIED -->
+        - [x] Implement logic for strategies in `risk_management_strategies.py`. <!-- MODIFIED -->
+        - [x] Implement logic for strategies in `other_strategies.py`. <!-- MODIFIED -->
+    - *Overall: All 28 predefined strategies have their logic fully implemented in their respective categorized files.* <!-- MODIFIED -->
     - **測試**:
-        - **單元測試**: 對每個策略進行單獨測試，驗證其在模擬數據上的邏輯正確性和預期行為。
+        - [x] **單元測試**: 對每個策略進行單獨測試，驗證其在模擬數據上的邏輯正確性和預期行為。 <!-- MODIFIED -->
 
 - [ ] **添加動態策略生成**
     - [ ] 在 `DynamicStrategyGenerator` 中實現 `generate_new_strategy` 方法。
@@ -151,7 +167,7 @@
 - [ ] **創建 `src/agent/strategy_innovation_engine.py` 檔案**
     - [ ] 定義 `StrategyInnovationEngine` 類的基本結構。
     - **測試**:
-        - **單元測試**: 檔案可導入，類可實例化。
+        - [ ] **單元測試**: 檔案可導入，類可實例化。
 
 - [ ] **基因算法策略進化**
     - [ ] 在引擎中整合或實現一個基因演算法模組，用於策略參數或結構的進化。
@@ -226,7 +242,7 @@
 ## 實施檢查清單 (檔案創建)
 
 - [x] `src/models/enhanced_transformer.py` (已存在，需實現內部組件)
-- [ ] `src/agent/enhanced_quantum_strategy_layer.py`
+- [x] `src/agent/enhanced_quantum_strategy_layer.py`
 - [ ] `src/environment/progressive_reward_system.py`
 - [ ] `src/agent/meta_learning_system.py`
 - [ ] `src/agent/strategy_innovation_engine.py`

@@ -21,6 +21,7 @@ import logging
 import pywt # Added for wavelet functionality
 import os # Added for os.path.exists
 from src.features.market_state_detector import GMMMarketStateDetector # Added for GMM integration
+from src.models.transformer_model import PositionalEncoding # Added import
 
 try:
     from src.common.logger_setup import logger
@@ -43,6 +44,66 @@ except ImportError:
     WAVELET_LEVELS = 3    
     WAVELET_NAME = 'db4'
 
+
+# Define LearnedPositionalEncoding if not available elsewhere
+class LearnedPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_len, d_model))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: [batch_size, seq_len, d_model] or [seq_len, batch_size, d_model] if batch_first=False
+        # Assuming batch_first=True for consistency with Transformer layers
+        # Or, more generally, ensure slicing is correct for the input shape.
+        # If x is [B, S, E], self.pos_embedding is [1, max_len, E]. We need [1, S, E].
+        # If x is [S, B, E], self.pos_embedding.transpose(0,1) is [max_len, 1, E]. We need [S, 1, E].
+        
+        # Assuming x is [B, S, E] (batch_first=True for nn.TransformerEncoderLayer)
+        # Or if the input to this module is already permuted to [S, B, E] as expected by some Transformer impls
+        
+        # Let's assume x is [Batch, SeqLen, EmbDim] as is common for batch_first=True
+        # Or, if it's [SeqLen, Batch, EmbDim], the addition still works due to broadcasting if seq_len matches.
+        # The nn.TransformerEncoderLayer by default expects [SeqLen, Batch, EmbDim].
+        # Our PositionalEncoding in transformer_model.py produces [1, max_len, d_model] and adds to x,
+        # assuming x is [batch_size, seq_len, d_model] and then slices pe as self.pe[:, :x.size(1)]
+        # which results in [1, seq_len, d_model] that broadcasts over batch_size.
+
+        # For LearnedPositionalEncoding, self.pos_embedding is [1, max_len, d_model]
+        # If x is [B, S, E], we need to add self.pos_embedding[:, :x.size(1), :]
+        # If x is [S, B, E], we need to add self.pos_embedding.squeeze(0)[:x.size(0), :].unsqueeze(1)
+        
+        # Given the context of EnhancedTransformer, x is likely [B*N, T, C] before Transformer layers,
+        # and then permuted to [T, B*N, C] for the nn.TransformerEncoder.
+        # Let's assume this PE is applied when x is [T, B*N, C] or [B*N, T, C] and handle accordingly.
+        # The PositionalEncoding in transformer_model.py is applied when x is [B, S, E] (batch_first=True like).
+
+        # If this PE is used like the sinusoidal one (applied to [B,S,E] or [S,B,E] and sliced):
+        if x.size(0) == self.pos_embedding.size(1) and len(x.shape) == 3 and x.size(2) == self.pos_embedding.size(2):
+            # x is likely [SeqLen, Batch, EmbDim]
+            x = x + self.pos_embedding.squeeze(0)[:x.size(0), :].unsqueeze(1)
+        elif x.size(1) == self.pos_embedding.size(1) and len(x.shape) == 3 and x.size(2) == self.pos_embedding.size(2):
+             # This case is unlikely if max_len is large and x.size(1) is the actual sequence length.
+             # More likely, x.size(1) is seq_len, and self.pos_embedding needs slicing.
+             x = x + self.pos_embedding[:, :x.size(1), :]
+        elif len(x.shape) == 3 and x.shape[1] <= self.pos_embedding.shape[1]: # Common case: x is [B, S, E]
+            x = x + self.pos_embedding[:, :x.shape[1], :]
+        elif len(x.shape) == 3 and x.shape[0] <= self.pos_embedding.shape[1]: # Common case: x is [S, B, E]
+             x = x + self.pos_embedding.squeeze(0)[:x.shape[0], :].unsqueeze(1)
+        else:
+            # Fallback or error, this indicates a shape mismatch not handled by simple slicing.
+            # This might happen if pe_seq_len used for PE init is different from actual seq_len at forward pass
+            # and the PE is not designed to handle dynamic seq len by just slicing (e.g. if it was [SeqLen, EmbDim])
+            logger.warning(f"LearnedPositionalEncoding shape mismatch: x.shape={x.shape}, pos_embedding.shape={self.pos_embedding.shape}. Ensure correct permutation and slicing.")
+            # Attempt a robust slice assuming x.size(1) is seq_len for [B,S,E] or x.size(0) for [S,B,E]
+            if len(x.shape) == 3:
+                if x.shape[1] <= self.pos_embedding.shape[1]: # [B, S, E]
+                    x = x + self.pos_embedding[:, :x.shape[1], :]
+                elif x.shape[0] <= self.pos_embedding.shape[1]: # [S, B, E]
+                    x = x + self.pos_embedding.squeeze(0)[:x.shape[0], :].unsqueeze(1)
+
+
+        return self.dropout(x)
 
 # --- Fourier Feature Block (from UniversalTradingTransformer) ---
 class SpectralConv1d(nn.Module):
@@ -483,9 +544,11 @@ class EnhancedTransformerLayer(nn.Module):
     """增強版Transformer層：集成自適應注意力和改進的FFN"""
     
     def __init__(self, d_model: int, num_heads: int, ffn_dim: int, 
-                 dropout: float = 0.1, use_adaptive_attention: bool = True, num_market_states: int = 4):
+                 dropout: float = 0.1, use_adaptive_attention: bool = True, num_market_states: int = 4,
+                 use_layer_norm_before: bool = True): # num_heads is the correct param name here
         super().__init__()
         self.use_adaptive_attention = use_adaptive_attention
+        self.use_layer_norm_before = use_layer_norm_before # Store the parameter
         
         # 自適應注意力層 or 標準多頭注意力
         if self.use_adaptive_attention:
@@ -547,3 +610,431 @@ class EnhancedTransformerLayer(nn.Module):
         # FFN子層
         ffn_input = self.norm2(attn_output) # If attn_output doesn't have residual, this norm is on raw attention.
         ffn_output = self.ffn(ffn_input)
+        
+        return ffn_output + x  # Residual connection with input x
+
+
+class EnhancedTransformer(nn.Module):
+    """
+    Enhanced Universal Trading Transformer
+    Integrates various advanced features like multi-scale feature extraction,
+    adaptive attention, cross-time-scale fusion, and GMM-based market state detection.
+    """
+    def __init__(self,
+                 input_dim: int,
+                 d_model: int,
+                 transformer_nhead: int, # Corrected from nhead
+                 num_encoder_layers: int, # Should be num_layers or similar, or handle encoder/decoder separately
+                 # num_decoder_layers: int, # Not typically used in this type of model structure unless it's seq2seq
+                 dim_feedforward: int,
+                 dropout: float,
+                 max_seq_len: int,
+                 num_symbols: Optional[int], # Max number of symbols model can handle
+                 output_dim: int,
+                 use_msfe: bool = True,
+                 msfe_hidden_dim: Optional[int] = None, # If None, defaults to d_model in MSFE
+                 msfe_scales: List[int] = [3, 5, 7, 11], # scales for MSFE
+                 # msfe_conv_layers: int = 2, # Not directly used by current MSFE, scales define convs
+                 # msfe_kernel_sizes: List[int] = [3,5], # Covered by msfe_scales
+                 # msfe_stride: int = 1, # MSFE uses fixed padding and stride in its convs
+                 use_final_norm: bool = True,
+                 use_adaptive_attention: bool = True,
+                 num_market_states: int = 4, # Default if GMM is not used or fails
+                 use_gmm_market_state_detector: bool = False,
+                 gmm_market_state_detector_path: Optional[str] = None,
+                 gmm_ohlcv_feature_config: Optional[Dict[str, Any]] = None,
+                 # gmm_fitting_data_path: Optional[str] = None, # Not used by model directly, but by GMM training
+                 use_cts_fusion: bool = False, # CrossTimeScaleFusion
+                 cts_time_scales: Optional[List[int]] = None, # e.g., [5, 10, 20]
+                 cts_fusion_type: str = "attention", # "attention", "concat", "average"
+                 use_symbol_embedding: bool = True,
+                 symbol_embedding_dim: int = 16,
+                 use_fourier_features: bool = False,
+                 fourier_num_modes: int = FOURIER_NUM_MODES, # from config or default
+                 # fourier_trainable: bool = False, # SpectralConv1d weights are always trainable
+                 use_wavelet_features: bool = False,
+                 wavelet_name: str = WAVELET_NAME, # from config or default
+                 wavelet_levels: int = WAVELET_LEVELS, # from config or default
+                 trainable_wavelet_filters: bool = False, # DWT1D trainable_filters
+                 # adaptive_attention_dim_reduction_factor: int = 4, # Used internally by AdaptiveAttentionLayer
+                 # adaptive_attention_activation: str = "softmax", # Used internally by AdaptiveAttentionLayer
+                 use_layer_norm_before: bool = True, # For pre-norm architecture in Transformer layers
+                 # use_residual_in_msfe: bool = True, # MSFE has its own residual logic
+                 output_activation: Optional[str] = None, # e.g. "softmax", "sigmoid", None
+                 positional_encoding_type: str = "sinusoidal", # "sinusoidal", "learned"
+                 # num_layers: int, # This should be num_encoder_layers for clarity
+                 device: str = DEVICE
+                ):
+        super().__init__()
+        self.device = device
+        self.d_model = d_model
+        self.max_seq_len = max_seq_len
+        self.num_symbols = num_symbols
+        self.output_dim = output_dim
+        self.input_dim = input_dim
+        self.transformer_nhead = transformer_nhead
+
+        self.use_symbol_embedding = use_symbol_embedding # Correctly assigned
+        self.use_msfe = use_msfe
+        self.use_adaptive_attention = use_adaptive_attention
+        self.use_gmm_market_state_detector = use_gmm_market_state_detector
+        self.use_cts_fusion = use_cts_fusion
+        self.use_fourier_features = use_fourier_features
+        self.use_wavelet_features = use_wavelet_features
+        self.positional_encoding_type = positional_encoding_type
+        
+        # Initialize num_market_states with the config value. It might be overridden by GMM.
+        self.num_market_states = num_market_states
+        self.gmm_detector: Optional[GMMMarketStateDetector] = None
+        self.gmm_ohlcv_feature_config = gmm_ohlcv_feature_config
+
+        if self.use_gmm_market_state_detector:
+            if gmm_market_state_detector_path and os.path.exists(gmm_market_state_detector_path):
+                try:
+                    self.gmm_detector = GMMMarketStateDetector.load_model(gmm_market_state_detector_path)
+                    if self.gmm_detector and self.gmm_detector.fitted: # Changed .is_fitted() to .fitted
+                        logger.info(f"Successfully loaded fitted GMMMarketStateDetector from {gmm_market_state_detector_path}.")
+                        self.num_market_states = self.gmm_detector.n_states # Override
+                        logger.info(f"Updated num_market_states to {self.num_market_states} based on loaded GMM.")
+                    else:
+                        logger.warning(f"Loaded GMM model from {gmm_market_state_detector_path} is not fitted. Will use configured num_market_states: {self.num_market_states}.")
+                        self.gmm_detector = None # Set to None if not fitted
+                except Exception as e:
+                    logger.error(f"Failed to load GMMMarketStateDetector from {gmm_market_state_detector_path}: {e}. Will use configured num_market_states: {self.num_market_states}.")
+                    self.gmm_detector = None
+            else:
+                logger.warning(f"GMMMarketStateDetector path '{gmm_market_state_detector_path}' not found or not provided, but use_gmm_market_state_detector is True. Will use configured num_market_states: {self.num_market_states}.")
+
+        # --- Input Processing Chain ---
+        # 1. MSFE (optional)
+        if self.use_msfe:
+            msfe_eff_hidden_dim = msfe_hidden_dim if msfe_hidden_dim is not None else d_model
+            self.msfe = MultiScaleFeatureExtractor(
+                input_dim=input_dim,
+                hidden_dim=msfe_eff_hidden_dim,
+                scales=msfe_scales
+            )
+            current_transformer_input_dim = msfe_eff_hidden_dim
+        else:
+            self.msfe = None
+            current_transformer_input_dim = input_dim
+
+        # 2. Input Projection (if MSFE not used or its output dim doesn't match d_model)
+        if current_transformer_input_dim != d_model:
+            self.input_proj = nn.Linear(current_transformer_input_dim, d_model)
+        else:
+            self.input_proj = nn.Identity()
+        
+        # --- Symbol Embedding ---
+        if self.use_symbol_embedding:
+            effective_num_symbols = self.num_symbols if self.num_symbols is not None else MAX_SYMBOLS_ALLOWED
+            self.symbol_embed = nn.Embedding(effective_num_symbols + 1, symbol_embedding_dim, padding_idx=0)
+            # Projection for symbol embedding if its dim is not d_model (or a portion of it)
+            # Current assumption: symbol embedding is added to the feature embedding.
+            if symbol_embedding_dim != d_model:
+                self.symbol_embed_proj = nn.Linear(symbol_embedding_dim, d_model)
+            else:
+                self.symbol_embed_proj = nn.Identity()
+            # Optional: Symbol-specific positional embedding (distinct from temporal)
+            # self.symbol_pos_embed = nn.Embedding(effective_num_symbols + 1, d_model, padding_idx=0) 
+        else:
+            self.symbol_embed = None
+            self.symbol_embed_proj = None
+            # self.symbol_pos_embed = None
+
+        # --- Positional Encoding ---
+        # Note: MSFE output seq_len might differ from input_seq_len due to adaptive pooling.
+        # Positional encoding should ideally be applied to the sequence length *entering* the Transformer layers.
+        # If MSFE is used, its output seq_len is TIMESTEPS // 2 (by default).
+        # If MSFE is not used, it's max_seq_len.
+        # For now, assume max_seq_len for PE, but this might need adjustment based on MSFE\'s effect.
+        pe_seq_len = TIMESTEPS // 2 if use_msfe else max_seq_len
+
+        if self.positional_encoding_type == "sinusoidal":
+            self.pos_encoder = PositionalEncoding(d_model, dropout, pe_seq_len)
+            self.pos_embed = None # Ensure pos_embed is None if not learned
+        elif self.positional_encoding_type == "learned":
+            self.pos_embed = LearnedPositionalEncoding(d_model, dropout, pe_seq_len) # Correctly assign to self.pos_embed
+            self.pos_encoder = self.pos_embed # Use self.pos_embed as the encoder
+        else: # None or other
+            self.pos_encoder = nn.Identity()
+            self.pos_embed = None # Ensure pos_embed is None
+
+
+        # --- Feature Blocks (Fourier, Wavelet) applied after projection to d_model ---
+        self.fourier_block = FourierFeatureBlock(d_model, fourier_num_modes) if use_fourier_features else None
+        self.wavelet_block = MultiLevelWaveletBlock(d_model, wavelet_name, wavelet_levels, trainable_wavelet_filters) if use_wavelet_features else None
+        
+        # --- Transformer Layers ---
+        # num_encoder_layers is the parameter defining the number of transformer blocks
+        self.transformer_layers = nn.ModuleList([
+            EnhancedTransformerLayer(
+                d_model=d_model,
+                num_heads=transformer_nhead, # Use the passed transformer_nhead
+                ffn_dim=dim_feedforward,
+                dropout=dropout,
+                use_adaptive_attention=self.use_adaptive_attention,
+                num_market_states=self.num_market_states, # This will be from GMM or config
+                # adaptive_dim_reduction_factor, adaptive_activation are internal to AdaptiveAttentionLayer
+                use_layer_norm_before=use_layer_norm_before
+            ) for _ in range(num_encoder_layers) # Use num_encoder_layers
+        ])
+
+        # --- Output Processing ---
+        self.final_norm = nn.LayerNorm(d_model) if use_final_norm else nn.Identity()
+        self.output_projection = nn.Linear(d_model, output_dim)
+        
+        if output_activation == "softmax":
+            self.output_activation_fn = nn.Softmax(dim=-1)
+        elif output_activation == "sigmoid":
+            self.output_activation_fn = nn.Sigmoid()
+        else:
+            self.output_activation_fn = nn.Identity()
+            
+        self.dropout_layer = nn.Dropout(dropout) # General dropout layer
+
+    def _generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
+        """生成自回歸任務所需的方形後續遮罩"""
+        mask = (torch.triu(torch.ones(sz, sz), diagonal=1) == 1).transpose(0, 1)
+        return mask
+
+    def _extract_ohlcv_for_gmm(self, raw_ohlcv_src: torch.Tensor) -> torch.Tensor:
+        if not self.ohlcv_feature_index_in_src:
+            raise ValueError("ohlcv_feature_index_in_src is not defined for GMM.")
+        gmm_expected_order = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']
+        indices = []
+        for key in gmm_expected_order:
+            if key not in self.ohlcv_feature_index_in_src:
+                 raise ValueError(f"Missing OHLCV key for GMM: {key}. Required: {gmm_expected_order}")
+            indices.append(self.ohlcv_feature_index_in_src[key])
+        return raw_ohlcv_src[..., indices]
+
+    def forward(self, x_dict: Dict[str, Optional[torch.Tensor]]) -> torch.Tensor:
+        """
+        Args:
+            x_dict: Dictionary containing input tensors:
+                \"src\": [batch_size, num_active_symbols, seq_len, input_dim] - Main input features.
+                \"symbol_ids\": Optional[torch.Tensor] - [batch_size, num_active_symbols] - Symbol identifiers for embedding.
+                \"src_key_padding_mask\": Optional[torch.Tensor] - [batch_size, num_active_symbols] - Mask for padded symbols.
+                                         True indicates a padded symbol that should be ignored.
+                \"raw_ohlcv_data_batch\": Optional[List[pd.DataFrame]] - Batch of raw OHLCV data for GMM.
+                                          Each DataFrame should have OHLCV columns and a DatetimeIndex.
+                                          Length of list is batch_size. Each df is [seq_len, num_features_ohlcv].
+        Returns:
+            Output tensor: [batch_size, num_active_symbols, output_dim]
+        """
+        src = x_dict["src"]
+        symbol_ids = x_dict.get("symbol_ids")
+        # src_key_padding_mask is for symbols, not time steps.
+        # It indicates which symbols in the num_active_symbols dimension are padding.
+        symbol_padding_mask = x_dict.get("src_key_padding_mask") 
+        raw_ohlcv_data_batch = x_dict.get("raw_ohlcv_data_batch")
+
+        batch_size, num_active_symbols, seq_len, _ = src.shape
+        
+        # Reshape for processing: [B * N, S, C_in]
+        x = src.reshape(batch_size * num_active_symbols, seq_len, self.input_dim)
+
+        # --- GMM Market State Detection (early, if used) ---
+        # GMM state can influence other parts like adaptive attention
+        # The GMM detector expects a list of DataFrames (one per batch item)
+        # If we have B*N items, we need to decide how to pass this.
+        # Assuming GMM state is per-symbol, we might need to run GMM N times per batch item,
+        # or adapt GMM to handle batch of symbols.
+        # For now, if raw_ohlcv_data_batch is provided, it's List[DataFrame] of length B.
+        # We need to expand or select for B*N.
+        # Let's assume for now GMM state is calculated per batch item (averaging over symbols if needed by GMM internally)
+        # or that raw_ohlcv_data_batch is already structured for B*N if GMM is symbol-specific.
+        # The current GMMMarketStateDetector takes a list of DFs.
+        
+        external_market_state_probs_for_transformer = None # [B*N, num_market_states]
+        if self.use_gmm_market_state_detector and self.gmm_detector and raw_ohlcv_data_batch:
+            if len(raw_ohlcv_data_batch) == batch_size: # We have B dataframes
+                # We need to get states for B*N. We can repeat the states for each symbol within a batch item.
+                gmm_states_list_batch = [] # List of [num_market_states] tensors
+                for i in range(batch_size):
+                    # GMM expects a single DataFrame for predict_proba_for_sequence
+                    # If raw_ohlcv_data_batch[i] is a list of DFs for symbols, this needs adjustment.
+                    # Assuming raw_ohlcv_data_batch[i] is one DF for that batch item.
+                    # The GMMMarketStateDetector._calculate_features needs a DataFrame.
+                    # And predict_proba_for_sequence expects a pre-calculated feature tensor.
+                    
+                    # Let's assume gmm_detector.predict_proba_for_batch_sequences can take List[pd.DataFrame]
+                    # and returns something like [B, num_market_states] or [B, T, num_market_states]
+                    # For now, let's assume we get one state vector per batch item.
+                    # This is a simplification. A more robust way would be to get per-symbol states if GMM supports it,
+                    # or pass the raw_ohlcv_data_batch appropriately if it's already per-symbol.
+
+                    # The GMMMarketStateDetector.predict_proba_for_batch_sequences is not defined.
+                    # Let's use predict_proba_for_sequence if we assume one GMM state per batch item.
+                    # This requires calculating features first.
+                    try:
+                        # Ensure gmm_ohlcv_feature_config is available
+                        if not self.gmm_ohlcv_feature_config:
+                            logger.warning("gmm_ohlcv_feature_config is None, cannot calculate GMM features.")
+                            gmm_features_df = None
+                        else:
+                            # The GMMMarketStateDetector instance (self.gmm_detector) uses its own
+                            # self.feature_config, which should be set up during its initialization
+                            # or when the EnhancedTransformer loads/configures it.
+                            # Thus, we don't need to pass 'config' argument here.
+                            gmm_features_df = self.gmm_detector._calculate_features(raw_ohlcv_data_batch[i])
+                        
+                        if gmm_features_df is not None and not gmm_features_df.empty:
+                            # predict_proba_for_sequence expects features for a single sequence
+                            # It returns [n_samples, n_components] where n_samples is num timesteps
+                            # We need one state vector, so we average probabilities over time
+                            gmm_state_probs_seq = self.gmm_detector.predict_proba_for_sequence(gmm_features_df) # [T, num_market_states]
+                            gmm_state_probs_item = torch.tensor(gmm_state_probs_seq, dtype=torch.float, device=self.device).mean(dim=0) # [num_market_states]
+                            gmm_states_list_batch.append(gmm_state_probs_item)
+                        else:
+                            # Handle case where features could not be calculated (e.g., insufficient data)
+                            # Fallback to a uniform distribution or zeros, or let AdaptiveAttention handle it
+                            logger.warning(f"Could not calculate GMM features for batch item {i}. Market state might be unreliable.")
+                            # Using a uniform distribution as a fallback for this item
+                            uniform_probs = torch.ones(self.num_market_states, device=self.device) / self.num_market_states
+                            gmm_states_list_batch.append(uniform_probs)
+
+                    except Exception as e:
+                        logger.error(f"Error during GMM state calculation for batch item {i}: {e}")
+                        uniform_probs = torch.ones(self.num_market_states, device=self.device) / self.num_market_states
+                        gmm_states_list_batch.append(uniform_probs)
+
+
+                if gmm_states_list_batch:
+                    batch_gmm_states = torch.stack(gmm_states_list_batch) # [B, num_market_states]
+                    # Expand for B*N for transformer layers
+                    external_market_state_probs_for_transformer = batch_gmm_states.unsqueeze(1).repeat(1, num_active_symbols, 1)
+                    external_market_state_probs_for_transformer = external_market_state_probs_for_transformer.reshape(batch_size * num_active_symbols, self.num_market_states)
+                else: # No GMM states could be computed
+                    external_market_state_probs_for_transformer = None # Let AdaptiveAttention use its internal one
+
+            else:
+                logger.warning(f"raw_ohlcv_data_batch length ({len(raw_ohlcv_data_batch)}) does not match batch_size ({batch_size}). Skipping GMM state usage.")
+                external_market_state_probs_for_transformer = None
+        else: # GMM not used or detector not loaded or no raw data
+            external_market_state_probs_for_transformer = None
+
+
+        # --- Feature Processing Chain ---
+        # 1. MultiScaleFeatureExtractor (optional)
+        if self.msfe is not None:
+            x = self.msfe(x) # Output: [B*N, pooled_seq_len, msfe_hidden_dim]
+            # Update seq_len if MSFE changed it (due to pooling)
+            seq_len = x.size(1) 
+        # 2. Input Projection (to d_model)
+        x = self.input_proj(x) # Output: [B*N, seq_len, d_model]
+
+        # 3. Add Symbol Embedding (if used)
+        if self.use_symbol_embedding and symbol_ids is not None:
+            # symbol_ids: [B, N_active] -> needs to be [B*N_active]
+            symbol_ids_flat = symbol_ids.reshape(batch_size * num_active_symbols)
+            sym_embeds = self.symbol_embed(symbol_ids_flat) # [B*N, symbol_embedding_dim]
+            sym_embeds_proj = self.symbol_embed_proj(sym_embeds) # [B*N, d_model]
+            # Add to each time step of x: unsqueeze to [B*N, 1, d_model] and broadcast
+            x = x + sym_embeds_proj.unsqueeze(1)
+
+        # 4. Add Positional Encoding
+        # self.pos_encoder is either Sinusoidal or Learned or Identity
+        if self.positional_encoding_type == 'learned' and self.pos_embed is not None:
+            # LearnedPositionalEncoding expects [B*N, S, E] or [S, B*N, E]
+            # If self.pos_embed is an instance of LearnedPositionalEncoding
+            x = self.pos_embed(x) # Assuming LearnedPositionalEncoding handles [B*N, S, E]
+        elif self.positional_encoding_type == 'sinusoidal' and self.pos_encoder is not None and not isinstance(self.pos_encoder, nn.Identity):
+            # Sinusoidal PositionalEncoding from transformer_model.py expects [B*N, S, E]
+            # and its self.pe is [1, max_len, d_model]
+             x = self.pos_encoder(x) # This should correctly add PE
+        # If self.pos_encoder is nn.Identity, nothing happens.
+
+
+        # 5. Fourier Features (optional)
+        if self.fourier_block is not None:
+            x_fourier = self.fourier_block(x)
+            x = x + x_fourier # Additive features
+
+        # 6. Wavelet Features (optional)
+        if self.wavelet_block is not None:
+            x_wavelet = self.wavelet_block(x)
+            x = x + x_wavelet # Additive features
+            
+        x = self.dropout_layer(x) # Apply dropout after all feature engineering and embeddings
+
+        # --- Transformer Encoder Layers ---
+        # Transformer layers expect [SeqLen, Batch, EmbDim] if batch_first=False (default for nn.TransformerEncoderLayer)
+        # Or [Batch, SeqLen, EmbDim] if batch_first=True (which our EnhancedTransformerLayer uses)
+        
+        # Create key_padding_mask for transformer layers if symbol_padding_mask is provided.
+        # symbol_padding_mask is [B, N_active]. True for padded.
+        # Transformer MHA expects key_padding_mask as [B*N_active, SeqLen_target] if applied to Q K V of [B*N, S, E]
+        # Or, if it's per-item padding, it should be [B*N_active].
+        # The nn.MultiheadAttention key_padding_mask should be [Batch, KeySeqLen].
+        # In our case, Batch is B*N, KeySeqLen is seq_len (temporal).
+        # The symbol_padding_mask refers to which of the N symbols are padding, not time steps.
+        # This mask is primarily for the final output aggregation, not for the temporal attention within each symbol's sequence.
+        # However, if a symbol is entirely padding, its whole sequence could be masked.
+        
+        # For EnhancedTransformerLayer, key_padding_mask is for the temporal sequence.
+        # We don't have a temporal key padding mask from input by default.
+        # If symbol_padding_mask means the entire symbol's data is padding, then all its time steps are effectively masked.
+        # This is handled by zeroing out the final output for padded symbols.
+        # The internal MHA in EnhancedTransformerLayer might need a temporal mask if sequences have variable actual lengths.
+        # For now, assuming all sequences for active symbols have length `seq_len`.
+
+        temporal_key_padding_mask = None # Placeholder, unless we derive it
+
+        for layer in self.transformer_layers:
+            x = layer(x, 
+                      key_padding_mask=temporal_key_padding_mask, 
+                      external_market_state_probs=external_market_state_probs_for_transformer)
+            
+        # --- Output Processing ---
+        x = self.final_norm(x) # [B*N, seq_len, d_model]
+        
+        # Aggregate over sequence dimension (e.g., take the last time step or average)
+        # Taking the last time step's output for prediction
+        x_agg = x[:, -1, :] # [B*N, d_model]
+        
+        output = self.output_projection(x_agg) # [B*N, output_dim]
+        output = self.output_activation_fn(output)
+        
+        # Reshape back to [B, N, output_dim]
+        output = output.reshape(batch_size, num_active_symbols, self.output_dim)
+        
+        # Apply symbol padding mask to zero out outputs for padded symbols
+        if symbol_padding_mask is not None:
+            # symbol_padding_mask is [B, N_active], True for padded.
+            # Unsqueeze to make it [B, N_active, 1] to broadcast over output_dim
+            mask_expanded = symbol_padding_mask.unsqueeze(-1).expand_as(output)
+            output = output.masked_fill(mask_expanded, 0.0)
+            
+        return output
+
+    def get_dynamic_config(self) -> Dict[str, Any]:
+        config = {
+            "d_model": self.d_model,
+            "num_layers": len(self.transformer_layers),
+            "num_heads": self.transformer_layers[0].attention_layer.num_heads,
+            "ffn_dim": self.transformer_layers[0].ffn[0].out_features,
+            "output_dim": self.output_projection.out_features,
+            "max_seq_len": self.max_seq_len,
+            "num_symbols_possible": self.num_symbols_possible,
+            "use_symbol_embedding": self.use_symbol_embedding,
+            "use_msfe": self.use_msfe,
+            "use_cts_fusion": self.use_cts_fusion,
+            "use_fourier_features": self.use_fourier_features,
+            "use_wavelet_features": self.use_wavelet_features,
+            "gmm_model_path": self.gmm_model_path,
+            "num_market_states_from_gmm": self.num_market_states_from_gmm,
+            "ohlcv_feature_index_in_src": self.ohlcv_feature_index_in_src is not None,
+        }
+        if self.use_msfe and hasattr(self, 'msfe'):
+            config['msfe_scales'] = self.msfe.scales
+            config['msfe_output_seq_len'] = self.msfe_output_seq_len
+        if self.use_fourier_features and hasattr(self, 'fourier_block'):
+            config['fourier_num_modes'] = self.fourier_block.spectral_conv.num_modes
+        if self.use_wavelet_features and hasattr(self, 'wavelet_block'):
+            config['wavelet_name'] = self.wavelet_block.dwt_layers[0].wavelet.name
+            config['wavelet_levels'] = self.wavelet_block.levels
+        return config
+
+# Ensure this class is defined after all its dependencies like EnhancedTransformerLayer, etc.

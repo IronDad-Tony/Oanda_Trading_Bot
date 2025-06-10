@@ -4,6 +4,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 import warnings
 import joblib # Added for saving/loading model
+from typing import Union, List
 
 class GMMMarketStateDetector:
     def __init__(self, n_states=3, gmm_config=None, feature_config=None, random_state=None):
@@ -61,7 +62,7 @@ class GMMMarketStateDetector:
                     raise ValueError(f"ohlcv_data must contain '{col}' column.")
 
         features = pd.DataFrame(index=ohlcv_data.index)
-        safe_close = ohlcv_data['Close'].replace(0, np.nan).ffill().bfill()
+        safe_close = ohlcv_data['Close'].replace(0, np.nan).bfill().ffill()
         
         features['log_return'] = np.log(safe_close / safe_close.shift(1))
         
@@ -106,27 +107,53 @@ class GMMMarketStateDetector:
         return features.replace([np.inf, -np.inf], np.nan).dropna()
 
 
-    def fit(self, ohlcv_data_history: pd.DataFrame):
+    def fit(self, ohlcv_data_history: Union[pd.DataFrame, List[pd.DataFrame]]):
         """
         Trains the GMM model on historical data.
         Args:
-            ohlcv_data_history (pd.DataFrame): Historical OHLCV data for training.
+            ohlcv_data_history (Union[pd.DataFrame, List[pd.DataFrame]]): 
+                Historical OHLCV data for training. Can be a single DataFrame
+                or a list of DataFrames (e.g., for multiple symbols or periods).
         """
         self.fitted = False # Reset fitted status
         self.scaler = None  # Reset scaler
 
-        features_history = self._calculate_features(ohlcv_data_history)
+        all_features_list = []
+        if isinstance(ohlcv_data_history, pd.DataFrame):
+            features = self._calculate_features(ohlcv_data_history)
+            if not features.empty:
+                all_features_list.append(features)
+        elif isinstance(ohlcv_data_history, list):
+            for df in ohlcv_data_history:
+                if not isinstance(df, pd.DataFrame):
+                    warnings.warn(f"Item in ohlcv_data_history is not a DataFrame. Skipping. Type: {type(df)}", UserWarning)
+                    continue
+                features = self._calculate_features(df)
+                if not features.empty:
+                    all_features_list.append(features)
+        else:
+            raise ValueError("ohlcv_data_history must be a pandas DataFrame or a list of pandas DataFrames.")
+
+        if not all_features_list:
+            warnings.warn("No features could be calculated from the provided ohlcv_data_history. GMM not trained.", UserWarning)
+            return
+            
+        features_history_df = pd.concat(all_features_list, ignore_index=True)
         
-        if features_history.empty or len(features_history) < self.n_states:
-            warnings.warn(f"Not enough data or features to train GMM. Need at least {self.n_states} valid samples after feature calculation. Got {len(features_history)}.", UserWarning)
+        if features_history_df.empty or len(features_history_df) < self.n_states:
+            warnings.warn(f"Not enough data or features to train GMM. Need at least {self.n_states} valid samples after feature calculation. Got {len(features_history_df)} from {len(all_features_list)} dataframes. GMM not trained.", UserWarning)
             return
 
         self.scaler = StandardScaler()
         try:
-            scaled_features = self.scaler.fit_transform(features_history)
+            scaled_features = self.scaler.fit_transform(features_history_df)
         except ValueError as e:
             warnings.warn(f"Error during scaling of features: {e}. Cannot train GMM.", UserWarning)
             self.scaler = None # Invalidate scaler
+            return
+        except Exception as e: # Catch any other error during scaling
+            warnings.warn(f"An unexpected error occurred during feature scaling: {e}. Cannot train GMM.", UserWarning)
+            self.scaler = None
             return
 
 
@@ -139,10 +166,10 @@ class GMMMarketStateDetector:
             warnings.warn(f"Error training GMM: {e}. This might be due to insufficient or collinear data after scaling. GMM not fitted.", UserWarning)
             self.fitted = False 
             self.scaler = None # Invalidate scaler if GMM fit failed, as it's tied to this fitting attempt.
-        # except Exception as e: # Generic catch for other potential issues during fit
-            # warnings.warn(f"An unexpected error occurred during GMM fitting: {e}", UserWarning)
-            # self.fitted = False
-            # self.scaler = None
+        except Exception as e: # Generic catch for other potential issues during fit
+            warnings.warn(f"An unexpected error occurred during GMM fitting: {e}. GMM not fitted.", UserWarning)
+            self.fitted = False
+            self.scaler = None
 
 
     def predict_state_probabilities(self, current_ohlcv_data_segment: pd.DataFrame) -> np.ndarray:
