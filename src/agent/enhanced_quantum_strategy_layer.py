@@ -454,18 +454,19 @@ class EnhancedStrategySuperposition(nn.Module):
     """
     
     def __init__(self, state_dim: int, action_dim: int, 
+                 logger: logging.Logger, # ADDED logger parameter
                  enable_dynamic_generation: bool = True,
-                 initial_strategy_params: Optional[Dict[str, Dict]] = None,
+                 initial_strategy_params: Optional[Dict[str, Any]] = None, # Changed type hint for flexibility
                  strategy_configs_list: Optional[List[StrategyConfig]] = None):
         super().__init__()
+        self.logger = logger # STORE logger instance
         self.state_dim = state_dim
-        self.action_dim = action_dim # Note: action_dim for PyTorch layers, but strategies now use pandas
+        self.action_dim = action_dim
         self.enable_dynamic_generation = enable_dynamic_generation
         self.initial_strategy_params = initial_strategy_params if initial_strategy_params else {}
         self.strategy_configs_list = strategy_configs_list if strategy_configs_list else []
         self.strategy_config_map = {cfg.name: cfg for cfg in self.strategy_configs_list}
 
-        # Initialize all strategies based on the new structure
         self.base_strategies_instances = nn.ModuleList()
         
         strategy_classes_to_instantiate = [
@@ -484,14 +485,14 @@ class EnhancedStrategySuperposition(nn.Module):
             params = self.initial_strategy_params.get(strategy_name, {})
             config = self.strategy_config_map.get(strategy_name)
             if not config:
-                 # Create a default config if not provided - this might need more robust handling
-                logger.warning(f"StrategyConfig not found for {strategy_name}, using default placeholder.")
+                self.logger.warning(f"StrategyConfig not found for {strategy_name}, using default placeholder.")
                 config = StrategyConfig(name=strategy_name, description="Default", risk_level=0.5, market_regime="all", complexity=3)
 
             try:
-                self.base_strategies_instances.append(SClass(params=params, config=config))
+                # Assuming BaseStrategy and its children now accept logger
+                self.base_strategies_instances.append(SClass(params=params, config=config, logger=self.logger))
             except Exception as e:
-                logger.error(f"Error instantiating {strategy_name} in Superposition: {e}")
+                self.logger.error(f"Error instantiating {strategy_name} in Superposition: {e}")
         
         self.num_base_strategies = len(self.base_strategies_instances)
         
@@ -500,22 +501,21 @@ class EnhancedStrategySuperposition(nn.Module):
         # This should be reviewed. For now, defaulting max_generated_strategies.
         _max_generated_strategies_default = 5
         if enable_dynamic_generation:
-            # Pass available strategy classes and their configs to the generator
-            generator_config = {
-                'strategy_configs_list': self.strategy_configs_list,
-                # Potentially other configs for GA/NAS if they are part of the generator directly
-            }
-            self.dynamic_generator = DynamicStrategyGenerator(
-                config=generator_config, 
-                strategies=None # Generator will use its available_strategies_classes
-            )
-            # Max generated strategies needs to be managed by the generator itself or via config
-            # self.max_generated_strategies = self.config.get('max_generated_strategies', 5) # Problematic line
-            self.max_generated_strategies = self.initial_strategy_params.get('enhanced_superposition_config', {}).get('max_generated_strategies', _max_generated_strategies_default)
+            # Get optimizer_config for DynamicStrategyGenerator from initial_strategy_params
+            dsg_optimizer_config = self.initial_strategy_params.get('dynamic_generator_optimizer_config', None)
+            if dsg_optimizer_config is None:
+                self.logger.warning("No 'dynamic_generator_optimizer_config' found in initial_strategy_params. DynamicStrategyGenerator may not have an optimizer configured.")
 
+            self.dynamic_generator = DynamicStrategyGenerator(
+                logger=self.logger, # Pass the logger
+                optimizer_config=dsg_optimizer_config 
+            )
+            self.dynamic_strategy_instances = nn.ModuleList() # Initialize list for dynamic strategies
+            self.max_generated_strategies = self.initial_strategy_params.get('enhanced_superposition_config', {}).get('max_generated_strategies', _max_generated_strategies_default)
             self.total_strategies = self.num_base_strategies + self.max_generated_strategies
         else:
             self.dynamic_generator = None
+            self.dynamic_strategy_instances = nn.ModuleList() # Still initialize for consistency
             self.max_generated_strategies = 0
             self.total_strategies = self.num_base_strategies
         
@@ -679,20 +679,11 @@ class EnhancedStrategySuperposition(nn.Module):
             - strategy_weights (torch.Tensor): 各策略的計算權重 (e.g., [batch_size, total_strategies])
             - diagnostic_info (Dict[str, Any]): 包含診斷信息的字典
         """
-        batch_size = 1 # Assuming batch_size of 1 for now, as market_data_dict is not batched.
-                       # This needs to be generalized if batch processing is intended.
+        batch_size = 1 # Assuming batch_size of 1 for now
 
-        # 0. Prepare data for strategies
-        # Assuming all strategies operate on a common primary market data (e.g., a specific symbol or aggregated data)
-        # This is a simplification. In reality, each strategy might need different parts of market_data_dict
-        # or specific pre-processing.
-        # For now, let's assume strategies can handle the raw dict or we pick one primary symbol.
-        # Let's assume 'EUR_USD' is a primary symbol if available, otherwise the first one.
         primary_symbol = next(iter(market_data_dict)) if market_data_dict else None
         if not primary_symbol:
-            logger.error("Market data dictionary is empty. Cannot proceed.")
-            # Return dummy tensors of appropriate (though possibly incorrect) shape
-            # This part needs careful consideration for robust error handling
+            self.logger.error("Market data dictionary is empty. Cannot proceed.")
             _action_dim_for_dummy = self.action_dim if self.action_dim > 0 else 1
             _total_strategies_for_dummy = self.total_strategies if self.total_strategies > 0 else 1
             dummy_action = torch.zeros(batch_size, _action_dim_for_dummy, device=DEVICE) 
@@ -701,70 +692,55 @@ class EnhancedStrategySuperposition(nn.Module):
 
         primary_market_data_df = market_data_dict[primary_symbol]
 
-        # 1. 執行所有基礎策略和動態生成策略
         strategy_outputs_dfs: List[pd.DataFrame] = []
+        
         active_strategies_for_forward = list(self.base_strategies_instances)
-
-        # Handle dynamically generated strategies if enabled
-        if self.enable_dynamic_generation and self.dynamic_generator:
-            # This part is conceptual. Dynamic generation might happen less frequently
-            # or be triggered by specific conditions, not necessarily every forward pass.
-            # For now, let's assume we might have some pre-generated dynamic strategies.
-            # Or, if we want to generate one on the fly (less likely for every forward pass):
-            # new_dynamic_strategy = self.dynamic_generator.generate_new_strategy(primary_market_data_df, portfolio_context)
-            # if new_dynamic_strategy:
-            #     active_strategies_for_forward.append(new_dynamic_strategy)
-            # For simplicity, let's assume dynamic_generator.active_strategies_instances holds them
-            active_strategies_for_forward.extend(self.dynamic_generator.active_strategies_instances)
+        if self.enable_dynamic_generation:
+            # Combine base strategies with currently active dynamic strategies
+            active_strategies_for_forward.extend(list(self.dynamic_strategy_instances))
         
         current_num_strategies = len(active_strategies_for_forward)
-        # Ensure total_strategies is at least 1 for dummy outputs if no active strategies
+        
+        # Ensure that current_num_strategies does not exceed self.total_strategies (capacity)
+        if current_num_strategies > self.total_strategies:
+            self.logger.warning(f"Number of active strategies ({current_num_strategies}) exceeds capacity ({self.total_strategies}). Truncating.")
+            active_strategies_for_forward = active_strategies_for_forward[:self.total_strategies]
+            current_num_strategies = self.total_strategies
+
         _total_strategies_for_dummy_active = self.total_strategies if self.total_strategies > 0 else 1
         _action_dim_for_dummy_active = self.action_dim if self.action_dim > 0 else 1
 
-        if current_num_strategies == 0 and self.total_strategies == 0: # Only error if total_strategies is also 0
-            logger.error("No active strategies available and total_strategies is 0. Cannot proceed.")
+        if current_num_strategies == 0 and self.total_strategies == 0:
+            self.logger.error("No active strategies available and total_strategies is 0. Cannot proceed.")
             dummy_action = torch.zeros(batch_size, _action_dim_for_dummy_active, device=DEVICE)
             dummy_weights = torch.zeros(batch_size, _total_strategies_for_dummy_active, device=DEVICE) 
             return dummy_action, dummy_weights, {}
 
         for i, strategy_instance in enumerate(active_strategies_for_forward):
             try:
-                # Each strategy's forward method processes market_data and returns processed_data (pd.DataFrame)
-                # Then generate_signals uses this processed_data to output signals (pd.DataFrame)
-                # The signals DataFrame should ideally have a consistent format, e.g., a 'signal' column.
-                # For multi-asset strategies, it might have signals per asset.
-                
-                # Pass the full market_data_dict and portfolio_context to each strategy
                 processed_data = strategy_instance.forward(market_data_dict, portfolio_context)
                 signals_df = strategy_instance.generate_signals(processed_data, portfolio_context)
                 
-                # Ensure signals_df is not empty and has expected structure
                 if signals_df is None or signals_df.empty:
-                    logger.warning(f"Strategy {strategy_instance.get_strategy_name()} produced empty signals. Using zeros.")
-                    # Assuming signals are for the primary_symbol and a single 'signal' column
-                    # This needs to be robust: define expected output structure for strategies
+                    self.logger.warning(f"Strategy {strategy_instance.get_strategy_name()} produced empty signals. Using zeros.")
                     num_timesteps = len(primary_market_data_df) if primary_market_data_df is not None else 1 
                     index_for_df = primary_market_data_df.index if primary_market_data_df is not None and not primary_market_data_df.empty else pd.RangeIndex(num_timesteps)
                     signals_df = pd.DataFrame({'signal': np.zeros(num_timesteps)}, index=index_for_df)
-
                 strategy_outputs_dfs.append(signals_df)
-
             except Exception as e:
-                logger.error(f"Error executing strategy {strategy_instance.get_strategy_name()}: {e}", exc_info=True)
-                # Append a DataFrame of zeros or handle error appropriately
+                self.logger.error(f"Error executing strategy {strategy_instance.get_strategy_name()}: {e}", exc_info=True)
                 num_timesteps = len(primary_market_data_df) if primary_market_data_df is not None else 1
                 index_for_df = primary_market_data_df.index if primary_market_data_df is not None and not primary_market_data_df.empty else pd.RangeIndex(num_timesteps)
                 error_signals_df = pd.DataFrame({'signal': np.zeros(num_timesteps)}, index=index_for_df)
                 strategy_outputs_dfs.append(error_signals_df)
         
-        # Pad with zero signals if current_num_strategies < self.total_strategies (due to dynamic part)
-        # Ensure self.total_strategies is at least current_num_strategies
-        effective_total_strategies = max(current_num_strategies, self.total_strategies if self.total_strategies > 0 else current_num_strategies)
-        if effective_total_strategies == 0 and current_num_strategies == 0 : # If all are zero, make it 1 to avoid division by zero later
-             effective_total_strategies = 1
-
+        # The dimension for padding and for downstream tensors (weights, amplitudes) is self.total_strategies (capacity)
+        effective_total_strategies = self.total_strategies if self.total_strategies > 0 else 1
+        
         num_padding_strategies = effective_total_strategies - current_num_strategies
+        if num_padding_strategies < 0: # Should not happen if current_num_strategies was capped
+            self.logger.error(f"Negative padding strategies ({num_padding_strategies}). current_num_strategies={current_num_strategies}, effective_total_strategies={effective_total_strategies}")
+            num_padding_strategies = 0
             
         for _ in range(num_padding_strategies):
             num_timesteps = len(primary_market_data_df) if primary_market_data_df is not None else 1
@@ -772,40 +748,30 @@ class EnhancedStrategySuperposition(nn.Module):
             padding_signals_df = pd.DataFrame({'signal': np.zeros(num_timesteps)}, index=index_for_df)
             strategy_outputs_dfs.append(padding_signals_df)
 
-        # 2. Convert strategy outputs (List[pd.DataFrame]) to a PyTorch tensor `strategy_tensor`
-        # Assumption: Each DataFrame in strategy_outputs_dfs contains a 'signal' column 
-        # for the primary_symbol, representing the strategy's output (e.g., -1, 0, 1).
-        # We'll take the latest signal from each strategy.
-        # Shape: [batch_size, total_strategies, num_features_per_strategy]
-        # For now, num_features_per_strategy = 1 (the signal itself)
-        
         latest_signals = []
-        for df in strategy_outputs_dfs:
+        for df_idx, df in enumerate(strategy_outputs_dfs): # Iterate up to effective_total_strategies
+            if df_idx >= effective_total_strategies: # Should not happen if strategy_outputs_dfs is correctly sized
+                self.logger.warning(f"Exceeded effective_total_strategies ({effective_total_strategies}) when processing strategy_outputs_dfs (len: {len(strategy_outputs_dfs)})")
+                break
             if not df.empty and 'signal' in df.columns:
                 latest_signals.append(df['signal'].iloc[-1] if not df['signal'].empty else 0.0)
             else:
-                logger.warning(f"Signal DataFrame is empty or missing 'signal' column. Appending 0.0.")
+                self.logger.warning(f"Signal DataFrame {df_idx} is empty or missing 'signal' column. Appending 0.0.")
                 latest_signals.append(0.0)
         
-        # Ensure latest_signals has effective_total_strategies elements
         if len(latest_signals) != effective_total_strategies:
-            logger.error(f"Mismatch in number of signals ({len(latest_signals)}) and effective_total_strategies ({effective_total_strategies}). This indicates an issue in padding or strategy execution.")
-            # Fallback: pad or truncate latest_signals to match effective_total_strategies
+            self.logger.error(f"Mismatch in number of signals ({len(latest_signals)}) and effective_total_strategies ({effective_total_strategies}). Padding/truncating.")
             if len(latest_signals) < effective_total_strategies:
                 latest_signals.extend([0.0] * (effective_total_strategies - len(latest_signals)))
             else:
                 latest_signals = latest_signals[:effective_total_strategies]
         
-        if not latest_signals: # Ensure latest_signals is not empty before converting to tensor
-            latest_signals = [0.0] * effective_total_strategies # Should be at least 1 element
+        if not latest_signals: 
+            latest_signals = [0.0] * effective_total_strategies 
 
-        strategy_tensor = torch.tensor(latest_signals, dtype=torch.float32, device=DEVICE).unsqueeze(0) # [1, effective_total_strategies]
-        strategy_tensor = strategy_tensor.unsqueeze(-1) # [1, effective_total_strategies, 1] (feature_dim=1)
+        strategy_tensor = torch.tensor(latest_signals, dtype=torch.float32, device=DEVICE).unsqueeze(0) 
+        strategy_tensor = strategy_tensor.unsqueeze(-1) # [1, effective_total_strategies, 1]
 
-        # 3. Derive `state_features_for_weighting` from market_data_dict and portfolio_context
-        # Shape: [batch_size, self.state_dim]
-        # This is a placeholder. Actual feature engineering will be more complex.
-        # Example: use 'close' price of primary_symbol, and some portfolio context.
         if self.state_dim > 0:
             lookback_for_state = self.state_dim 
             if primary_market_data_df is not None and 'close' in primary_market_data_df.columns and not primary_market_data_df.empty:
@@ -820,7 +786,7 @@ class EnhancedStrategySuperposition(nn.Module):
             state_features_for_weighting = torch.tensor(state_features_raw, dtype=torch.float32, device=DEVICE).unsqueeze(0) # [1, state_dim]
             
             if state_features_for_weighting.shape[1] != self.state_dim:
-                logger.warning(f"Constructed state_features_for_weighting shape {state_features_for_weighting.shape} does not match self.state_dim {self.state_dim}. Adjusting/Padding.")
+                self.logger.warning(f"Constructed state_features_for_weighting shape {state_features_for_weighting.shape} does not match self.state_dim {self.state_dim}. Adjusting/Padding.")
                 if state_features_for_weighting.shape[1] < self.state_dim:
                     padding = torch.zeros(batch_size, self.state_dim - state_features_for_weighting.shape[1], device=DEVICE)
                     state_features_for_weighting = torch.cat((state_features_for_weighting, padding), dim=1)
@@ -830,101 +796,99 @@ class EnhancedStrategySuperposition(nn.Module):
              state_features_for_weighting = torch.empty(batch_size, 0, device=DEVICE)
 
 
-        # 4. Derive `volatility_for_weighting` (e.g., from portfolio_context or market_data)
-        # Shape: [batch_size, 1]
         if 'overall_volatility' in portfolio_context:
             volatility_value = float(portfolio_context['overall_volatility'])
         elif primary_market_data_df is not None and 'close' in primary_market_data_df.columns and len(primary_market_data_df['close']) > 1:
             log_returns = np.log(primary_market_data_df['close'] / primary_market_data_df['close'].shift(1)).dropna()
-            if len(log_returns) > 1:
+            if len(log_returns) > 1: # Ensure there are at least two returns to calculate std
                 volatility_value = float(log_returns.std())
-            else:
+            elif len(log_returns) == 1: # If only one return, std is not well-defined, use the return itself or 0
+                volatility_value = float(abs(log_returns.iloc[0])) # Or some other sensible default
+            else: # No returns
                 volatility_value = 0.01 
         else:
             volatility_value = 0.01 
             
-        volatility_for_weighting = torch.tensor([[volatility_value]], dtype=torch.float32, device=DEVICE) # [1, 1]
+        volatility_for_weighting = torch.tensor([[volatility_value]], dtype=torch.float32, device=DEVICE)
 
-        # 5. 計算策略權重
-        # Ensure weight network outputs match effective_total_strategies
-        _out_features_for_nets = max(1, effective_total_strategies)
-        if self.weight_networks['volatility_net'][-2].out_features != _out_features_for_nets:
-            logger.warning("Volatility net output features mismatch. This might indicate dynamic changes not fully propagated to network structure at init.")
-            # This would ideally reinitialize or adapt the layer, but for now, we proceed.
-            # The layer was initialized with _out_features_for_nets based on self.total_strategies.
-            # If effective_total_strategies is different, this is a mismatch.
-            # For safety, let's assume the initialized _target_weight_dim is the target.
-            _target_weight_dim = self.weight_networks['volatility_net'][-2].out_features
-        else:
-            _target_weight_dim = _out_features_for_nets
-
+        _target_weight_dim = self.weight_networks['volatility_net'][-2].out_features # This should be effective_total_strategies
+        
+        # Defensive check: ensure _target_weight_dim matches effective_total_strategies
+        if _target_weight_dim != effective_total_strategies:
+            self.logger.warning(f"_target_weight_dim ({_target_weight_dim}) from network init "
+                                f"does not match effective_total_strategies ({effective_total_strategies}). "
+                                f"This may indicate an issue with dynamic sizing or network re-initialization. "
+                                f"Proceeding with _target_weight_dim from network.")
+            # If we strictly want to use effective_total_strategies, we might need to adapt layers here,
+            # but that's complex. The _adaptive_dimension_handler later might catch some issues.
+            # For now, the code relies on _target_weight_dim from the initialized network.
+            # The expectation is that effective_total_strategies (which is self.total_strategies)
+            # was used to size these networks correctly at init.
 
         weights_vol = self.weight_networks['volatility_net'](volatility_for_weighting) 
         
         if self.state_dim > 0 :
             weights_regime = self.weight_networks['regime_net'](state_features_for_weighting)
         else: 
-            # If state_dim is 0, regime_net input is (batch_size, 1) if its Linear layer was set to 1.
-            # The init logic sets nn.Linear(max(1, state_dim), ...). So if state_dim=0, in_features=1.
-            # We need to pass a tensor of shape [batch_size, 1]
-            dummy_state_for_regime_net = torch.zeros(batch_size, 1, device=DEVICE) # Or ones, or rand
+            dummy_state_for_regime_net = torch.zeros(batch_size, 1, device=DEVICE)
             weights_regime = self.weight_networks['regime_net'](dummy_state_for_regime_net)
-            # weights_regime = torch.ones(batch_size, _target_weight_dim, device=DEVICE) / _target_weight_dim
 
         if self.state_dim > 0:
             corr_net_input = torch.cat([state_features_for_weighting, volatility_for_weighting], dim=1) 
         else: 
-            # If state_dim is 0, corr_net input is nn.Linear(1, ...)
             corr_net_input = volatility_for_weighting 
 
         weights_corr = self.weight_networks['correlation_net'](corr_net_input)
         
-        # Ensure all weight tensors have the same dimension (_target_weight_dim) before combining
-        # This is a safeguard if dynamic changes led to mismatches not caught by init.
-        # A more robust solution involves re-initializing layers or using adaptive layers.
-        if weights_vol.shape[1] != _target_weight_dim: weights_vol = self._adaptive_dimension_handler(weights_vol.unsqueeze(-1), _target_weight_dim, "weights_vol_final").squeeze(-1)
-        if weights_regime.shape[1] != _target_weight_dim: weights_regime = self._adaptive_dimension_handler(weights_regime.unsqueeze(-1), _target_weight_dim, "weights_regime_final").squeeze(-1)
-        if weights_corr.shape[1] != _target_weight_dim: weights_corr = self._adaptive_dimension_handler(weights_corr.unsqueeze(-1), _target_weight_dim, "weights_corr_final").squeeze(-1)
+        # Ensure all weight tensors have the same dimension (_target_weight_dim)
+        # The _adaptive_dimension_handler is used if there's a mismatch.
+        # This implies _target_weight_dim is the authoritative dimension for weights here.
+        if weights_vol.shape[1] != _target_weight_dim: 
+            self.logger.debug(f"Adapting weights_vol from {weights_vol.shape[1]} to {_target_weight_dim}")
+            weights_vol = self._adaptive_dimension_handler(weights_vol.unsqueeze(-1), _target_weight_dim, "weights_vol_final").squeeze(-1)
+        if weights_regime.shape[1] != _target_weight_dim: 
+            self.logger.debug(f"Adapting weights_regime from {weights_regime.shape[1]} to {_target_weight_dim}")
+            weights_regime = self._adaptive_dimension_handler(weights_regime.unsqueeze(-1), _target_weight_dim, "weights_regime_final").squeeze(-1)
+        if weights_corr.shape[1] != _target_weight_dim: 
+            self.logger.debug(f"Adapting weights_corr from {weights_corr.shape[1]} to {_target_weight_dim}")
+            weights_corr = self._adaptive_dimension_handler(weights_corr.unsqueeze(-1), _target_weight_dim, "weights_corr_final").squeeze(-1)
         
         base_weights = (weights_vol + weights_regime + weights_corr) / 3.0
         
-        # Ensure quantum_amplitudes match _target_weight_dim
         if self.quantum_amplitudes.shape[0] != _target_weight_dim:
-            # This is a critical mismatch, log error and use a placeholder
-            logger.error(f"Quantum amplitudes dim {self.quantum_amplitudes.shape[0]} mismatch with target_weight_dim {_target_weight_dim}")
-            # Fallback: create amplitudes of the target dimension
-            _amplitudes = torch.ones(_target_weight_dim, device=DEVICE) / math.sqrt(_target_weight_dim)
+            self.logger.error(f"Quantum amplitudes dim {self.quantum_amplitudes.shape[0]} mismatch with target_weight_dim {_target_weight_dim}. Using fallback.")
+            _amplitudes = torch.ones(_target_weight_dim, device=DEVICE) / math.sqrt(max(1, _target_weight_dim)) # max(1,..) for sqrt
         else:
             _amplitudes = self.quantum_amplitudes
 
         normalized_amplitudes = F.softmax(_amplitudes, dim=0) 
         weighted_amplitudes = base_weights * normalized_amplitudes.unsqueeze(0) 
         
-        # Ensure interaction_matrix matches _target_weight_dim
         if self.interaction_matrix.shape[0] != _target_weight_dim or self.interaction_matrix.shape[1] != _target_weight_dim:
-            logger.error(f"Interaction matrix dim {self.interaction_matrix.shape} mismatch with target_weight_dim {_target_weight_dim}")
+            self.logger.error(f"Interaction matrix dim {self.interaction_matrix.shape} mismatch with target_weight_dim {_target_weight_dim}. Using fallback (eye).")
             _interaction_matrix = torch.eye(_target_weight_dim, device=DEVICE)
         else:
-            _interaction_matrix = self.interaction_matrix.to(DEVICE)
+            _interaction_matrix = self.interaction_matrix.to(DEVICE) # Ensure device consistency
             
         interacted_weights = torch.matmul(weighted_amplitudes, _interaction_matrix)
 
-        # --- Define missing variables ---
-        strategy_weights = F.softmax(interacted_weights, dim=-1) # [batch_size, _target_weight_dim]
+        strategy_weights = F.softmax(interacted_weights, dim=-1)
 
-        # strategy_tensor is [batch_size, effective_total_strategies, 1]
-        # strategy_weights is [batch_size, _target_weight_dim]
-        # If effective_total_strategies != _target_weight_dim, this is an issue.
-        # Assuming they should match due to _target_weight_dim logic.
+        # At this point, strategy_tensor is [batch_size, effective_total_strategies, 1]
+        # and strategy_weights is [batch_size, _target_weight_dim]
+        # We expect effective_total_strategies == _target_weight_dim
         if strategy_tensor.shape[1] != strategy_weights.shape[1]:
-            logger.error(f"Mismatch between strategy_tensor dim1 ({strategy_tensor.shape[1]}) and strategy_weights dim1 ({strategy_weights.shape[1]})")
-            # Fallback: Adjust strategy_tensor to match strategy_weights dimension for the multiplication
-            # This is a patch; the underlying cause of mismatch should be fixed.
-            st_squeezed = strategy_tensor.squeeze(-1) # [batch_size, effective_total_strategies]
-            if st_squeezed.shape[1] > strategy_weights.shape[1]: # truncate
-                st_squeezed = st_squeezed[:, :strategy_weights.shape[1]]
-            elif st_squeezed.shape[1] < strategy_weights.shape[1]: # pad
-                padding = torch.zeros(batch_size, strategy_weights.shape[1] - st_squeezed.shape[1], device=DEVICE)
+            self.logger.error(f"CRITICAL MISMATCH: strategy_tensor dim1 ({strategy_tensor.shape[1]}) "
+                              f"and strategy_weights dim1 ({strategy_weights.shape[1]}) must match for combination. "
+                              f"effective_total_strategies={effective_total_strategies}, _target_weight_dim={_target_weight_dim}. "
+                              f"Using fallback adjustment.")
+            st_squeezed = strategy_tensor.squeeze(-1) 
+            target_dim_for_sum = strategy_weights.shape[1]
+            if st_squeezed.shape[1] > target_dim_for_sum: 
+                st_squeezed = st_squeezed[:, :target_dim_for_sum]
+            elif st_squeezed.shape[1] < target_dim_for_sum: 
+                padding_val = 0.0 # Or another appropriate value
+                padding = torch.full((batch_size, target_dim_for_sum - st_squeezed.shape[1]), padding_val, device=DEVICE, dtype=st_squeezed.dtype)
                 st_squeezed = torch.cat([st_squeezed, padding], dim=1)
             final_output_features = torch.sum(st_squeezed * strategy_weights, dim=1, keepdim=True)
         else:

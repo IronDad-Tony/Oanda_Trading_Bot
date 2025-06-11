@@ -92,13 +92,13 @@
 
 - [ ] **添加動態策略生成**
     - [x] 在 `DynamicStrategyGenerator` 中實現 `generate_new_strategy` 方法。 <!-- MODIFIED -->
-    - [ ] **整合優化器框架** <!-- MODIFIED -->
+    - [x] **整合優化器框架** <!-- MODIFIED -->
         - [x] 創建並實現 `src/agent/optimizers/genetic_optimizer.py` (`GeneticOptimizer`) <!-- NEW -->
         - [x] 創建 `src/agent/optimizers/neural_architecture_search.py` (`NeuralArchitectureSearch`) <!-- NEW --> <!-- MODIFIED -->
         - [x] 在 `DynamicStrategyGenerator` 中整合 `GeneticOptimizer` <!-- NEW --> <!-- MODIFIED -->
         - [x] 在 `DynamicStrategyGenerator` 中整合 `NeuralArchitectureSearch` <!-- NEW --> <!-- MODIFIED -->
     - **測試**:
-        - [ ] **單元測試**: 驗證 `generate_new_strategy` 方法能夠基於輸入的市場條件生成（或選擇）策略。 <!-- MODIFIED - Marking parent as done, this test is still pending -->
+        - [x] **單元測試**: 驗證 `generate_new_strategy` 方法能夠基於輸入的市場條件生成（或選擇）策略。
         - [x] **單元測試**: 驗證 `GeneticOptimizer` 的核心功能。 <!-- NEW --> <!-- MODIFIED -->
 
 - [ ] **創建策略組合機制**
