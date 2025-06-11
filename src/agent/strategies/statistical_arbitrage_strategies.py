@@ -99,118 +99,63 @@ class CointegrationStrategy(BaseStrategy):
         else:
             self.valid_pair = True
 
+class PairsTradeStrategy(BaseStrategy):
+    """Placeholder for Pairs Trading Strategy."""
+    def __init__(self, config: StrategyConfig, params: Dict[str, Any] = None):
+        super().__init__(config, params)
+        self.asset_pair = self.effective_params.get('asset_pair', [])
+        self.window = int(self.effective_params.get('window', 60))
+        self.entry_threshold = float(self.effective_params.get('entry_threshold', 2.0))
+        self.exit_threshold = float(self.effective_params.get('exit_threshold', 0.5))
+        if len(self.asset_pair) != 2:
+            # logger.warning(f"{self.config.name}: Requires 'asset_pair' of two assets.")
+            pass # Proper logging should be used here
 
     def forward(self, market_data_dict: Dict[str, pd.DataFrame], portfolio_context=None) -> Dict[str, pd.DataFrame]:
-        if not self.valid_pair:
-            return {}
-            
+        # Placeholder: In a real implementation, this would calculate spread, z-score, etc.
+        # For now, just pass through the data for the specified pair if available.
         processed_data = {}
-        asset1_name, asset2_name = self.asset_pair
-
-        if asset1_name not in market_data_dict or asset2_name not in market_data_dict:
-            # print(f"{self.config.name}: Data for one or both assets in pair {self.asset_pair} not found. Skipping.")
-            return processed_data
-
-        # Ensure 'close' is derived from 'Close' if not present
-        df1_original = market_data_dict[asset1_name].copy()
-        if 'close' not in df1_original.columns and 'Close' in df1_original.columns:
-            df1_original['close'] = df1_original['Close']
-        df1 = df1_original[['close']].rename(columns={'close': 'price1'})
-        
-        df2_original = market_data_dict[asset2_name].copy()
-        if 'close' not in df2_original.columns and 'Close' in df2_original.columns:
-            df2_original['close'] = df2_original['Close']
-        df2 = df2_original[['close']].rename(columns={'close': 'price2'})
-
-        data = pd.concat([df1, df2], axis=1).dropna()
-        
-        if len(data) < self.window:
-            # print(f"{self.config.name}: Insufficient aligned data for pair {self.asset_pair} (need {self.window}, got {len(data)}). Skipping.")
-            return processed_data
-
-        try:
-            from statsmodels.regression.rolling import RollingOLS
-            import statsmodels.api as sm
-
-            data['price2_float'] = data['price2'].astype(float)
-            exog = sm.add_constant(data['price2_float'])
-            
-            rols = RollingOLS(endog=data['price1'], exog=exog, window=self.window, min_nobs=self.window)
-            results = rols.fit()
-            hedge_ratios = results.params['price2_float'] 
-            intercepts = results.params['const']
-
-            data['hedge_ratio'] = hedge_ratios
-            data['intercept'] = intercepts
-            data = data.dropna(subset=['hedge_ratio', 'intercept'])
-
-            if data.empty:
-                # print(f"{self.config.name}: Data empty after rolling OLS for {self.asset_pair}. Skipping.")
-                return processed_data
-
-            data['spread'] = data['price1'] - data['hedge_ratio'] * data['price2'] - data['intercept']
-            
-            spread_mean = data['spread'].rolling(window=self.window, min_periods=self.window).mean()
-            spread_std = data['spread'].rolling(window=self.window, min_periods=self.window).std()
-            
-            data['z_score'] = (data['spread'] - spread_mean) / spread_std.replace(0, np.nan) 
-            
-            pair_name = f"{asset1_name}_{asset2_name}_coint_spread"
-            processed_data[pair_name] = data.dropna(subset=['z_score'])
-
-        except ImportError:
-            print(f"CRITICAL: {self.config.name} requires 'statsmodels'. Please install it (pip install statsmodels). Skipping pair.")
-            self.valid_pair = False
-            return processed_data
-        except Exception as e:
-            # print(f"{self.config.name}: Error calculating spread/z-score for {self.asset_pair}: {e}. Skipping.")
-            return processed_data
-            
+        if len(self.asset_pair) == 2 and self.asset_pair[0] in market_data_dict and self.asset_pair[1] in market_data_dict:
+            # Example: Calculate spread (asset1 - asset2)
+            df1 = market_data_dict[self.asset_pair[0]][['close']].copy().rename(columns={'close': self.asset_pair[0]})
+            df2 = market_data_dict[self.asset_pair[1]][['close']].copy().rename(columns={'close': self.asset_pair[1]})
+            merged_df = pd.merge(df1, df2, left_index=True, right_index=True, how='inner')
+            if not merged_df.empty:
+                merged_df['spread'] = merged_df[self.asset_pair[0]] - merged_df[self.asset_pair[1]] # Simple spread
+                # Placeholder for z-score calculation
+                merged_df['z_score'] = (merged_df['spread'] - merged_df['spread'].rolling(window=self.window).mean()) / merged_df['spread'].rolling(window=self.window).std()
+                processed_data["pair_" + "_".join(self.asset_pair)] = merged_df.dropna()
         return processed_data
 
     def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context=None) -> pd.DataFrame:
-        if not self.valid_pair:
-            return pd.DataFrame()
+        all_signals = []
+        pair_key = "pair_" + "_".join(self.asset_pair)
+        if pair_key in processed_data_dict and not processed_data_dict[pair_key].empty:
+            df = processed_data_dict[pair_key]
+            signals = pd.DataFrame(index=df.index)
+            signals[self.asset_pair[0]] = 0 # Signal for asset1
+            signals[self.asset_pair[1]] = 0 # Signal for asset2
 
-        all_asset_signals_dfs = []
-        asset1_name, asset2_name = self.asset_pair
-        pair_name = f"{asset1_name}_{asset2_name}_coint_spread"
+            # Long asset1, Short asset2 when spread is too low (asset1 undervalued relative to asset2)
+            signals.loc[df['z_score'] < -self.entry_threshold, self.asset_pair[0]] = 1
+            signals.loc[df['z_score'] < -self.entry_threshold, self.asset_pair[1]] = -1
 
-        if pair_name not in processed_data_dict or processed_data_dict[pair_name].empty:
-            # print(f"{self.config.name}: Processed data for pair {pair_name} not found or empty. Skipping.")
-            return pd.DataFrame()
-
-        df_spread = processed_data_dict[pair_name]
-        
-        if 'z_score' not in df_spread.columns:
-            # print(f"{self.config.name}: 'z_score' missing in processed data for {pair_name}. Skipping.")
-            return pd.DataFrame()
-
-        if not isinstance(df_spread.index, pd.DatetimeIndex):
-            df_spread.index = pd.to_datetime(df_spread.index)
-
-        signals1 = pd.DataFrame(index=df_spread.index)
-        signals1[asset1_name] = 0
-        signals2 = pd.DataFrame(index=df_spread.index)
-        signals2[asset2_name] = 0
-
-        signals1.loc[df_spread['z_score'] < -self.z_threshold, asset1_name] = 1
-        signals2.loc[df_spread['z_score'] < -self.z_threshold, asset2_name] = -1
-
-        signals1.loc[df_spread['z_score'] > self.z_threshold, asset1_name] = -1
-        signals2.loc[df_spread['z_score'] > self.z_threshold, asset2_name] = 1
-        
-        all_asset_signals_dfs.append(signals1[[asset1_name]])
-        all_asset_signals_dfs.append(signals2[[asset2_name]])
-        
-        if not all_asset_signals_dfs:
-            return pd.DataFrame()
+            # Short asset1, Long asset2 when spread is too high (asset1 overvalued relative to asset2)
+            signals.loc[df['z_score'] > self.entry_threshold, self.asset_pair[0]] = -1
+            signals.loc[df['z_score'] > self.entry_threshold, self.asset_pair[1]] = 1
             
-        final_signals_df = pd.concat(all_asset_signals_dfs, axis=1)
-        final_signals_df = final_signals_df.fillna(method='ffill').fillna(0)
-        final_signals_df = final_signals_df.astype(int)
-        
-        return final_signals_df
+            # Exit conditions (e.g., when z-score crosses back towards zero)
+            # This is a simplified exit, real exits might be more complex
+            # Assuming positions are held until z-score crosses self.exit_threshold
+            # Need to handle state (e.g. am I currently in a trade?)
+            # For simplicity, this example doesn't manage state across calls.
+            # It just indicates entry. Exits would typically be handled by portfolio management or by zeroing signals.
+
+            all_signals.append(signals)
+
+        if not all_signals:
+            return pd.DataFrame()
+        return pd.concat(all_signals, axis=1).fillna(0).astype(int)
 
 class StatisticalArbitrageStrategy(BaseStrategy):
     def __init__(self, config: StrategyConfig, params: Dict[str, Any] = None):

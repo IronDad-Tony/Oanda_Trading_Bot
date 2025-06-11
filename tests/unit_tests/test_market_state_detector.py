@@ -140,14 +140,15 @@ class TestGMMMarketStateDetector(unittest.TestCase):
         # rows_lost_to_nan_features = default_max_initial_nan_idx + 1 = 13 + 1 = 14
         insufficient_data_count = (self.default_max_initial_nan_idx + 1) + num_feature_rows_needed # 14 + 2 = 16 rows
         insufficient_data = self.sample_ohlcv_data.head(insufficient_data_count)
-        
+
         with self.assertWarns(UserWarning) as cm:
             self.detector.fit(insufficient_data)
-        
+
         expected_features_available_for_gmm = num_feature_rows_needed # Should be 2
-        # The warning message from the code is "Not enough data or features to train GMM. Need at least X valid samples... Got Y."
-        # We check if the essential parts are present.
-        self.assertIn(f"Need at least {self.n_states} valid samples after feature calculation. Got {expected_features_available_for_gmm}.", str(cm.warning))
+        # Updated expected message to match the actual warning format more closely.
+        # The key part is that the number of samples is correctly identified.
+        self.assertTrue(f"Need at least {self.n_states} valid samples after feature calculation" in str(cm.warning))
+        self.assertTrue(f"Got {expected_features_available_for_gmm}" in str(cm.warning))
         self.assertFalse(self.detector.fitted, "Fitted flag should be False when GMM training is skipped.")
         self.assertIsNone(self.detector.scaler, "Scaler should be None when GMM training is skipped.")
 

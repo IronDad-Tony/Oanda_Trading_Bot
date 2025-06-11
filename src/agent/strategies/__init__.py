@@ -17,7 +17,8 @@ from .statistical_arbitrage_strategies import (
     MeanReversionStrategy,
     CointegrationStrategy,
     VolatilityArbitrageStrategy,
-    VolatilityBreakoutStrategy
+    VolatilityBreakoutStrategy,
+    PairsTradeStrategy
 )
 
 # Machine Learning Strategies
@@ -64,6 +65,7 @@ __all__ = [
     'CointegrationStrategy',
     'VolatilityArbitrageStrategy',
     'VolatilityBreakoutStrategy',
+    'PairsTradeStrategy',
     # ML
     'ReinforcementLearningStrategy',
     'DeepLearningPredictionStrategy',

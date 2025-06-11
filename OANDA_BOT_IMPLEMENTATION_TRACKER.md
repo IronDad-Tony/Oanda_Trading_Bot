@@ -91,10 +91,15 @@
         - [x] **單元測試**: 對每個策略進行單獨測試，驗證其在模擬數據上的邏輯正確性和預期行為。 <!-- MODIFIED -->
 
 - [ ] **添加動態策略生成**
-    - [ ] 在 `DynamicStrategyGenerator` 中實現 `generate_new_strategy` 方法。
-    - [ ] 整合基因演算法 (`GeneticOptimizer`) 和神經架構搜索 (`NeuralArchitectureSearch`) 的初步框架。
+    - [x] 在 `DynamicStrategyGenerator` 中實現 `generate_new_strategy` 方法。 <!-- MODIFIED -->
+    - [ ] **整合優化器框架** <!-- MODIFIED -->
+        - [x] 創建並實現 `src/agent/optimizers/genetic_optimizer.py` (`GeneticOptimizer`) <!-- NEW -->
+        - [x] 創建 `src/agent/optimizers/neural_architecture_search.py` (`NeuralArchitectureSearch`) <!-- NEW --> <!-- MODIFIED -->
+        - [x] 在 `DynamicStrategyGenerator` 中整合 `GeneticOptimizer` <!-- NEW --> <!-- MODIFIED -->
+        - [x] 在 `DynamicStrategyGenerator` 中整合 `NeuralArchitectureSearch` <!-- NEW --> <!-- MODIFIED -->
     - **測試**:
-        - **單元測試**: 驗證 `generate_new_strategy` 方法能夠基於輸入的市場條件生成（或選擇）策略。
+        - [ ] **單元測試**: 驗證 `generate_new_strategy` 方法能夠基於輸入的市場條件生成（或選擇）策略。 <!-- MODIFIED - Marking parent as done, this test is still pending -->
+        - [x] **單元測試**: 驗證 `GeneticOptimizer` 的核心功能。 <!-- NEW --> <!-- MODIFIED -->
 
 - [ ] **創建策略組合機制**
     - [ ] 設計並實現在 `enhanced_quantum_strategy_layer.py` 中組合不同策略的邏輯。
