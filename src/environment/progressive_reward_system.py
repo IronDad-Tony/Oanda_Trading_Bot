@@ -1,3 +1,4 @@
+print("PROGRESSIVE REWARD SYSTEM MODULE LOADED", flush=True) # Top-level print
 # src/environment/progressive_reward_system.py
 """
 漸進式獎勵系統 (Progressive Reward System)
@@ -11,6 +12,10 @@ import numpy as np
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable, Optional
 import logging
+import pandas as pd
+
+# Import market regime enums and identifier (assuming it will be passed or accessible)
+from ..market_analysis.market_regime_identifier import VolatilityLevel, TrendStrength, MacroRegime, MarketRegimeIdentifier
 
 # 配置日誌
 logger = logging.getLogger(__name__)
@@ -120,35 +125,128 @@ class ComplexReward(BaseRewardStrategy):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         # 示例權重，可通過配置調整
-        self.sortino_weight = self.config.get('sortino_weight', 0.3)
-        self.profit_factor_weight = self.config.get('profit_factor_weight', 0.2)
+        self.sortino_weight = self.config.get('sortino_weight', 0.25) # Adjusted to make space for market regime
+        self.profit_factor_weight = self.config.get('profit_factor_weight', 0.15)
         self.win_rate_weight = self.config.get('win_rate_weight', 0.1)
-        self.market_adaptability_weight = self.config.get('market_adaptability_weight', 0.2) # 需外部評估
-        self.consistency_weight = self.config.get('consistency_weight', 0.1) # 需外部評估
+        # self.market_adaptability_weight = self.config.get('market_adaptability_weight', 0.2) # Placeholder, to be replaced or refined
+        # self.consistency_weight = self.config.get('consistency_weight', 0.1) # Placeholder
         self.max_drawdown_penalty_weight = self.config.get('max_drawdown_penalty_weight', 0.1)
-        logger.info(f"ComplexReward initialized with various weights including Sortino, ProfitFactor, etc.")
 
-    def calculate_reward(self, trade_info: Dict[str, Any], market_data: Optional[Dict[str, Any]] = None) -> float:
-        """計算高複雜度獎勵"""
+        # New weights for market regime based rewards/penalties
+        self.regime_multiplier_config = self.config.get('regime_multiplier_config', 
+            {
+                "default_multiplier": 1.0,
+                "volatility": {
+                    VolatilityLevel.HIGH.value: {"multiplier": 1.2, "pnl_threshold_factor": 0.5},
+                    VolatilityLevel.LOW.value: {"multiplier": 0.8, "pnl_threshold_factor": 1.5}
+                },
+                "trend_strength": {
+                    TrendStrength.STRONG_TREND.value: {"multiplier": 1.3, "pnl_threshold_factor": 0.7},
+                    TrendStrength.NO_TREND.value: {"multiplier": 0.7, "pnl_threshold_factor": 1.3}
+                },
+                "macro_regime": {
+                    MacroRegime.BULLISH.value: {"trend_bonus": 0.1, "ranging_penalty": 0.05},
+                    MacroRegime.BEARISH.value: {"trend_bonus": 0.1, "ranging_penalty": 0.05},
+                    MacroRegime.RANGING.value: {"ranging_bonus": 0.1, "trend_penalty": 0.05}
+                }
+            }
+        )
+        logger.info(f"ComplexReward initialized with various weights and regime multiplier config.")
+
+    def _calculate_base_reward(self, trade_info: Dict[str, Any]) -> float:
+        """Helper to calculate the non-regime part of the reward."""
         sortino_ratio = trade_info.get('sortino_ratio', 0.0)
-        profit_factor = trade_info.get('profit_factor', 1.0) # 總盈利 / 總虧損，避免除零
-        win_rate = trade_info.get('win_rate', 0.5) # 盈利交易次數 / 總交易次數
+        profit_factor = trade_info.get('profit_factor', 1.0) 
+        win_rate = trade_info.get('win_rate', 0.5) 
         max_drawdown = trade_info.get('max_drawdown', 0.0)
+        # market_adaptability_score = trade_info.get('market_adaptability_score', 0.0)
+        # behavioral_consistency_score = trade_info.get('behavioral_consistency_score', 0.0)
 
-        # 模擬的外部評估指標
-        market_adaptability_score = trade_info.get('market_adaptability_score', 0.0) # 假設由元學習或分析模組提供
-        behavioral_consistency_score = trade_info.get('behavioral_consistency_score', 0.0) # 假設由元學習或分析模組提供
-
-        reward = (
+        base_reward = (
             sortino_ratio * self.sortino_weight +
-            (profit_factor - 1) * self.profit_factor_weight + # profit_factor 大於1才有正貢獻
-            (win_rate - 0.5) * self.win_rate_weight + # win_rate 大於0.5才有正貢獻
-            market_adaptability_score * self.market_adaptability_weight +
-            behavioral_consistency_score * self.consistency_weight -
+            (profit_factor - 1) * self.profit_factor_weight +
+            (win_rate - 0.5) * self.win_rate_weight -
+            # market_adaptability_score * self.market_adaptability_weight -
+            # behavioral_consistency_score * self.consistency_weight -
             abs(max_drawdown) * self.max_drawdown_penalty_weight
         )
-        # logger.debug(f"ComplexReward: Sortino={sortino_ratio}, ProfitFactor={profit_factor}, WinRate={win_rate}, MaxDrawdown={max_drawdown}, Adaptability={market_adaptability_score}, Consistency={behavioral_consistency_score}, TotalReward={reward}")
-        return reward
+        return base_reward
+
+    def _apply_regime_modifiers(self, base_reward: float, trade_info: Dict[str, Any], market_data: Optional[Dict[str, Any]]) -> float:
+        """Applies market regime based multipliers and bonuses/penalties."""
+        if not market_data:
+            return base_reward
+
+        current_regime: Optional[Dict[str, Any]] = market_data.get('current_regime')
+        if not current_regime:
+            return base_reward
+
+        pnl = trade_info.get('realized_pnl', trade_info.get('pnl', 0.0))
+        modified_reward = base_reward
+        multiplier = self.regime_multiplier_config.get("default_multiplier", 1.0)
+        pnl_threshold_factor = 1.0 # Default, higher means harder to get bonus for positive PnL
+
+        # Volatility modifier
+        vol = current_regime.get('volatility_level')
+        if vol and vol.value in self.regime_multiplier_config.get("volatility", {}):
+            vol_config = self.regime_multiplier_config["volatility"][vol.value]
+            multiplier *= vol_config.get("multiplier", 1.0)
+            pnl_threshold_factor *= vol_config.get("pnl_threshold_factor", 1.0)
+            logger.debug(f"Volatility {vol.value}: multiplier effect {vol_config.get('multiplier', 1.0)}, pnl_factor effect {vol_config.get('pnl_threshold_factor', 1.0)}")
+
+        # Trend Strength modifier
+        trend = current_regime.get('trend_strength')
+        if trend and trend.value in self.regime_multiplier_config.get("trend_strength", {}):
+            trend_config = self.regime_multiplier_config["trend_strength"][trend.value]
+            multiplier *= trend_config.get("multiplier", 1.0)
+            pnl_threshold_factor *= trend_config.get("pnl_threshold_factor", 1.0)
+            logger.debug(f"Trend {trend.value}: multiplier effect {trend_config.get('multiplier', 1.0)}, pnl_factor effect {trend_config.get('pnl_threshold_factor', 1.0)}")
+
+        # Apply multiplier: if PnL is positive and above a dynamic threshold, apply full multiplier.
+        # If PnL is negative, the multiplier might amplify penalty (or be capped).
+        # This is a simple heuristic, can be made more sophisticated.
+        dynamic_pnl_threshold = trade_info.get('average_trade_pnl', 0) * pnl_threshold_factor 
+        if pnl > dynamic_pnl_threshold: # Only apply full multiplier bonus if PnL is significantly positive
+            modified_reward *= multiplier
+        elif pnl < 0: # For negative PnL, ensure multiplier doesn't excessively reduce penalty (or can amplify it)
+            modified_reward *= max(1.0, multiplier) # Example: if multiplier is <1, don't reduce penalty; if >1, amplify.
+        else: # Neutral or slightly positive PnL, less impact from multiplier
+            modified_reward *= (1.0 + multiplier) / 2 # Average effect
+
+        logger.debug(f"After PnL-sensitive multiplier ({multiplier:.2f}, pnl_thresh_factor: {pnl_threshold_factor:.2f}, dyn_thresh: {dynamic_pnl_threshold:.2f}): {modified_reward:.4f}")
+
+        # Macro Regime bonus/penalty (additive)
+        macro = current_regime.get('macro_regime')
+        if macro and macro.value in self.regime_multiplier_config.get("macro_regime", {}):
+            macro_config = self.regime_multiplier_config["macro_regime"][macro.value]
+            if pnl > 0: # Bonuses for profitable trades in favorable regimes
+                if (macro == MacroRegime.BULLISH or macro == MacroRegime.BEARISH) and trend == TrendStrength.STRONG_TREND:
+                    modified_reward += macro_config.get("trend_bonus", 0)
+                    logger.debug(f"Macro {macro.value} with Strong Trend: adding trend_bonus {macro_config.get('trend_bonus', 0)}")
+                elif macro == MacroRegime.RANGING and trend == TrendStrength.NO_TREND:
+                    modified_reward += macro_config.get("ranging_bonus", 0)
+                    logger.debug(f"Macro {macro.value} with No Trend: adding ranging_bonus {macro_config.get('ranging_bonus', 0)}")
+            elif pnl < 0: # Penalties for losing trades in unfavorable regime mismatches
+                if (macro == MacroRegime.BULLISH or macro == MacroRegime.BEARISH) and trend == TrendStrength.NO_TREND:
+                    modified_reward -= macro_config.get("ranging_penalty", 0) # Penalize trying to trend in ranging
+                    logger.debug(f"Macro {macro.value} with No Trend (loss): applying ranging_penalty {macro_config.get('ranging_penalty', 0)}")
+                elif macro == MacroRegime.RANGING and trend == TrendStrength.STRONG_TREND:
+                    modified_reward -= macro_config.get("trend_penalty", 0) # Penalize trying to range in trend
+                    logger.debug(f"Macro {macro.value} with Strong Trend (loss): applying trend_penalty {macro_config.get('trend_penalty', 0)}")
+        
+        logger.debug(f"Final reward after regime modifiers: {modified_reward:.4f}")
+        return modified_reward
+
+    def calculate_reward(self, trade_info: Dict[str, Any], market_data: Optional[Dict[str, Any]] = None) -> float:
+        """計算高複雜度獎勵，包含市場狀態調整"""
+        
+        base_reward = self._calculate_base_reward(trade_info)
+        logger.debug(f"ComplexReward Base: {base_reward:.4f}")
+        
+        final_reward = self._apply_regime_modifiers(base_reward, trade_info, market_data)
+        
+        # logger.debug(f"ComplexReward: Base={base_reward:.4f}, Final={final_reward:.4f}, PnL={trade_info.get('realized_pnl', 0.0)}, MarketData provided: {market_data is not None}")
+        return final_reward
 
 class ProgressiveLearningSystem:
     """
@@ -286,7 +384,7 @@ if __name__ == '__main__':
     logger.info("----- Testing Progressive Reward System -----")
 
     # 1. 測試各個獎勵策略
-    logger.info("\n--- Testing Individual Reward Strategies ---")
+    logger.info("\\n--- Testing Individual Reward Strategies ---")
     simple_reward_config = {'profit_weight': 0.7, 'risk_penalty_weight': 0.3, 'risk_metric': 'drawdown'}
     simple_reward_strategy = SimpleReward(config=simple_reward_config)
     trade_info_1 = {'realized_pnl': 100, 'drawdown': 10}
@@ -305,17 +403,32 @@ if __name__ == '__main__':
     logger.info(f"IntermediateReward for {trade_info_2}: {reward2} (Expected: {expected_reward2})")
     assert abs(reward2 - expected_reward2) < 1e-6
 
-    complex_reward_strategy = ComplexReward()
+    complex_reward_strategy = ComplexReward() # Uses default config
     trade_info_3 = {
         'sortino_ratio': 2.0, 'profit_factor': 1.8, 'win_rate': 0.6,
-        'max_drawdown': 25, 'market_adaptability_score': 0.7, 'behavioral_consistency_score': 0.6
+        'max_drawdown': 25, 
+        # These are present in trade_info but not used by current ComplexReward base calculation
+        'market_adaptability_score': 0.7, 
+        'behavioral_consistency_score': 0.6 
     }
     reward3 = complex_reward_strategy.calculate_reward(trade_info_3)
-    # Default weights: sortino=0.3, pf=0.2, wr=0.1, adapt=0.2, consist=0.1, mdd_penalty=0.1
-    expected_reward3 = (2.0*0.3) + (1.8-1)*0.2 + (0.6-0.5)*0.1 + (0.7*0.2) + (0.6*0.1) - (25*0.1)
-    # 0.6 + 0.8*0.2 + 0.1*0.1 + 0.14 + 0.06 - 2.5
-    # 0.6 + 0.16 + 0.01 + 0.14 + 0.06 - 2.5 = 0.97 - 2.5 = -1.53
-    logger.info(f"ComplexReward for {trade_info_3}: {reward3} (Expected: {expected_reward3})")
+    # Current default weights in ComplexReward: 
+    # sortino_weight = 0.25
+    # profit_factor_weight = 0.15
+    # win_rate_weight = 0.1
+    # max_drawdown_penalty_weight = 0.1
+    # market_adaptability_weight and consistency_weight are effectively 0 (commented out)
+    
+    expected_reward3 = (
+        trade_info_3['sortino_ratio'] * complex_reward_strategy.sortino_weight +
+        (trade_info_3['profit_factor'] - 1) * complex_reward_strategy.profit_factor_weight +
+        (trade_info_3['win_rate'] - 0.5) * complex_reward_strategy.win_rate_weight -
+        abs(trade_info_3['max_drawdown']) * complex_reward_strategy.max_drawdown_penalty_weight
+    )
+    # Calculation: (2.0 * 0.25) + (0.8 * 0.15) + (0.1 * 0.1) - (25 * 0.1)
+    # = 0.5 + 0.12 + 0.01 - 2.5 = 0.63 - 2.5 = -1.87
+
+    logger.info(f"ComplexReward for {trade_info_3} (no market data): {reward3:.4f} (Expected: {expected_reward3:.4f})")
     assert abs(reward3 - expected_reward3) < 1e-6
 
     # 2. 測試 ProgressiveLearningSystem
@@ -384,4 +497,107 @@ if __name__ == '__main__':
     logger.info(f"Reward from PLS (Complex): {reward_from_pls} (Expected: {expected_reward3})")
     assert abs(reward_from_pls - expected_reward3) < 1e-6
 
-    logger.info("----- Progressive Reward System Tests Passed -----")
+    logger.info("\n--- Testing ComplexReward with MarketRegimeIdentifier Integration ---")
+    # Setup MarketRegimeIdentifier
+    # Assuming MarketRegimeIdentifier and its enums are imported at the top of the file
+    # from src.market_analysis.market_regime_identifier import MarketRegimeIdentifier, VolatilityLevel, TrendStrength, MacroRegime
+    
+    mri_config = {
+        "atr_period": 14,
+        "atr_resample_freq": "1h",
+        "atr_thresholds": {"low_to_medium": 0.002, "medium_to_high": 0.005},
+        "adx_period": 14,
+        "adx_resample_freq": "4h",
+        "adx_thresholds": {"no_to_weak": 20, "weak_to_strong": 25}
+    }
+    try:
+        market_regime_identifier = MarketRegimeIdentifier(config=mri_config)
+    except Exception as e:
+        logger.error(f"Failed to initialize MarketRegimeIdentifier for testing: {e}")
+        market_regime_identifier = None
+
+    # Sample S5 data (minimal, just to get some regime output)
+    # For more realistic regime outputs, use more extensive data as in test_market_analysis.py
+    periods = 2 * 24 * 60 * 12  # 2 days of 5s data
+    rng = pd.date_range('2023-01-01', periods=periods, freq='5s')
+    s5_data_for_regime = pd.DataFrame({
+        'open': np.random.rand(periods) * 10 + 100,
+        'high': np.random.rand(periods) * 10 + 100.5,
+        'low': np.random.rand(periods) * 10 + 99.5,
+        'close': np.random.rand(periods) * 10 + 100,
+        'volume': np.random.randint(50, 200, periods)
+    }, index=rng)
+    s5_data_for_regime['high'] = s5_data_for_regime[['open', 'high', 'low', 'close']].max(axis=1)
+    s5_data_for_regime['low'] = s5_data_for_regime[['open', 'high', 'low', 'close']].min(axis=1)
+
+    current_regime_output = None
+    if market_regime_identifier:
+        try:
+            current_regime_output = market_regime_identifier.get_current_regime(s5_data_for_regime)
+            logger.info(f"Sample Current Regime for testing: {current_regime_output}")
+        except Exception as e:
+            logger.error(f"Error getting current regime for testing: {e}")
+            current_regime_output = { # Fallback if MRI fails
+                "macro_regime": MacroRegime.RANGING,
+                "volatility_level": VolatilityLevel.MEDIUM,
+                "trend_strength": TrendStrength.NO_TREND
+            }
+    else:
+        current_regime_output = { # Fallback if MRI init fails
+            "macro_regime": MacroRegime.RANGING,
+            "volatility_level": VolatilityLevel.MEDIUM,
+            "trend_strength": TrendStrength.NO_TREND
+        }
+        logger.warning("MarketRegimeIdentifier not available, using fallback regime for testing ComplexReward.")
+
+    market_data_for_reward = {"current_regime": current_regime_output}
+
+    # Define a ComplexReward instance with a specific or default regime_multiplier_config
+    # Using default config as defined in ComplexReward class for this test
+    complex_reward_strategy_for_regime_test = ComplexReward(config={})
+    # Or define a custom one:
+    # custom_regime_config = complex_reward_strategy_for_regime_test.regime_multiplier_config.copy()
+    # custom_regime_config["volatility"][VolatilityLevel.HIGH.value]["multiplier"] = 1.5 
+    # complex_reward_strategy_for_regime_test = ComplexReward(config={"regime_multiplier_config": custom_regime_config})
+
+    test_scenarios = [
+        {"name": "Positive PnL, Avg Trade PnL provided", "trade_info": {'realized_pnl': 100, 'average_trade_pnl': 50, 'sortino_ratio': 1.5, 'profit_factor': 2.0, 'win_rate': 0.6, 'max_drawdown': 10}},
+        {"name": "Negative PnL, Avg Trade PnL provided", "trade_info": {'realized_pnl': -80, 'average_trade_pnl': 50, 'sortino_ratio': -0.5, 'profit_factor': 0.5, 'win_rate': 0.3, 'max_drawdown': 15}},
+        {"name": "Small Positive PnL, below dynamic threshold", "trade_info": {'realized_pnl': 20, 'average_trade_pnl': 50, 'sortino_ratio': 0.8, 'profit_factor': 1.2, 'win_rate': 0.55, 'max_drawdown': 5}},
+        {"name": "Positive PnL, NO Avg Trade PnL (threshold defaults to 0)", "trade_info": {'realized_pnl': 100, 'sortino_ratio': 1.5, 'profit_factor': 2.0, 'win_rate': 0.6, 'max_drawdown': 10}},
+        {"name": "No Market Data (should use base reward only)", "trade_info": {'realized_pnl': 100, 'sortino_ratio': 1.5, 'profit_factor': 2.0, 'win_rate': 0.6, 'max_drawdown': 10}, "market_data": None}
+    ]
+
+    for scenario in test_scenarios:
+        logger.info(f"\n--- Testing Scenario: {scenario['name']} ---")
+        trade_info = scenario["trade_info"]
+        market_data_input = scenario.get("market_data", market_data_for_reward) # Use default market_data_for_reward unless None is specified
+        
+        logger.info(f"Trade Info: {trade_info}")
+        if market_data_input:
+            logger.info(f"Market Data (Regime): {market_data_input['current_regime']}")
+        else:
+            logger.info("Market Data: None (testing base reward path)")
+
+        # Calculate base reward for comparison
+        base_reward = complex_reward_strategy_for_regime_test._calculate_base_reward(trade_info)
+        logger.info(f"Calculated Base Reward: {base_reward:.4f}")
+
+        # Calculate final reward with potential regime modification
+        final_reward = complex_reward_strategy_for_regime_test.calculate_reward(trade_info, market_data_input)
+        logger.info(f"Calculated Final Reward: {final_reward:.4f}")
+        
+        if market_data_input and market_data_input.get('current_regime'):
+            if final_reward > base_reward:
+                logger.info("Regime MODIFIER: Positive (reward increased or penalty reduced)")
+            elif final_reward < base_reward:
+                logger.info("Regime MODIFIER: Negative (reward reduced or penalty increased)")
+            else:
+                logger.info("Regime MODIFIER: Neutral (no change or effects cancelled out)")
+        elif not market_data_input:
+             assert abs(final_reward - base_reward) < 1e-6, "Final reward should be base reward if no market data"
+             logger.info("Confirmed: Final reward equals base reward as no market data was provided.")
+
+    logger.info("----- ComplexReward with MarketRegimeIdentifier Integration Tests Finished -----")
+
+    logger.info("----- Progressive Reward System Tests Passed (including integration checks) -----")

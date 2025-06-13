@@ -393,5 +393,207 @@ class TestComplexReward(unittest.TestCase):
         self.assertAlmostEqual(reward_strategy.calculate_reward(trade_info), expected_reward)
 
 
+class TestProgressiveLearningSystem(unittest.TestCase):
+    def setUp(self):
+        """Set up common configurations for testing ProgressiveLearningSystem."""
+        self.mock_trade_info_simple = {
+            'realized_pnl': 100,
+            'drawdown': 10
+        }
+        self.mock_metrics_stage1_pass = {'cumulative_reward': 600, 'episodes': 50} # Ensure cumulative_reward > 500
+        self.mock_metrics_stage1_fail = {'cumulative_reward': 100, 'episodes': 50}
+
+        self.mock_trade_info_intermediate = {
+            'sharpe_ratio': 1.5,
+            'realized_pnl': 200,
+            'drawdown': 50,
+            'trade_cost': 10
+        }
+        self.mock_metrics_stage2_pass = {'sharpe_ratio': 0.9, 'episodes': 100} # Ensure sharpe_ratio > 0.8
+        self.mock_metrics_stage2_fail = {'sharpe_ratio': 0.5, 'episodes': 100}
+
+        self.mock_trade_info_complex = {
+            'sortino_ratio': 2.0,
+            'profit_factor': 3.0,
+            'win_rate': 0.7,
+            'max_drawdown': 0.1,
+            'market_adaptability_score': 0.8,
+            'behavioral_consistency_score': 0.75
+        }
+        # Metrics for advancing to a hypothetical Stage 4 (not used for advancement from Stage 3 in current config)
+        self.mock_metrics_stage3_pass = {'alpha_vs_benchmark': 0.05, 'episodes': 150}
+
+        self.stage_configs = {
+            1: {
+                'reward_strategy_class': SimpleReward,
+                'reward_config': {'profit_weight': 0.8, 'risk_penalty_weight': 0.2},
+                'criteria_to_advance': lambda metrics: metrics.get('cumulative_reward', 0) > 500 and metrics.get('episodes', 0) >= 50,
+                'max_episodes_or_steps': 100
+            },
+            2: {
+                'reward_strategy_class': IntermediateReward,
+                'reward_config': {'sharpe_weight': 0.5, 'pnl_weight': 0.3, 'drawdown_penalty_weight': 0.15, 'cost_penalty_weight': 0.05},
+                'criteria_to_advance': lambda metrics: metrics.get('sharpe_ratio', 0) > 0.8 and metrics.get('episodes', 0) >= 100,
+                'max_episodes_or_steps': 200
+            },
+            3: { 
+                'reward_strategy_class': ComplexReward, 
+                'reward_config': { # More complete config for ComplexReward for testing
+                    'sortino_weight': 0.3, 'profit_factor_weight': 0.2, 'win_rate_weight': 0.1,
+                    'market_adaptability_weight': 0.15, 'consistency_weight': 0.1, 'max_drawdown_penalty_weight': 0.15
+                },
+                'criteria_to_advance': None, # No auto advancement from stage 3 in this test setup
+                'max_episodes_or_steps': 50
+            }
+        }
+
+    def test_initialization_stage1(self):
+        """Test system initializes to stage 1 correctly."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        self.assertEqual(system.current_stage_number, 1)
+        self.assertIsInstance(system.get_current_reward_function(), SimpleReward)
+        current_reward_func = system.get_current_reward_function()
+        self.assertEqual(current_reward_func.profit_weight, 0.8)
+
+    def test_get_reward_stage1(self):
+        """Test reward calculation at stage 1."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        expected_reward_stage1 = (100 * 0.8) - (10 * 0.2) # From self.mock_trade_info_simple and stage 1 config
+        self.assertAlmostEqual(system.calculate_reward(self.mock_trade_info_simple), expected_reward_stage1) # Changed get_reward to calculate_reward
+
+    def test_advance_stage_manually(self):
+        """Test manual advancement to stage 2."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        system.advance_stage_manually() # Changed advance_stage to advance_stage_manually
+        self.assertEqual(system.current_stage_number, 2)
+        self.assertIsInstance(system.get_current_reward_function(), IntermediateReward)
+        current_reward_func = system.get_current_reward_function()
+        self.assertEqual(current_reward_func.sharpe_weight, 0.5)
+
+    def test_get_reward_stage2_after_manual_advance(self):
+        """Test reward calculation at stage 2 after manual advancement."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        system.advance_stage_manually() # Changed advance_stage to advance_stage_manually
+        self.assertEqual(system.current_stage_number, 2) # Ensure we are in stage 2
+        expected_reward_stage2 = (1.5 * 0.5) + (200 * 0.3) - (abs(50) * 0.15) - (abs(10) * 0.05) # From mock_trade_info_intermediate
+        self.assertAlmostEqual(system.calculate_reward(self.mock_trade_info_intermediate), expected_reward_stage2, places=5) # Changed get_reward to calculate_reward
+
+    def test_check_and_advance_stage1_pass(self):
+        """Test automatic advancement from stage 1 when criteria are met."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        system.check_and_advance_stage(self.mock_metrics_stage1_pass) # Changed check_and_advance to check_and_advance_stage
+        self.assertEqual(system.current_stage_number, 2)
+        self.assertIsInstance(system.get_current_reward_function(), IntermediateReward)
+
+    def test_check_and_advance_stage1_fail(self):
+        """Test no advancement from stage 1 when criteria are not met."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        system.check_and_advance_stage(self.mock_metrics_stage1_fail) # Changed check_and_advance to check_and_advance_stage
+        self.assertEqual(system.current_stage_number, 1)
+        self.assertIsInstance(system.get_current_reward_function(), SimpleReward)
+
+    def test_get_reward_stage2_after_auto_advance(self):
+        """Test reward calculation at stage 2 after automatic advancement."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        system.check_and_advance_stage(self.mock_metrics_stage1_pass) # Advance to Stage 2
+        self.assertEqual(system.current_stage_number, 2)
+        expected_reward_stage2 = (1.5 * 0.5) + (200 * 0.3) - (abs(50) * 0.15) - (abs(10) * 0.05)
+        self.assertAlmostEqual(system.calculate_reward(self.mock_trade_info_intermediate), expected_reward_stage2, places=5) # Changed get_reward to calculate_reward
+
+    def test_check_and_advance_stage2_pass_to_stage3(self):
+        """Test automatic advancement from stage 2 to stage 3 when criteria are met."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=2) # Start at stage 2
+        self.assertIsInstance(system.get_current_reward_function(), IntermediateReward)
+        system.check_and_advance_stage(self.mock_metrics_stage2_pass) # Use metrics defined to pass stage 2
+        self.assertEqual(system.current_stage_number, 3)
+        self.assertIsInstance(system.get_current_reward_function(), ComplexReward)
+
+    def test_check_and_advance_stage2_fail(self):
+        """Test no advancement from stage 2 when criteria for stage 3 are not met."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=2) # Start at stage 2
+        system.check_and_advance_stage(self.mock_metrics_stage2_fail) # Use metrics defined to fail stage 2 advancement
+        self.assertEqual(system.current_stage_number, 2)
+        self.assertIsInstance(system.get_current_reward_function(), IntermediateReward)
+
+    def test_get_reward_stage3_after_advancing_from_stage2(self):
+        """Test reward calculation at stage 3 after advancing from stage 2."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=2)
+        system.check_and_advance_stage(self.mock_metrics_stage2_pass) # Advance to Stage 3
+        self.assertEqual(system.current_stage_number, 3)
+        self.assertIsInstance(system.get_current_reward_function(), ComplexReward)
+        
+        complex_reward_strategy = system.get_current_reward_function()
+        cfg = complex_reward_strategy.config # This will be self.stage_configs[3][\'reward_config\']
+        
+        expected_reward_stage3 = (
+            self.mock_trade_info_complex['sortino_ratio'] * cfg['sortino_weight'] +
+            (self.mock_trade_info_complex['profit_factor'] - 1) * cfg['profit_factor_weight'] +
+            (self.mock_trade_info_complex['win_rate'] - 0.5) * cfg['win_rate_weight'] +
+            self.mock_trade_info_complex['market_adaptability_score'] * cfg['market_adaptability_weight'] +
+            self.mock_trade_info_complex['behavioral_consistency_score'] * cfg['consistency_weight'] -
+            abs(self.mock_trade_info_complex['max_drawdown']) * cfg['max_drawdown_penalty_weight']
+        )
+        self.assertAlmostEqual(system.calculate_reward(self.mock_trade_info_complex), expected_reward_stage3, places=5)
+
+    def test_advance_stage_to_max_stops(self):
+        """Test that advancing beyond the highest configured stage does not change stage."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=3) # Start at stage 3
+        self.assertEqual(system.current_stage_number, 3)
+        self.assertIsInstance(system.get_current_reward_function(), ComplexReward)
+        system.advance_stage_manually() # Changed advance_stage to advance_stage_manually
+        self.assertEqual(system.current_stage_number, 3) # Should remain at stage 3
+        self.assertIsInstance(system.get_current_reward_function(), ComplexReward)
+
+    def test_check_and_advance_at_max_stage(self):
+        """Test check_and_advance at the highest stage with criteria (should not advance)."""
+        # Modify stage 3 to have criteria for this test, though it won't advance further
+        self.stage_configs[3]['criteria_to_advance'] = lambda metrics: True
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=3)
+        system.check_and_advance_stage({'some_metric': 100}) # Changed check_and_advance to check_and_advance_stage
+        self.assertEqual(system.current_stage_number, 3) # Still stage 3
+        self.assertIsInstance(system.get_current_reward_function(), ComplexReward)
+        # Reset criteria for other tests if setUp is not run per method by test runner (unittest default is per method)
+        self.stage_configs[3]['criteria_to_advance'] = None 
+
+    def test_invalid_initial_stage(self):
+        """Test system behavior with an invalid initial stage (falls back to min stage)."""
+        # ProgressiveLearningSystem is designed to fallback to the minimum stage if initial_stage is invalid
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=99) 
+        self.assertEqual(system.current_stage_number, 1) # Falls back to stage 1 (min defined stage)
+        self.assertIsInstance(system.get_current_reward_function(), SimpleReward)
+
+    def test_stage_config_missing_reward_class(self):
+        """Test error handling if a stage config is missing reward_strategy_class."""
+        faulty_configs = {
+            1: {
+                # Missing 'reward_strategy_class'
+                'reward_config': {},
+                'criteria_to_advance': lambda m: True
+            }
+        }
+        with self.assertRaises(ValueError) as context: # Expecting ValueError from _setup_current_stage
+            ProgressiveLearningSystem(stage_configs=faulty_configs, initial_stage=1)
+        self.assertIn("Invalid reward_strategy_class for stage 1: None", str(context.exception)) # Corrected assertion message
+
+    def test_update_episode_step_counters(self):
+        """Test that episode and step counters are updated and reset on stage advance."""
+        system = ProgressiveLearningSystem(stage_configs=self.stage_configs, initial_stage=1)
+        system.record_episode_end()
+        system.record_step()
+        system.record_step()
+        self.assertEqual(system.episode_in_current_stage, 1) # Changed episodes_in_current_stage to episode_in_current_stage
+        self.assertEqual(system.steps_in_current_stage, 2)
+
+        # Advance stage and check if counters reset
+        system.advance_stage_manually() # Changed advance_stage to advance_stage_manually
+        self.assertEqual(system.current_stage_number, 2)
+        self.assertEqual(system.episode_in_current_stage, 0) # Changed episodes_in_current_stage to episode_in_current_stage
+        self.assertEqual(system.steps_in_current_stage, 0)
+
+        system.record_episode_end()
+        system.record_step()
+        self.assertEqual(system.episode_in_current_stage, 1) # Changed episodes_in_current_stage to episode_in_current_stage
+        self.assertEqual(system.steps_in_current_stage, 1)
+
 if __name__ == '__main__':
     unittest.main()

@@ -142,15 +142,15 @@
     - **測試**:
         - [x] **單元測試**: 驗證包含夏普比率、回撤懲罰、交易成本的獎勵計算。
 
-- [ ] **階段3：高複雜度（多維優化）**
-    - [ ] 在 `ComplexReward` 中實現藍圖中定義的高複雜度獎勵計算（多因子加權組合）。
+- [x] **階段3：高複雜度（多維優化）**
+    - [x] 在 `ComplexReward` 中實現藍圖中定義的高複雜度獎勵計算（多因子加權組合）。
     - **測試**:
-        - [ ] **單元測試**: 驗證包含多個市場指標的複雜獎勵計算。
-    - [ ] **整合 `ProgressiveLearningSystem`**
-    - [ ] 實現 `get_current_reward_function` 方法，使其能根據 `current_stage` 返回對應的獎勵函數實例。
-    - [ ] 實現階段轉換邏輯 (基於 `stage_criteria`)。
+        - [x] **單元測試**: 驗證包含多個市場指標的複雜獎勵計算。
+    - [x] **整合 `ProgressiveLearningSystem`**
+    - [x] 實現 `get_current_reward_function` 方法，使其能根據 `current_stage` 返回對應的獎勵函數實例。
+    - [x] 實現階段轉換邏輯 (基於 `stage_criteria`)。
     - **測試**:
-        - [ ] **單元測試**: 驗證系統能否正確返回當前階段的獎勵函數，以及能否根據標準正確轉換階段。
+        - [x] **單元測試**: 驗證系統能否正確返回當前階段的獎勵函數，以及能否根據標準正確轉換階段。
 
 ### 2.2 元學習機制
 - [ ] **創建 `src/agent/meta_learning_system.py` 檔案**
@@ -305,4 +305,48 @@
 3.  每完成一個模組或主要功能，立即編寫並執行其單元測試。
 4.  在關鍵節點執行整合測試，確保各模組協同工作正常。
 
-請定期更新此檔案的複選框狀態，以追蹤整體進度。
+請定期更新此檔案的複選框狀態，以追蹤整體進度.
+
+# 高級市場狀態分析模組 (Market Regime Analysis)
+
+- [X] 設計 `MarketRegimeIdentifier` 類 (`src/market_analysis/market_regime_identifier.py`)
+    - [X] 支援從 S5 OHLCV 數據重採樣 (resample) 到不同時間顆粒度 (e.g., 1H, 4H, 1D) - `_resample_ohlcv`
+    - [X] 整合波動率分析 (Volatility Analysis)
+        - [X] 使用 ATR (Average True Range)
+        - [X] 定義波動性等級 (e.g., `Low`, `Medium`, `High`) - `VolatilityLevel` Enum
+        - [X] 實作 `get_volatility_level(self, s5_data)`
+        - [X] 可配置 ATR 週期與重採樣頻率
+        - [X] 可配置波動性等級閾值
+    - [X] 整合趨勢強度分析 (Trend Strength Analysis)
+        - [X] 使用 ADX (Average Directional Index)
+        - [X] 定義趨勢強度等級 (e.g., `No_Trend`, `Weak_Trend`, `Strong_Trend`) - `TrendStrength` Enum
+        - [X] 實作 `get_trend_strength(self, s5_data)`
+        - [X] 可配置 ADX 週期與重採樣頻率
+        - [X] 可配置趨勢強度等級閾值
+    - [X] 整合宏觀市場狀態分析 (Macro Regime Analysis) - (初步使用 Placeholder)
+        - [X] 定義宏觀狀態 (e.g., `Bullish`, `Bearish`, `Ranging`) - `MacroRegime` Enum
+        - [X] 實作 `get_macro_regime(self, s5_data)` (目前為 Placeholder)
+        - [ ] (未來) 研究並整合 HMM/GMM 或其他宏觀分析方法
+    - [X] 提供統一的接口 `get_current_regime(self, s5_data)` 返回包含所有分析結果的字典
+    - [X] 完善建構函數 `__init__`，加載配置並進行驗證
+    - [X] 確保模組化設計，易於擴展（例如未來加入新聞分析模組）
+    - [X] 已將 ATR 和 ADX 的 Placeholder 實現替換為使用 `pandas-ta`
+- [X] 編寫 `MarketRegimeIdentifier` 的單元測試 (`tests/unit_tests/test_market_analysis.py`)
+    - [X] 測試 S5 數據重採樣邏輯
+    - [X] 測試波動率等級計算 (ATR) - (已使用 `pandas-ta`)
+    - [X] 測試趨勢強度等級計算 (ADX) - (已使用 `pandas-ta`)
+    - [X] 測試宏觀市場狀態 (Placeholder)
+    - [X] 測試 `get_current_regime` 接口
+    - [X] 測試不同數據量（足夠/不足）下的行為
+    - [X] 測試配置錯誤或數據格式錯誤的異常處理
+    - [X] 所有單元測試已通過且無警告
+- [ ] **將 `MarketRegimeIdentifier` 整合到 `ComplexReward` 系統中**
+    - [ ] 在 `ComplexReward` 中接收 `market_data` 字典，其中包含 `current_regime`
+    - [ ] 設計並實現基於不同市場狀態組合的獎勵調整邏輯
+        - [ ] 波動率調整：高波動時可能放大盈虧影響，低波動時減小
+        - [ ] 趨勢強度調整：強趨勢時順勢交易獎勵增加，逆勢懲罰增加；弱趨勢/無趨勢時，趨勢策略的獎勵可能打折扣
+        - [ ] 宏觀狀態調整（基於Placeholder）：牛市做多獎勵，熊市做空獎勵，震盪市對應策略獎勵
+    - [ ] 更新 `ComplexReward` 的配置，允許定義不同狀態下的獎勵權重或乘數
+    - [ ] 編寫新的單元測試或擴展現有測試，驗證整合 `MarketRegimeIdentifier` 後的 `ComplexReward` 計算邏輯
+- [ ] (下一步) 將 `MarketRegimeIdentifier` 整合到策略決策流程中
+- [ ] (下一步) 針對 HMM/GMM 進行更深入研究與選擇性實作
