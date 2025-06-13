@@ -10,6 +10,8 @@ import pytest
 import torch.nn as nn
 from unittest.mock import MagicMock, patch
 import os # Added global import
+import json # Added for JSON operations
+import tempfile # Added for temporary file creation
 
 # Define project_root globally
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -336,9 +338,10 @@ def test_forward_with_internal_weights_real_strategies(base_config: StrategyConf
             explicit_strategies=strategy_classes_to_test,
             strategy_input_dim=strategy_input_feature_dim # For strategies
         )
+        layer.to(DEVICE) # Ensure layer and its parameters are on the correct device
 
-    if layer.num_actual_strategies == 0:
-        pytest.skip("No strategies loaded in ESS, cannot perform forward pass test.")
+        if layer.num_actual_strategies == 0:
+            pytest.skip("No strategies loaded in ESS, cannot perform forward pass test.")
 
     # MODIFIED: Unpack all 4 values
     asset_features_batch, market_state_features, timestamps, current_positions_batch = mock_input_features_for_real_strategies
@@ -567,4 +570,460 @@ def test_strategy_combination_weights_and_execution_order(
 
 def test_dynamic_strategy_generator_generates_strategy(mock_logger): # Removed mocker dependency
     """Test that DynamicStrategyGenerator can generate a new strategy instance."""
+
+# ADDED: New test class or methods for adaptive weighting
+class TestAdaptiveWeighting(unittest.TestCase):
+    def setUp(self):
+        self.mock_logger = logging.getLogger("TestAdaptiveWeighting")
+        self.mock_logger.setLevel(logging.DEBUG)
+        if not self.mock_logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.mock_logger.addHandler(handler)
+
+        self.input_dim = 10
+        self.num_strategies = 3
+        self.strategy_input_dim = 5
+        self.batch_size = 2
+        self.num_assets = 1
+        self.seq_len = 7
+
+        # Create mock strategy configs
+        self.mock_strategy_configs = []
+        for i in range(self.num_strategies):
+            config = StrategyConfig(
+                name=f"MockAdaptiveStrategy{i+1}",
+                default_params={'input_dim': self.strategy_input_dim},
+                description=f"Mock adaptive strategy {i+1}"
+            )
+            config.input_dim = self.strategy_input_dim
+            self.mock_strategy_configs.append(config)
+
+        # Create mock strategy classes that can be instantiated
+        self.mock_strategy_classes = []
+        for i in range(self.num_strategies):
+            class MockStrat(BaseStrategy):
+                strat_idx = i # Class variable to hold index for unique naming
+                def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
+                    super().__init__(config, params, logger)
+                    self.numeric_id = int(self.config.name.replace("MockAdaptiveStrategy", ""))
+
+                @staticmethod
+                def default_config():
+                    # This is tricky; ideally, the name in default_config should match,
+                    # but it's easier to ensure the config passed to ESS has the correct name.
+                    return StrategyConfig(name=f"MockAdaptiveStrategy{MockStrat.strat_idx+1}", default_params={'input_dim': 5})
+
+                def forward(self, asset_features, current_positions=None, timestamp=None):
+                    return torch.full((asset_features.shape[0], 1, 1), float(self.numeric_id), device=asset_features.device)
+
+            MockStrat.__name__ = f"MockAdaptiveStrategy{i+1}" # Ensure unique class name for registry
+            self.mock_strategy_classes.append(MockStrat)
+        
+        # Patch STRATEGY_REGISTRY for this test scope
+        self.patcher = patch('src.agent.enhanced_quantum_strategy_layer.STRATEGY_REGISTRY', STRATEGY_REGISTRY.copy())
+        self.mock_registry = self.patcher.start()
+        for i, strat_class in enumerate(self.mock_strategy_classes):
+            self.mock_registry[self.mock_strategy_configs[i].name] = strat_class
+
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def _create_layer(self, adaptive_learning_rate=0.01, performance_ema_alpha=0.1, initial_adaptive_bias=None):
+        with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=self.mock_logger):
+            layer = EnhancedStrategySuperposition(
+                input_dim=self.input_dim,
+                num_strategies=self.num_strategies,
+                strategy_configs=self.mock_strategy_configs,
+                strategy_input_dim=self.strategy_input_dim,
+                adaptive_learning_rate=adaptive_learning_rate,
+                performance_ema_alpha=performance_ema_alpha
+            )
+            layer.to(DEVICE)
+            if initial_adaptive_bias is not None and layer.adaptive_bias_weights is not None:
+                layer.adaptive_bias_weights.data = torch.tensor(initial_adaptive_bias, device=DEVICE, dtype=torch.float)
+            layer.eval() # Set to eval mode
+            return layer
+
+    def test_update_adaptive_weights_basic(self):
+        self.mock_logger.info("Testing test_update_adaptive_weights_basic")
+        layer = self._create_layer(adaptive_learning_rate=0.1, performance_ema_alpha=0.5)
+        
+        initial_ema = layer.strategy_performance_ema.clone().cpu().numpy()
+        initial_bias = layer.adaptive_bias_weights.clone().cpu().numpy()
+
+        rewards1 = torch.tensor([0.1, -0.05, 0.2], device=DEVICE)
+        layer.update_adaptive_weights(rewards1)
+        
+        expected_ema1 = (1 - 0.5) * initial_ema + 0.5 * rewards1.cpu().numpy()
+        np.testing.assert_array_almost_equal(layer.strategy_performance_ema.cpu().numpy(), expected_ema1, decimal=6)
+
+        perf_dev1 = expected_ema1 - expected_ema1.mean()
+        expected_bias1 = initial_bias + 0.1 * perf_dev1
+        np.testing.assert_array_almost_equal(layer.adaptive_bias_weights.cpu().numpy(), expected_bias1, decimal=6)
+
+        # Second update
+        rewards2 = torch.tensor([-0.1, 0.15, 0.05], device=DEVICE)
+        layer.update_adaptive_weights(rewards2)
+
+        expected_ema2 = (1 - 0.5) * expected_ema1 + 0.5 * rewards2.cpu().numpy()
+        np.testing.assert_array_almost_equal(layer.strategy_performance_ema.cpu().numpy(), expected_ema2, decimal=6)
+        
+        perf_dev2 = expected_ema2 - expected_ema2.mean()
+        expected_bias2 = expected_bias1 + 0.1 * perf_dev2
+        np.testing.assert_array_almost_equal(layer.adaptive_bias_weights.cpu().numpy(), expected_bias2, decimal=6)
+        self.mock_logger.info("Finished test_update_adaptive_weights_basic")
+
+    def test_update_adaptive_weights_edge_cases(self):
+        self.mock_logger.info("Testing test_update_adaptive_weights_edge_cases")
+        layer = self._create_layer()
+        
+        # Incorrect reward shape
+        with patch.object(layer.logger, 'error') as mock_log_error:
+            rewards_wrong_shape = torch.randn(self.num_strategies + 1, device=DEVICE)
+            layer.update_adaptive_weights(rewards_wrong_shape)
+            mock_log_error.assert_called_once()
+            self.assertTrue("shape mismatch" in mock_log_error.call_args[0][0])
+
+        # Incorrect reward type
+        with patch.object(layer.logger, 'error') as mock_log_error:
+            rewards_wrong_type = [0.1, 0.2, 0.3] # list, not tensor
+            layer.update_adaptive_weights(rewards_wrong_type)
+            mock_log_error.assert_called_once()
+            self.assertTrue("must be a torch.Tensor" in mock_log_error.call_args[0][0])
+        
+        # Test with num_actual_strategies = 0 (requires re-init of layer)
+        with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=self.mock_logger):
+            empty_layer = EnhancedStrategySuperposition(input_dim=10, num_strategies=0) # No strategies
+        with patch.object(empty_layer.logger, 'warning') as mock_log_warning:
+            empty_layer.update_adaptive_weights(torch.tensor([], device=DEVICE)) # Rewards tensor might be empty or for 0 strategies
+            mock_log_warning.assert_called()
+            self.assertTrue("Adaptive components not initialized or no strategies" in mock_log_warning.call_args[0][0])
+        self.mock_logger.info("Finished test_update_adaptive_weights_edge_cases")
+
+
+    def test_forward_with_adaptive_weights_only(self):
+        self.mock_logger.info("Testing test_forward_with_adaptive_weights_only")
+        initial_bias = [0.5, -0.2, 0.8]
+        layer = self._create_layer(initial_adaptive_bias=initial_bias)
+        layer.attention_network = None # Ensure attention is not used
+
+        asset_features = torch.randn(self.batch_size, self.num_assets, self.seq_len, self.strategy_input_dim, device=DEVICE)
+        
+        # Mock the dropout layer to be an identity
+        layer.dropout = nn.Identity()
+
+        output_actions = layer.forward(asset_features)
+        
+        # Expected weights are softmax of adaptive_bias_weights (expanded to batch) / temperature
+        expected_logits = torch.tensor(initial_bias, device=DEVICE, dtype=torch.float).unsqueeze(0).expand(self.batch_size, -1)
+        expected_strategy_weights = F.softmax(expected_logits / layer.temperature.item(), dim=1)
+        
+        # Calculate expected combined signal
+        # Mock strategies return their numeric_id (1.0, 2.0, 3.0)
+        strategy_outputs = torch.tensor([[[1.0]], [[2.0]], [[3.0]]], device=DEVICE).float() # (num_strategies, 1, 1)
+        strategy_outputs_batched = strategy_outputs.squeeze().unsqueeze(0).expand(self.batch_size, -1) # (batch_size, num_strategies)
+
+        expected_combined_signal_flat = torch.sum(expected_strategy_weights * strategy_outputs_batched, dim=1) # (batch_size)
+        expected_final_actions = expected_combined_signal_flat.unsqueeze(-1).unsqueeze(-1) # (batch_size, 1, 1) for num_assets=1
+
+        self.assertTrue(torch.allclose(output_actions, expected_final_actions, atol=1e-5),
+                        f"Forward with adaptive weights only failed.\\nExpected:\\n{expected_final_actions}\\nGot:\\n{output_actions}\\nExpected Weights:\\n{expected_strategy_weights}")
+        self.mock_logger.info("Finished test_forward_with_adaptive_weights_only")
+
+    def test_forward_with_adaptive_and_attention_weights(self):
+        self.mock_logger.info("Testing test_forward_with_adaptive_and_attention_weights")
+        initial_bias = [0.1, 0.2, 0.3]
+        layer = self._create_layer(initial_adaptive_bias=initial_bias) # attention_network is created by default
+        
+        asset_features = torch.randn(self.batch_size, self.num_assets, self.seq_len, self.strategy_input_dim, device=DEVICE)
+        market_state_features = torch.randn(self.batch_size, self.input_dim, device=DEVICE)
+
+        # Mock the dropout layer to be an identity
+        layer.dropout = nn.Identity()
+
+        # Mock attention network output
+        mock_attention_logits = torch.tensor([[0.5, 0.3, 0.2], [-0.1, 0.6, 0.4]], device=DEVICE, dtype=torch.float)
+        
+        with patch.object(layer.attention_network, 'forward', return_value=mock_attention_logits) as mock_attn_forward:
+            output_actions = layer.forward(asset_features, market_state_features=market_state_features)
+            mock_attn_forward.assert_called_once_with(market_state_features)
+
+        # Expected logits = adaptive_bias (expanded) + attention_logits
+        adaptive_bias_expanded = torch.tensor(initial_bias, device=DEVICE, dtype=torch.float).unsqueeze(0).expand(self.batch_size, -1)
+        combined_logits = adaptive_bias_expanded + mock_attention_logits
+        expected_strategy_weights = F.softmax(combined_logits / layer.temperature.item(), dim=1)
+
+        strategy_outputs = torch.tensor([[[1.0]], [[2.0]], [[3.0]]], device=DEVICE).float()
+        strategy_outputs_batched = strategy_outputs.squeeze().unsqueeze(0).expand(self.batch_size, -1)
+        
+        expected_combined_signal_flat = torch.sum(expected_strategy_weights * strategy_outputs_batched, dim=1)
+        expected_final_actions = expected_combined_signal_flat.unsqueeze(-1).unsqueeze(-1)
+
+        self.assertTrue(torch.allclose(output_actions, expected_final_actions, atol=1e-5),
+                        f"Forward with adaptive and attention weights failed.\\nExpected:\\n{expected_final_actions}\\nGot:\\n{output_actions}\\nExpected Weights:\\n{expected_strategy_weights}")
+        self.mock_logger.info("Finished test_forward_with_adaptive_and_attention_weights")
+
+# Fixture for creating a temporary JSON file with specified content
+@pytest.fixture
+def temp_json_file(request):
+    content = request.param
+    tf = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json")
+    json.dump(content, tf)
+    tf.close() # Close the file to ensure content is written and it can be reopened by the SUT
+    yield tf.name
+    os.unlink(tf.name)
+
+# Fixture for creating a temporary invalid JSON file
+@pytest.fixture
+def temp_invalid_json_file():
+    INVALID_JSON_CONTENT_STR = "this is not valid json { malformed"
+    tf = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json")
+    tf.write(INVALID_JSON_CONTENT_STR)
+    tf.close()
+    yield tf.name
+    os.unlink(tf.name)
+
+# Constants for test configurations
+VALID_CONFIG_CONTENT = {
+    "strategies": [
+        {
+            "name": "MomentumStrategy", 
+            "params": {"window": 15, "custom_param_momentum": "file_value_momentum"},
+            "input_dim": 10 
+        },
+        {
+            "name": "MeanReversionStrategy", 
+            "params": {"reversion_window": 25, "custom_param_meanrev": "file_value_meanrev"},
+            "input_dim": 12
+        },
+        {
+            "name": "BreakoutStrategy", 
+            "params": {"breakout_window": 50} 
+        }
+    ],
+    "global_strategy_input_dim": 7 
+}
+
+CONFIG_WITH_UNKNOWN_STRATEGY = {
+    "strategies": [
+        {
+            "name": "MomentumStrategy",
+            "params": {"window": 20},
+            "input_dim": 8 
+        },
+        {
+            "name": "NonExistentStrategyFromFile",
+            "params": {"param1": "value1"},
+            "input_dim": 6
+        }
+    ],
+    "global_strategy_input_dim": 5
+}
+
+COMBINED_TEST_FILE_CONTENT = {
+    "strategies": [
+        {
+            "name": "MomentumStrategy", 
+            "params": {"window": 15, "file_specific_momentum_param": "yes"},
+            "input_dim": 10 
+        },
+        {
+            "name": "MeanReversionStrategy",
+            "params": {"reversion_window": 25},
+            "input_dim": 12
+        }
+    ],
+    "global_strategy_input_dim": 7 
+}
+
+
+# Tests for dynamic loading from JSON config file
+
+@pytest.mark.parametrize("temp_json_file", [VALID_CONFIG_CONTENT], indirect=True)
+def test_load_strategies_from_json_valid_config(temp_json_file, mock_logger, base_config, device, caplog):
+    layer_attention_input_dim = base_config.default_params.get("market_feature_dim", 32)
+    default_strategy_input_dim_for_layer = base_config.default_params.get("feature_dim", 5)
+
+    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
+        layer = EnhancedStrategySuperposition(
+            input_dim=layer_attention_input_dim,
+            num_strategies=5,
+            strategy_config_file_path=temp_json_file,
+            strategy_input_dim=default_strategy_input_dim_for_layer,
+        )
+        layer.to(device)
+
+    assert layer.num_actual_strategies == 3
+    
+    momentum_strat = next((s for s in layer.strategies if s.config.name == "MomentumStrategy"), None)
+    assert momentum_strat is not None
+    assert momentum_strat.params["window"] == 15
+    assert momentum_strat.params["custom_param_momentum"] == "file_value_momentum"
+    assert momentum_strat.config.input_dim == 10
+
+    mean_rev_strat = next((s for s in layer.strategies if s.config.name == "MeanReversionStrategy"), None)
+    assert mean_rev_strat is not None
+    assert mean_rev_strat.params["reversion_window"] == 25
+    assert mean_rev_strat.params["custom_param_meanrev"] == "file_value_meanrev"
+    assert mean_rev_strat.config.input_dim == 12
+
+    breakout_strat = next((s for s in layer.strategies if s.config.name == "BreakoutStrategy"), None)
+    assert breakout_strat is not None
+    assert breakout_strat.params["breakout_window"] == 50
+    assert breakout_strat.config.input_dim == 7 # From global_strategy_input_dim
+
+    assert "MomentumStrategy" in layer.strategy_names
+    assert "MeanReversionStrategy" in layer.strategy_names
+    assert "BreakoutStrategy" in layer.strategy_names
+    
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING], "Unexpected warnings or errors logged."
+
+@pytest.mark.parametrize("temp_json_file", [CONFIG_WITH_UNKNOWN_STRATEGY], indirect=True)
+def test_load_strategies_from_json_unknown_strategy(temp_json_file, mock_logger, base_config, device, caplog):
+    layer_attention_input_dim = base_config.default_params.get("market_feature_dim", 32)
+    default_strategy_input_dim_for_layer = base_config.default_params.get("feature_dim", 5)
+
+    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
+        with caplog.at_level(logging.WARNING):
+            layer = EnhancedStrategySuperposition(
+                input_dim=layer_attention_input_dim,
+                num_strategies=5,
+                strategy_config_file_path=temp_json_file,
+                strategy_input_dim=default_strategy_input_dim_for_layer,
+            )
+            layer.to(device)
+
+    assert layer.num_actual_strategies == 1 
+    
+    momentum_strat = next((s for s in layer.strategies if s.config.name == "MomentumStrategy"), None)
+    assert momentum_strat is not None
+    assert momentum_strat.params["window"] == 20
+    assert momentum_strat.config.input_dim == 8
+
+    assert "NonExistentStrategyFromFile" not in layer.strategy_names
+    # MODIFIED: Corrected expected log message to match actual output from enhanced_quantum_strategy_layer.py
+    assert any(
+        "Strategy name 'NonExistentStrategyFromFile' from dict not in STRATEGY_REGISTRY or name missing. Skipping." in record.message and record.levelname == "WARNING" 
+        for record in caplog.records
+    ), "Expected warning for unknown strategy was not logged or message mismatch."
+
+def test_load_strategies_from_json_file_not_found(mock_logger, base_config, device, caplog):
+    layer_attention_input_dim = base_config.default_params.get("market_feature_dim", 32)
+    default_strategy_input_dim_for_layer = base_config.default_params.get("feature_dim", 5)
+    non_existent_file_path = os.path.join(tempfile.gettempdir(), "non_existent_config_abc123xyz.json")
+
+
+    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
+        with caplog.at_level(logging.WARNING):
+            layer = EnhancedStrategySuperposition(
+                input_dim=layer_attention_input_dim,
+                num_strategies=5,
+                strategy_config_file_path=non_existent_file_path,
+                strategy_input_dim=default_strategy_input_dim_for_layer,
+            )
+            layer.to(device)
+
+    assert layer.num_actual_strategies == 0
+    assert any(
+        f"Strategy config file not found: {non_existent_file_path}" in record.message and record.levelname == "WARNING"
+        for record in caplog.records
+    ), "Expected warning for file not found was not logged."
+
+def test_load_strategies_from_json_decode_error(temp_invalid_json_file, mock_logger, base_config, device, caplog):
+    layer_attention_input_dim = base_config.default_params.get("market_feature_dim", 32)
+    default_strategy_input_dim_for_layer = base_config.default_params.get("feature_dim", 5)
+
+    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
+        with caplog.at_level(logging.ERROR):
+            layer = EnhancedStrategySuperposition(
+                input_dim=layer_attention_input_dim,
+                num_strategies=5,
+                strategy_config_file_path=temp_invalid_json_file,
+                strategy_input_dim=default_strategy_input_dim_for_layer,
+            )
+            layer.to(device)
+
+    assert layer.num_actual_strategies == 0
+    assert any(
+        f"Error decoding strategy config file {temp_invalid_json_file}" in record.message and record.levelname == "ERROR" and "JSONDecodeError" in record.message
+        for record in caplog.records
+    ), "Expected error for JSON decode issue was not logged correctly."
+
+
+@pytest.mark.parametrize("temp_json_file", [COMBINED_TEST_FILE_CONTENT], indirect=True)
+def test_combined_strategy_loading_sources(temp_json_file, mock_logger, base_config, device, caplog):
+    layer_attention_input_dim = base_config.default_params.get("market_feature_dim", 32)
+    default_strategy_input_dim_for_layer = base_config.default_params.get("feature_dim", 5)
+
+    strategy_configs_arg = [
+        {"name": "MomentumStrategy", "params": {"window": 99, "arg_specific_momentum_param": "yes"}, "input_dim": 9},
+        {"name": "ReversalStrategy", "params": {"threshold": 0.05, "reversal_window": 33}, "input_dim": 8},
+        {"name": "LearnableMockStrategy", "params": {"mock_specific_param": 200}, "input_dim": 6}
+    ]
+
+    explicit_strategies_arg = [TrendFollowingStrategy, LearnableMockStrategy]
+    
+    original_registry_lms = STRATEGY_REGISTRY.get("LearnableMockStrategy")
+    STRATEGY_REGISTRY["LearnableMockStrategy"] = LearnableMockStrategy # Ensure it can be found by name if needed
+
+    try:
+        with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
+            layer = EnhancedStrategySuperposition(
+                input_dim=layer_attention_input_dim,
+                num_strategies=10,
+                strategy_config_file_path=temp_json_file,
+                strategy_configs=strategy_configs_arg,
+                explicit_strategies=explicit_strategies_arg,
+                strategy_input_dim=default_strategy_input_dim_for_layer,
+            )
+            layer.to(device)
+    finally:
+        if original_registry_lms:
+            STRATEGY_REGISTRY["LearnableMockStrategy"] = original_registry_lms
+        elif "LearnableMockStrategy" in STRATEGY_REGISTRY:
+            del STRATEGY_REGISTRY["LearnableMockStrategy"]
+
+    assert layer.num_actual_strategies == 5
+    assert sorted(layer.strategy_names) == sorted([
+        "MomentumStrategy", "MeanReversionStrategy", "ReversalStrategy", 
+        "TrendFollowingStrategy", "LearnableMockStrategy"
+    ])
+
+    mom_strat = next(s for s in layer.strategies if s.config.name == "MomentumStrategy")
+    assert mom_strat.params["window"] == 15 
+    assert mom_strat.params["file_specific_momentum_param"] == "yes"
+    assert "arg_specific_momentum_param" not in mom_strat.params
+    assert mom_strat.config.input_dim == 10
+
+    mr_strat = next(s for s in layer.strategies if s.config.name == "MeanReversionStrategy")
+    assert mr_strat.params["reversion_window"] == 25
+    assert mr_strat.config.input_dim == 12
+
+    rev_strat = next(s for s in layer.strategies if s.config.name == "ReversalStrategy")
+    assert rev_strat.params["threshold"] == 0.05
+    assert rev_strat.params["reversal_window"] == 33
+    assert rev_strat.config.input_dim == 8
+
+    tf_strat = next(s for s in layer.strategies if s.config.name == "TrendFollowingStrategy")
+    # MODIFIED: Check for a valid default parameter for TrendFollowingStrategy
+    assert tf_strat.params.get("short_sma_period") is not None # Default param check
+    assert tf_strat.config.input_dim == 7 # From file's global_strategy_input_dim
+
+    lms_strat = next(s for s in layer.strategies if s.config.name == "LearnableMockStrategy")
+    assert lms_strat.params["mock_specific_param"] == 200 
+    assert lms_strat.config.input_dim == 6
+    
+    # Check that there are no unexpected warnings or errors
+    relevant_logs = [rec for rec in caplog.records if rec.levelno >= logging.WARNING and \
+                     not ("Strategy name 'NonExistentStrategyFromFile' from dict not in STRATEGY_REGISTRY or name missing. Skipping." in rec.message and rec.levelname == "WARNING") and \
+                     not ("already processed. Skipping duplicate." in rec.message) # Allow info about skipping duplicates
+                    ]
+    assert not relevant_logs, f"Unexpected warnings or errors logged: {relevant_logs}"
+
+# If running this file directly, you might want to add:
+if __name__ == '__main__':
+    unittest.main()
 

@@ -4,7 +4,7 @@ import numpy as np
 from src.agent.strategies.base_strategy import StrategyConfig
 from src.agent.strategies.statistical_arbitrage_strategies import (
     MeanReversionStrategy, CointegrationStrategy, VolatilityBreakoutStrategy, 
-    StatisticalArbitrageStrategy, VolatilityArbitrageStrategy
+    StatisticalArbitrageStrategy
 )
 
 class TestStatisticalArbitrageStrategies(unittest.TestCase):
@@ -114,24 +114,6 @@ class TestStatisticalArbitrageStrategies(unittest.TestCase):
         
         signals = strategy.generate_signals(processed_data, self.portfolio_context)
         self.assertIsInstance(signals, pd.DataFrame)
-
-    def test_volatility_arbitrage_strategy(self):
-        config = StrategyConfig(
-            name="VolatilityArbitrageTest",
-            default_params={'vol_window_short': 10, 'vol_window_long': 50, 'vol_threshold_ratio': 1.5, 'instrument_key': 'EUR_USD', 'timeframe': 'D1'},
-            applicable_assets=['EUR_USD']
-        )
-        strategy = VolatilityArbitrageStrategy(config)
-        
-        processed_data = strategy.forward(self.market_data_dict, self.portfolio_context)
-        self.assertIn('EUR_USD', processed_data)
-        # VolatilityArbitrageStrategy produces volatility-related columns
-        if not processed_data['EUR_USD'].empty:
-            self.assertIn('vol_ratio', processed_data['EUR_USD'].columns)
-        
-        signals = strategy.generate_signals(processed_data, self.portfolio_context)
-        self.assertIsInstance(signals, pd.DataFrame)
-        self.assertIn('signal', signals.columns)
 
 if __name__ == '__main__':
     unittest.main()

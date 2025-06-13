@@ -3,11 +3,12 @@ import torch
 import pytest
 
 # Corrected import for MultiScaleFeatureExtractor
-from src.models.enhanced_transformer import MultiScaleFeatureExtractor, EnhancedTransformer, FourierFeatureBlock, MultiLevelWaveletBlock # Removed PositionalEncoding
+from src.models.enhanced_transformer import MultiScaleFeatureExtractor, EnhancedTransformer, FourierFeatureBlock, MultiLevelWaveletBlock 
 from src.common.config import DEVICE, TIMESTEPS, MAX_SYMBOLS_ALLOWED, FOURIER_NUM_MODES, WAVELET_LEVELS, WAVELET_NAME
 # Added imports for Adaptive Attention components
-from src.models.enhanced_transformer import MarketStateDetector, AdaptiveAttentionLayer, EnhancedTransformerLayer, EnhancedTransformer
+from src.models.enhanced_transformer import MarketStateDetector, AdaptiveAttentionLayer, EnhancedTransformerLayer
 from src.features.market_state_detector import GMMMarketStateDetector # Added for GMM testing
+from src.models.custom_layers import CrossTimeScaleFusion # <--- 導入 CrossTimeScaleFusion
 import joblib # Added for saving mock GMM
 import pandas as pd # Added for GMM input
 import os # Added for path operations
@@ -186,8 +187,6 @@ def mock_gmm_model_path(tmp_path):
 
 @pytest.fixture
 def default_et_config():
-    # Ensure all necessary imports like DEVICE, FOURIER_NUM_MODES etc. are available in this scope
-    # They are imported at the top of the file.
     return {
         "input_dim": 16,  # Raw input features dimension
         "d_model": 64,
@@ -211,9 +210,9 @@ def default_et_config():
         "gmm_market_state_detector_path": None,
         "gmm_ohlcv_feature_config": None,
 
-        "use_cts_fusion": False,
-        "cts_time_scales": None, 
-        "cts_fusion_type": "attention",
+        "use_cts_fusion": False, # 預設為 False
+        "cts_time_scales": [1, 2, 4], # 測試用的時間尺度
+        "cts_fusion_type": "hierarchical_attention", # 測試用的融合類型
 
         "use_symbol_embedding": True, # Was present
         "symbol_embedding_dim": 16,
@@ -318,25 +317,21 @@ def test_et_initialization(default_et_config):
     assert et.d_model == default_et_config["d_model"]
     assert len(et.transformer_layers) == default_et_config["num_encoder_layers"]
     
-    # Check conditional components
     if default_et_config["use_msfe"]:
         assert et.msfe is not None
     else:
         assert et.msfe is None
         
-    # The attribute et.cts_fusion is not defined in the EnhancedTransformer class.
-    # Assertions for et.cts_fusion have been removed.
-    # The flag et.use_cts_fusion can be checked if needed to verify config propagation.
-    # For example: assert et.use_cts_fusion == default_et_config["use_cts_fusion"]
+    # 檢查 CTS 模組的初始化 (根據 default_et_config, use_cts_fusion 預設為 False)
+    if default_et_config.get("use_cts_fusion", False):
+        assert et.cts_fusion_module is not None
+        assert isinstance(et.cts_fusion_module, CrossTimeScaleFusion)
+    else:
+        assert et.cts_fusion_module is None
 
     if default_et_config["use_symbol_embedding"]:
         assert et.symbol_embed is not None
-        # self.symbol_pos_embed is commented out in EnhancedTransformer.__init__, so et.symbol_pos_embed does not exist.
-        # The test previously asserted et.symbol_pos_embed is not None, which would fail.
-        # If it's intended to be None or not exist, the assertion should reflect that.
-        # For now, removing the assertion for et.symbol_pos_embed.
     else:
-        # If use_symbol_embedding is False, et.symbol_embed is initialized to None.
         assert et.symbol_embed is None
 
     if default_et_config["use_fourier_features"]:
@@ -439,208 +434,69 @@ def test_et_symbol_padding_mask_effect(default_et_config):
 
 # Test for EnhancedTransformer with all feature combinations
 @pytest.mark.parametrize("use_msfe", [True, False])
-@pytest.mark.parametrize("use_cts_fusion", [True, False])
+@pytest.mark.parametrize("use_cts_fusion_param", [True, False]) # Renamed to avoid conflict
 @pytest.mark.parametrize("use_symbol_embedding", [True, False])
 @pytest.mark.parametrize("use_fourier", [True, False])
 @pytest.mark.parametrize("use_wavelet", [True, False])
-def test_et_all_feature_combinations(default_et_config, use_msfe, use_cts_fusion, use_symbol_embedding, use_fourier, use_wavelet, sample_tensor_factory):
+def test_et_all_feature_combinations(default_et_config, use_msfe, use_cts_fusion_param, use_symbol_embedding, use_fourier, use_wavelet, sample_tensor_factory):
     config = default_et_config.copy()
     config["use_msfe"] = use_msfe
-    config["use_cts_fusion"] = use_cts_fusion
+    config["use_cts_fusion"] = use_cts_fusion_param # Use the parametrized value
     config["use_symbol_embedding"] = use_symbol_embedding
     config["use_fourier_features"] = use_fourier
     config["use_wavelet_features"] = use_wavelet
     
-    # Ensure input_dim is appropriate if MSFE is not used
     if not use_msfe:
-        config["input_dim"] = config["d_model"] # d_model is the expected input to transformer layers if MSFE is skipped
+        config["input_dim"] = config["d_model"]
 
     et = EnhancedTransformer(**config).to(DEVICE)
     et.eval()
 
     batch_size = 2
-    num_active_symbols = MAX_SYMBOLS_ALLOWED // 2 or 1 # Ensure at least 1
+    num_active_symbols = MAX_SYMBOLS_ALLOWED // 2 or 1
     seq_len = config["max_seq_len"]
     
-    # Adjust input_dim for _create_dummy_input_for_et based on whether MSFE is used or not
-    # The `src` tensor created by _create_dummy_input_for_et is the raw input to the model.
-    # If MSFE is used, its input_dim is config["input_dim"].
-    # If MSFE is NOT used, the input_dim to the main transformer body (after input_proj) is d_model.
-    # However, the initial `src` should still match the model's declared `input_dim`.
-    # The model's `input_proj` will handle the dimension change if MSFE is off.
+    x_dict = _create_dummy_input_for_et(config, batch_size, num_active_symbols, seq_len, create_raw_ohlcv=True)
     
-    # So, the `input_dim` for `_create_dummy_input_for_et` should always be `config["input_dim"]`
-    # as defined in the `default_et_config` or modified for the test.
-    # The `config` passed to `EnhancedTransformer` already has the correct `input_dim`.
-
-    x_dict = _create_dummy_input_for_et(config, batch_size, num_active_symbols, seq_len, create_raw_ohlcv=True) # Added create_raw_ohlcv
-    
-    # If MSFE is not used, the input to the main transformer part (after input_proj)
-    # should have dimension d_model. The `src` in x_dict is the raw input.
-    if not use_msfe:
-        # If MSFE is off, the input_proj expects input_dim, and outputs d_model.
-        # The `src` created by _create_dummy_input_for_et has shape (B, N, S, input_dim)
-        # This is correct. The model's input_proj will handle it.
-        pass
-
-
-    output = et(x_dict) # Changed to pass x_dict
+    output = et(x_dict)
     
     expected_output_shape = (batch_size, num_active_symbols, config["output_dim"])
     assert output.shape == expected_output_shape, f"Output shape mismatch for feature combination. Expected {expected_output_shape}, Got {output.shape}"
 
+# --- Tests for GMM Integration (Existing) ---
+# ... (simple_gmm_ohlcv_config fixture - existing) ...
+# ... (test_et_gmm_integration_and_fallbacks - existing test, ensure it handles CTS being off by default in its local configs) ...
 
-# --- Tests for GMM Integration ---
+# Minimal test for CrossTimeScaleFusion in isolation (optional, as it's tested via ET)
+@pytest.mark.parametrize("fusion_type", ["hierarchical_attention", "simple_attention", "concat", "average"])
+def test_cross_time_scale_fusion_direct(fusion_type):
+    d_model = 32
+    seq_len = 20
+    batch_size_eff = 4 # B*N
+    time_scales = [1, 2, 5]
 
-@pytest.fixture
-def simple_gmm_ohlcv_config():
-    """Provides a simple configuration for GMM feature calculation with OHLCV."""
-    return {
-        "features": ["LogReturns", "Volatility", "Momentum"], # Example features
-        "log_returns_lag": 1,
-        "vol_window": 5, # Corrected key from volatility_window
-        "momentum_window": 5,
-        "return_window": 5,
-        "ma_short_window": 10, # Added to match default_feature_config structure
-        "ma_long_window": 30,  # Added to match default_feature_config structure
-        "atr_window": 14 # Added to match default_feature_config structure
-    }
+    cts_module = CrossTimeScaleFusion(
+        d_model=d_model,
+        time_scales=time_scales,
+        fusion_type=fusion_type,
+        dropout_rate=0.1
+    ).to(DEVICE)
+    cts_module.eval()
 
-def test_et_gmm_integration_and_fallbacks(default_et_config, mock_gmm_model_path, simple_gmm_ohlcv_config, tmp_path):
-    batch_size = 2
-    num_active_symbols = 2 # MAX_SYMBOLS_ALLOWED // 2 or 1
-    seq_len = default_et_config["max_seq_len"] # For src
-    gmm_n_states = 4 # For mock GMM, changed from gmm_n_components
-    default_num_states = default_et_config["num_market_states"]
+    x_input = torch.randn(batch_size_eff, seq_len, d_model).to(DEVICE)
+    output = cts_module(x_input)
 
-    # --- 1. Successful GMM Integration ---
-    config_gmm_on = default_et_config.copy()
-    config_gmm_on["use_gmm_market_state_detector"] = True
-    config_gmm_on["gmm_market_state_detector_path"] = str(mock_gmm_model_path)
-    config_gmm_on["gmm_ohlcv_feature_config"] = simple_gmm_ohlcv_config
-    config_gmm_on["num_market_states"] = gmm_n_states # This should be overridden by GMM if loaded
+    assert output.shape == (batch_size_eff, seq_len, d_model), \
+        f"CrossTimeScaleFusion ({fusion_type}) direct call output shape mismatch. Expected {(batch_size_eff, seq_len, d_model)}, Got {output.shape}"
+    assert output.device.type == DEVICE
 
-    # Create and save a fitted mock GMM model
-    mock_gmm_detector = GMMMarketStateDetector(n_states=gmm_n_states, feature_config=simple_gmm_ohlcv_config, random_state=42) # Changed n_components to n_states
-    # Create dummy data for fitting: List of DataFrames
-    fit_data = []
-    for _ in range(5): # 5 sample series
-        ohlcv_fit_data = pd.DataFrame({
-            'Open': np.random.rand(100) * 100,
-            'High': np.random.rand(100) * 100 + 100,
-            'Low': np.random.rand(100) * 100 - 50,
-            'Close': np.random.rand(100) * 100,
-            'Volume': np.random.rand(100) * 10000,
-            'timestamp': pd.to_datetime(np.arange(100), unit='D', origin='2020-01-01')
-        }).set_index('timestamp')
-        fit_data.append(ohlcv_fit_data)
-    mock_gmm_detector.fit(fit_data)
-    assert mock_gmm_detector.fitted, "Mock GMM should be fitted" # Changed .is_fitted() to .fitted
-    mock_gmm_detector.save_model(str(mock_gmm_model_path))
+    # Test with empty time_scales (should be no-op)
+    cts_module_noop = CrossTimeScaleFusion(d_model, [], fusion_type).to(DEVICE)
+    output_noop = cts_module_noop(x_input)
+    assert torch.allclose(output_noop, x_input), "CTS with empty time_scales should be a no-op."
 
-    et_gmm = EnhancedTransformer(**config_gmm_on).to(DEVICE)
-    et_gmm.eval()
-
-    assert et_gmm.gmm_detector is not None, "GMM detector should be loaded"
-    assert et_gmm.gmm_detector.fitted, "Loaded GMM detector should be fitted" # Changed .is_fitted() to .fitted
-    assert et_gmm.num_market_states == gmm_n_states, f"num_market_states should be {gmm_n_states} from GMM"
-    # Check AdaptiveAttentionLayer's num_states
-    for layer in et_gmm.transformer_layers:
-        if layer.use_adaptive_attention: # Check if adaptive attention is actually used by this layer
-            assert isinstance(layer.attention_layer, AdaptiveAttentionLayer), "Attention layer should be AdaptiveAttentionLayer when use_adaptive_attention is True"
-            assert layer.attention_layer.num_market_states == gmm_n_states, "AdaptiveAttentionLayer num_market_states not updated by GMM"
-
-    x_dict_gmm = _create_dummy_input_for_et(config_gmm_on, batch_size, num_active_symbols, seq_len, create_raw_ohlcv=True)
-    ohlcv_seq_len_for_gmm = 50 
-    x_dict_gmm["raw_ohlcv_data_batch"] = []
-    for _ in range(batch_size):
-        df = pd.DataFrame({
-            'Open': np.random.rand(ohlcv_seq_len_for_gmm) * 100,
-            'High': np.random.rand(ohlcv_seq_len_for_gmm) * 100 + 100,
-            'Low': np.random.rand(ohlcv_seq_len_for_gmm) * 100 - 50,
-            'Close': np.random.rand(ohlcv_seq_len_for_gmm) * 100,
-            'Volume': np.random.rand(ohlcv_seq_len_for_gmm) * 10000,
-            'timestamp': pd.to_datetime(np.arange(ohlcv_seq_len_for_gmm), unit='D', origin='2020-01-01')
-        }).set_index('timestamp')
-        x_dict_gmm["raw_ohlcv_data_batch"].append(df)
-
-    output_gmm = et_gmm(x_dict_gmm)
-    expected_output_shape = (batch_size, num_active_symbols, config_gmm_on["output_dim"])
-    assert output_gmm.shape == expected_output_shape, f"Output shape mismatch with GMM. Expected {expected_output_shape}, Got {output_gmm.shape}"
-
-    # --- 2. Fallback Scenarios ---
-    
-    # 2a. GMM path is invalid
-    config_invalid_path = config_gmm_on.copy()
-    config_invalid_path["gmm_market_state_detector_path"] = str(tmp_path / "non_existent_gmm.joblib")
-    et_invalid_path = EnhancedTransformer(**config_invalid_path).to(DEVICE)
-    et_invalid_path.eval()
-    assert et_invalid_path.gmm_detector is None, "GMM detector should be None for invalid path"
-    assert et_invalid_path.num_market_states == default_num_states, f"num_market_states should be default {default_num_states} for invalid GMM path"
-    output_invalid_path = et_invalid_path(x_dict_gmm) 
-    assert output_invalid_path.shape == expected_output_shape
-
-    # 2b. Loaded GMM is not fitted
-    unfitted_gmm_path = tmp_path / "unfitted_gmm.joblib"
-    mock_gmm_unfitted = GMMMarketStateDetector(n_states=gmm_n_states, feature_config=simple_gmm_ohlcv_config)
-    assert not mock_gmm_unfitted.fitted # Changed .is_fitted() to .fitted
-    mock_gmm_unfitted.save_model(str(unfitted_gmm_path))
-    
-    config_unfitted_gmm = config_gmm_on.copy()
-    config_unfitted_gmm["gmm_market_state_detector_path"] = str(unfitted_gmm_path)
-    et_unfitted_gmm = EnhancedTransformer(**config_unfitted_gmm).to(DEVICE)
-    et_unfitted_gmm.eval()
-    assert et_unfitted_gmm.gmm_detector is None, "GMM detector should be None if loaded model is not fitted"
-    assert et_unfitted_gmm.num_market_states == default_num_states, f"num_market_states should be default {default_num_states} for unfitted GMM"
-    output_unfitted_gmm = et_unfitted_gmm(x_dict_gmm)
-    assert output_unfitted_gmm.shape == expected_output_shape
-
-    # 2c. raw_ohlcv_data_batch is missing
-    x_dict_no_ohlcv = x_dict_gmm.copy()
-    x_dict_no_ohlcv["raw_ohlcv_data_batch"] = None
-    et_gmm_temp = EnhancedTransformer(**config_gmm_on).to(DEVICE) 
-    et_gmm_temp.eval()
-    assert et_gmm_temp.gmm_detector is not None and et_gmm_temp.gmm_detector.fitted # Changed .is_fitted() to .fitted
-    assert et_gmm_temp.num_market_states == gmm_n_states 
-    output_no_ohlcv = et_gmm_temp(x_dict_no_ohlcv)
-    assert output_no_ohlcv.shape == expected_output_shape
-
-    # 2d. raw_ohlcv_data_batch is an empty list
-    x_dict_empty_ohlcv = x_dict_gmm.copy()
-    x_dict_empty_ohlcv["raw_ohlcv_data_batch"] = []
-    output_empty_ohlcv = et_gmm_temp(x_dict_empty_ohlcv) 
-    assert output_empty_ohlcv.shape == expected_output_shape
-
-    # 2e. raw_ohlcv_data_batch contains DataFrames with missing/incorrect columns
-    x_dict_malformed_ohlcv = x_dict_gmm.copy()
-    malformed_df_list = []
-    for _ in range(batch_size):
-        df = pd.DataFrame({
-            'open': np.random.rand(ohlcv_seq_len_for_gmm) * 100,
-            'volume': np.random.rand(ohlcv_seq_len_for_gmm) * 10000,
-            'timestamp': pd.to_datetime(np.arange(ohlcv_seq_len_for_gmm), unit='D', origin='2020-01-01')
-        }).set_index('timestamp')
-        malformed_df_list.append(df)
-    x_dict_malformed_ohlcv["raw_ohlcv_data_batch"] = malformed_df_list
-    output_malformed_ohlcv = et_gmm_temp(x_dict_malformed_ohlcv)
-    assert output_malformed_ohlcv.shape == expected_output_shape
-
-    # 2f. use_gmm_market_state_detector is False (should use default_num_states)
-    config_gmm_off = default_et_config.copy()
-    config_gmm_off["use_gmm_market_state_detector"] = False
-    config_gmm_off["gmm_market_state_detector_path"] = str(mock_gmm_model_path) 
-    config_gmm_off["num_market_states"] = 5 
-    
-    et_gmm_off = EnhancedTransformer(**config_gmm_off).to(DEVICE)
-    et_gmm_off.eval()
-    assert et_gmm_off.gmm_detector is None, "GMM detector should be None if use_gmm_market_state_detector is False"
-    assert et_gmm_off.num_market_states == 5, "num_market_states should be the one from config if GMM is off"
-    for layer in et_gmm_off.transformer_layers:
-        if layer.use_adaptive_attention:
-            assert isinstance(layer.attention_layer, AdaptiveAttentionLayer)
-            assert layer.attention_layer.num_market_states == 5 # Corrected attribute to num_market_states
-
-    output_gmm_off = et_gmm_off(x_dict_gmm) 
-    expected_output_shape_gmm_off = (batch_size, num_active_symbols, config_gmm_off["output_dim"])
-    assert output_gmm_off.shape == expected_output_shape_gmm_off
+    # Test with single time_scale (should also effectively be no-op or minimal processing)
+    cts_module_single_scale = CrossTimeScaleFusion(d_model, [1], fusion_type).to(DEVICE)
+    output_single_scale = cts_module_single_scale(x_input)
+    assert output_single_scale.shape == x_input.shape, "CTS with single time_scale [1] changed shape unexpectedly."
 

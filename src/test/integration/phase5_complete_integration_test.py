@@ -18,14 +18,14 @@ from datetime import datetime
 import logging
 
 # Add the src directory to the path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+# sys.path.append(os.path.join(os.path.dirname(__file__), \'..\', \'src\')) # Removed this line
 
 # Import all Phase 5 components
-from agent.strategy_innovation_module import StrategyInnovationModule
-from agent.market_state_awareness_system import MarketStateAwarenessSystem
-from agent.meta_learning_optimizer import MetaLearningOptimizer, TaskBatch
-from agent.high_level_integration_system import HighLevelIntegrationSystem, AnomalyDetector, DynamicPositionManager, EmergencyStopLoss, SystemState # Added AnomalyDetector, DynamicPositionManager, EmergencyStopLoss, SystemState
-from agent.enhanced_quantum_strategy_layer import EnhancedStrategySuperposition # ADDED IMPORT
+from src.agent.strategy_innovation_module import StrategyInnovationModule
+from src.agent.market_state_awareness_system import MarketStateAwarenessSystem
+from src.agent.meta_learning_optimizer import MetaLearningOptimizer, TaskBatch
+from src.agent.high_level_integration_system import HighLevelIntegrationSystem, AnomalyDetector, DynamicPositionManager, EmergencyStopLoss, SystemState # Added AnomalyDetector, DynamicPositionManager, EmergencyStopLoss, SystemState
+from src.agent.enhanced_quantum_strategy_layer import EnhancedStrategySuperposition # ADDED IMPORT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

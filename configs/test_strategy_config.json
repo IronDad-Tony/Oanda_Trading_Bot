@@ -1,0 +1,34 @@
+{
+  "strategies": [
+    {
+      "name": "MomentumStrategy",
+      "params": {
+        "momentum_window": 25,
+        "signal_threshold_value": 0.65,
+        "asset_list": ["EUR_USD", "USD_JPY"]
+      },
+      "input_dim": 128
+    },
+    {
+      "name": "MeanReversionStrategy",
+      "description": "Mean reversion strategy loaded from file.",
+      "params": {
+        "bb_period": 22,
+        "bb_std_dev": 2.1,
+        "asset_list": ["GBP_USD"]
+      }
+    },
+    {
+      "name": "TrendFollowingStrategy",
+      "params": {
+        "short_sma_period": 15,
+        "long_sma_period": 45
+      },
+      "input_dim": 32
+    },
+    {
+      "name": "NonExistentStrategy",
+      "params": {}
+    }
+  ]
+}

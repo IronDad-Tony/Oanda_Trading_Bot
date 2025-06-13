@@ -22,6 +22,7 @@ import pywt # Added for wavelet functionality
 import os # Added for os.path.exists
 from src.features.market_state_detector import GMMMarketStateDetector # Added for GMM integration
 from src.models.transformer_model import PositionalEncoding # Added import
+from src.models.custom_layers import CrossTimeScaleFusion # <--- 導入 CrossTimeScaleFusion
 
 try:
     from src.common.logger_setup import logger
@@ -251,6 +252,98 @@ class MultiLevelWaveletBlock(nn.Module):
         concatenated_coeffs = torch.cat((projected_cA, projected_cD), dim=2) # [B*N, original_T, model_dim*2]
         output = self.final_fusion(concatenated_coeffs) # [B*N, original_T, model_dim]
         output = self.norm(output) # Apply LayerNorm
+        return output
+
+
+class CrossTimeScaleFusion(nn.Module):
+    """跨時間尺度融合：整合來自不同時間尺度的特徵"""
+    
+    def __init__(self, d_model: int, time_scales: List[int] = [3, 5, 7], fusion_type: str = "attention", dropout_rate: float = 0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.time_scales = time_scales
+        self.fusion_type = fusion_type
+        self.dropout_rate = dropout_rate
+        
+        # 確保時間尺度不會重複且都是正整數
+        assert len(set(time_scales)) == len(time_scales), "時間尺度不能重複"
+        assert all(isinstance(scale, int) and scale > 0 for scale in time_scales), "時間尺度必須是正整數"
+        
+        # --- 輸入卷積層 ---
+        # 每個時間尺度對應一個卷積層
+        self.scale_convs = nn.ModuleList([
+            nn.Conv1d(d_model, d_model, kernel_size=scale, padding=scale//2) for scale in time_scales
+        ])
+        
+        # --- 融合層 ---
+        if fusion_type == "concat":
+            # 連接後再通過一個卷積層融合
+            self.fusion_conv = nn.Conv1d(d_model * len(time_scales), d_model, kernel_size=1)
+        elif fusion_type == "average":
+            # 平均融合，不需要額外的層
+            self.fusion_conv = None
+        elif fusion_type == "attention":
+            # 注意力融合，使用一個額外的注意力層
+            self.attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=8, batch_first=True)
+            self.fusion_conv = None # 不需要額外的卷積層
+        else:
+            raise ValueError("不支援的融合類型：{}。支援的類型：concat, average, attention".format(fusion_type))
+        
+        # --- Dropout 層 ---
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [batch_size * num_symbols, seq_len, d_model]
+        Returns:
+            融合後的特徵: [batch_size * num_symbols, seq_len, d_model]
+        """
+        # x 的形狀應該是 [B*N, S, E]，需要轉換為卷積期望的格式 [B*N, E, S]
+        x_conv = x.permute(0, 2, 1) # [B*N, d_model, seq_len]
+        
+        # --- 多尺度特徵提取 ---
+        scale_features = [conv(x_conv) for conv in self.scale_convs] # 每個卷積層處理一次
+        
+        # scale_features 現在是個列表，裡面是每個尺度的特徵，形狀都是 [B*N, d_model, S]
+        
+        # --- 特徵融合 ---
+        if self.fusion_type == "concat":
+            # 連接所有尺度的特徵
+            fused = torch.cat(scale_features, dim=1) # [B*N, d_model*len(scales), S]
+            # 通過融合卷積層
+            output = self.fusion_conv(fused) # [B*N, d_model, S]
+        elif self.fusion_type == "average":
+            # 平均所有尺度的特徵
+            output = sum(scale_features) / len(scale_features) # [B*N, d_model, S]
+        elif self.fusion_type == "attention":
+            # 注意力融合
+            # 首先，對每個時間尺度的特徵應用自注意力
+            attn_outputs = [self.attention(feat, feat, feat)[0] for feat in scale_features]
+            # 然後，將所有注意力輸出的特徵連接起來
+            fused_attn = torch.cat(attn_outputs, dim=1) # [B*N, d_model*len(scales), S]
+            # 最後，通過融合卷積層
+            output = self.fusion_conv(fused_attn) # [B*N, d_model, S]
+        else:
+            raise ValueError("不支援的融合類型：{}。支援的類型：concat, average, attention".format(self.fusion_type))
+        
+        # --- 殘差連接和層歸一化 ---
+        # 假設輸入 x 的形狀是 [B*N, S, d_model]
+        # 殘差連接：output + x
+        # 由於可能經過了不同的卷積層，output 的 seq_len 可能會變化
+        # 這裡假設經過卷積層後，output 的 seq_len 仍然是 S，因為使用了 padding
+        
+        # 殘差連接
+        output = output + x_conv # [B*N, d_model, S]
+        
+        # 層歸一化
+        output = output.permute(0, 2, 1) # 轉回 [B*N, S, d_model] 以符合 LayerNorm 輸入
+        output = F.layer_norm(output, self.d_model) # 使用預設的 epsilon
+        output = output.permute(0, 2, 1) # 轉回 [B*N, d_model, S] 以符合後續處理
+        
+        # --- Dropout ---
+        output = self.dropout(output)
+        
         return output
 
 
@@ -600,9 +693,6 @@ class EnhancedTransformerLayer(nn.Module):
             # It does not add residual connection itself. This layer's structure assumes attn_output is the full sublayer output.
             # A residual connection might be needed here if not using adaptive attention: x_res = normed_x + attn_output_raw
             attn_output_raw, _ = self.attention_layer(normed_x, normed_x, normed_x, key_padding_mask=key_padding_mask)
-            # The current structure directly uses attn_output. If standard MHA, this lacks residual.
-            # For now, maintaining existing structure, only passing probs.
-            # Consider adding residual: attn_output = normed_x + self.dropout_attn(attn_output_raw) if a dropout layer for attention is added
             attn_output = attn_output_raw # This might be an issue if residual is expected by subsequent ops.
                                           # However, AdaptiveAttentionLayer *does* include a residual.
                                           # This means behavior differs based on use_adaptive_attention.
@@ -623,46 +713,36 @@ class EnhancedTransformer(nn.Module):
     def __init__(self,
                  input_dim: int,
                  d_model: int,
-                 transformer_nhead: int, # Corrected from nhead
-                 num_encoder_layers: int, # Should be num_layers or similar, or handle encoder/decoder separately
-                 # num_decoder_layers: int, # Not typically used in this type of model structure unless it's seq2seq
+                 transformer_nhead: int, 
+                 num_encoder_layers: int, 
                  dim_feedforward: int,
                  dropout: float,
                  max_seq_len: int,
-                 num_symbols: Optional[int], # Max number of symbols model can handle
+                 num_symbols: Optional[int], 
                  output_dim: int,
                  use_msfe: bool = True,
-                 msfe_hidden_dim: Optional[int] = None, # If None, defaults to d_model in MSFE
-                 msfe_scales: List[int] = [3, 5, 7, 11], # scales for MSFE
-                 # msfe_conv_layers: int = 2, # Not directly used by current MSFE, scales define convs
-                 # msfe_kernel_sizes: List[int] = [3,5], # Covered by msfe_scales
-                 # msfe_stride: int = 1, # MSFE uses fixed padding and stride in its convs
+                 msfe_hidden_dim: Optional[int] = None, 
+                 msfe_scales: List[int] = [3, 5, 7, 11], 
                  use_final_norm: bool = True,
                  use_adaptive_attention: bool = True,
-                 num_market_states: int = 4, # Default if GMM is not used or fails
+                 num_market_states: int = 4, 
                  use_gmm_market_state_detector: bool = False,
                  gmm_market_state_detector_path: Optional[str] = None,
                  gmm_ohlcv_feature_config: Optional[Dict[str, Any]] = None,
-                 # gmm_fitting_data_path: Optional[str] = None, # Not used by model directly, but by GMM training
                  use_cts_fusion: bool = False, # CrossTimeScaleFusion
-                 cts_time_scales: Optional[List[int]] = None, # e.g., [5, 10, 20]
-                 cts_fusion_type: str = "attention", # "attention", "concat", "average"
+                 cts_time_scales: Optional[List[int]] = None, # e.g., [1, 3, 5]
+                 cts_fusion_type: str = "hierarchical_attention", # "hierarchical_attention", "simple_attention", "concat", "average"
                  use_symbol_embedding: bool = True,
                  symbol_embedding_dim: int = 16,
                  use_fourier_features: bool = False,
-                 fourier_num_modes: int = FOURIER_NUM_MODES, # from config or default
-                 # fourier_trainable: bool = False, # SpectralConv1d weights are always trainable
+                 fourier_num_modes: int = FOURIER_NUM_MODES, 
                  use_wavelet_features: bool = False,
-                 wavelet_name: str = WAVELET_NAME, # from config or default
-                 wavelet_levels: int = WAVELET_LEVELS, # from config or default
-                 trainable_wavelet_filters: bool = False, # DWT1D trainable_filters
-                 # adaptive_attention_dim_reduction_factor: int = 4, # Used internally by AdaptiveAttentionLayer
-                 # adaptive_attention_activation: str = "softmax", # Used internally by AdaptiveAttentionLayer
-                 use_layer_norm_before: bool = True, # For pre-norm architecture in Transformer layers
-                 # use_residual_in_msfe: bool = True, # MSFE has its own residual logic
-                 output_activation: Optional[str] = None, # e.g. "softmax", "sigmoid", None
-                 positional_encoding_type: str = "sinusoidal", # "sinusoidal", "learned"
-                 # num_layers: int, # This should be num_encoder_layers for clarity
+                 wavelet_name: str = WAVELET_NAME, 
+                 wavelet_levels: int = WAVELET_LEVELS, 
+                 trainable_wavelet_filters: bool = False, 
+                 use_layer_norm_before: bool = True, 
+                 output_activation: Optional[str] = None, 
+                 positional_encoding_type: str = "sinusoidal", 
                  device: str = DEVICE
                 ):
         super().__init__()
@@ -674,7 +754,7 @@ class EnhancedTransformer(nn.Module):
         self.input_dim = input_dim
         self.transformer_nhead = transformer_nhead
 
-        self.use_symbol_embedding = use_symbol_embedding # Correctly assigned
+        self.use_symbol_embedding = use_symbol_embedding 
         self.use_msfe = use_msfe
         self.use_adaptive_attention = use_adaptive_attention
         self.use_gmm_market_state_detector = use_gmm_market_state_detector
@@ -683,7 +763,6 @@ class EnhancedTransformer(nn.Module):
         self.use_wavelet_features = use_wavelet_features
         self.positional_encoding_type = positional_encoding_type
         
-        # Initialize num_market_states with the config value. It might be overridden by GMM.
         self.num_market_states = num_market_states
         self.gmm_detector: Optional[GMMMarketStateDetector] = None
         self.gmm_ohlcv_feature_config = gmm_ohlcv_feature_config
@@ -692,13 +771,13 @@ class EnhancedTransformer(nn.Module):
             if gmm_market_state_detector_path and os.path.exists(gmm_market_state_detector_path):
                 try:
                     self.gmm_detector = GMMMarketStateDetector.load_model(gmm_market_state_detector_path)
-                    if self.gmm_detector and self.gmm_detector.fitted: # Changed .is_fitted() to .fitted
+                    if self.gmm_detector and self.gmm_detector.fitted: 
                         logger.info(f"Successfully loaded fitted GMMMarketStateDetector from {gmm_market_state_detector_path}.")
-                        self.num_market_states = self.gmm_detector.n_states # Override
+                        self.num_market_states = self.gmm_detector.n_states 
                         logger.info(f"Updated num_market_states to {self.num_market_states} based on loaded GMM.")
                     else:
                         logger.warning(f"Loaded GMM model from {gmm_market_state_detector_path} is not fitted. Will use configured num_market_states: {self.num_market_states}.")
-                        self.gmm_detector = None # Set to None if not fitted
+                        self.gmm_detector = None 
                 except Exception as e:
                     logger.error(f"Failed to load GMMMarketStateDetector from {gmm_market_state_detector_path}: {e}. Will use configured num_market_states: {self.num_market_states}.")
                     self.gmm_detector = None
@@ -729,44 +808,51 @@ class EnhancedTransformer(nn.Module):
         if self.use_symbol_embedding:
             effective_num_symbols = self.num_symbols if self.num_symbols is not None else MAX_SYMBOLS_ALLOWED
             self.symbol_embed = nn.Embedding(effective_num_symbols + 1, symbol_embedding_dim, padding_idx=0)
-            # Projection for symbol embedding if its dim is not d_model (or a portion of it)
-            # Current assumption: symbol embedding is added to the feature embedding.
             if symbol_embedding_dim != d_model:
                 self.symbol_embed_proj = nn.Linear(symbol_embedding_dim, d_model)
             else:
                 self.symbol_embed_proj = nn.Identity()
-            # Optional: Symbol-specific positional embedding (distinct from temporal)
-            # self.symbol_pos_embed = nn.Embedding(effective_num_symbols + 1, d_model, padding_idx=0) 
         else:
             self.symbol_embed = None
             self.symbol_embed_proj = None
-            # self.symbol_pos_embed = None
 
         # --- Positional Encoding ---
-        # Note: MSFE output seq_len might differ from input_seq_len due to adaptive pooling.
-        # Positional encoding should ideally be applied to the sequence length *entering* the Transformer layers.
-        # If MSFE is used, its output seq_len is TIMESTEPS // 2 (by default).
-        # If MSFE is not used, it's max_seq_len.
-        # For now, assume max_seq_len for PE, but this might need adjustment based on MSFE\'s effect.
-        pe_seq_len = TIMESTEPS // 2 if use_msfe else max_seq_len
+        pe_seq_len = TIMESTEPS // 2 if use_msfe and self.msfe is not None else max_seq_len
 
         if self.positional_encoding_type == "sinusoidal":
             self.pos_encoder = PositionalEncoding(d_model, dropout, pe_seq_len)
-            self.pos_embed = None # Ensure pos_embed is None if not learned
+            self.pos_embed = None 
         elif self.positional_encoding_type == "learned":
-            self.pos_embed = LearnedPositionalEncoding(d_model, dropout, pe_seq_len) # Correctly assign to self.pos_embed
-            self.pos_encoder = self.pos_embed # Use self.pos_embed as the encoder
+            self.pos_embed = LearnedPositionalEncoding(d_model, dropout, pe_seq_len) 
+            self.pos_encoder = self.pos_embed 
         else: # None or other
             self.pos_encoder = nn.Identity()
-            self.pos_embed = None # Ensure pos_embed is None
+            self.pos_embed = None
 
 
         # --- Feature Blocks (Fourier, Wavelet) applied after projection to d_model ---
         self.fourier_block = FourierFeatureBlock(d_model, fourier_num_modes) if use_fourier_features else None
         self.wavelet_block = MultiLevelWaveletBlock(d_model, wavelet_name, wavelet_levels, trainable_wavelet_filters) if use_wavelet_features else None
         
-        # --- Transformer Layers ---
-        # num_encoder_layers is the parameter defining the number of transformer blocks
+        # --- Cross-Time-Scale Fusion (CTS) Initialization ---
+        if self.use_cts_fusion:
+            # 如果未提供 cts_time_scales, 使用預設值
+            if cts_time_scales is None:
+                cts_time_scales = [1, 3, 5] # 預設時間尺度: 包含原始尺度(1), 短期(3), 中期(5)
+                logger.info(f"CrossTimeScaleFusion: 'cts_time_scales' 未提供, 使用預設值: {cts_time_scales}")
+            
+            self.cts_fusion_module = CrossTimeScaleFusion(
+                d_model=d_model,
+                time_scales=cts_time_scales,
+                fusion_type=cts_fusion_type, # 從配置中讀取融合類型
+                dropout_rate=dropout # 使用模型主 dropout 率
+            )
+            logger.info(f"CrossTimeScaleFusion 模組已啟用, 類型: {cts_fusion_type}, 尺度: {cts_time_scales}.")
+        else:
+            self.cts_fusion_module = None
+            logger.info("CrossTimeScaleFusion 模組未啟用。")
+
+        # --- Transformer Layers Initialization --- (existing code)
         self.transformer_layers = nn.ModuleList([
             EnhancedTransformerLayer(
                 d_model=d_model,
@@ -791,7 +877,7 @@ class EnhancedTransformer(nn.Module):
         else:
             self.output_activation_fn = nn.Identity()
             
-        self.dropout_layer = nn.Dropout(dropout) # General dropout layer
+        self.dropout_layer = nn.Dropout(dropout) # 通用 dropout 層
 
     def _generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
         """生成自回歸任務所需的方形後續遮罩"""
@@ -799,8 +885,11 @@ class EnhancedTransformer(nn.Module):
         return mask
 
     def _extract_ohlcv_for_gmm(self, raw_ohlcv_src: torch.Tensor) -> torch.Tensor:
-        if not self.ohlcv_feature_index_in_src:
-            raise ValueError("ohlcv_feature_index_in_src is not defined for GMM.")
+        # This method seems to be defined but not used in the provided forward pass.
+        # It might be intended for a different GMM integration path or was part of an older version.
+        # For now, keeping it as is. If it's needed, ensure self.ohlcv_feature_index_in_src is set.
+        if not hasattr(self, 'ohlcv_feature_index_in_src') or not self.ohlcv_feature_index_in_src:
+            raise ValueError("ohlcv_feature_index_in_src is not defined for GMM when using _extract_ohlcv_for_gmm.")
         gmm_expected_order = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']
         indices = []
         for key in gmm_expected_order:
@@ -825,8 +914,6 @@ class EnhancedTransformer(nn.Module):
         """
         src = x_dict["src"]
         symbol_ids = x_dict.get("symbol_ids")
-        # src_key_padding_mask is for symbols, not time steps.
-        # It indicates which symbols in the num_active_symbols dimension are padding.
         symbol_padding_mask = x_dict.get("src_key_padding_mask") 
         raw_ohlcv_data_batch = x_dict.get("raw_ohlcv_data_batch")
 
@@ -956,85 +1043,79 @@ class EnhancedTransformer(nn.Module):
         if self.wavelet_block is not None:
             x_wavelet = self.wavelet_block(x)
             x = x + x_wavelet # Additive features
-            
-        x = self.dropout_layer(x) # Apply dropout after all feature engineering and embeddings
 
-        # --- Transformer Encoder Layers ---
-        # Transformer layers expect [SeqLen, Batch, EmbDim] if batch_first=False (default for nn.TransformerEncoderLayer)
-        # Or [Batch, SeqLen, EmbDim] if batch_first=True (which our EnhancedTransformerLayer uses)
-        
-        # Create key_padding_mask for transformer layers if symbol_padding_mask is provided.
-        # symbol_padding_mask is [B, N_active]. True for padded.
-        # Transformer MHA expects key_padding_mask as [B*N_active, SeqLen_target] if applied to Q K V of [B*N, S, E]
-        # Or, if it's per-item padding, it should be [B*N_active].
-        # The nn.MultiheadAttention key_padding_mask should be [Batch, KeySeqLen].
-        # In our case, Batch is B*N, KeySeqLen is seq_len (temporal).
-        # The symbol_padding_mask refers to which of the N symbols are padding, not time steps.
-        # This mask is primarily for the final output aggregation, not for the temporal attention within each symbol's sequence.
-        # However, if a symbol is entirely padding, its whole sequence could be masked.
-        
-        # For EnhancedTransformerLayer, key_padding_mask is for the temporal sequence.
-        # We don't have a temporal key padding mask from input by default.
-        # If symbol_padding_mask means the entire symbol's data is padding, then all its time steps are effectively masked.
-        # This is handled by zeroing out the final output for padded symbols.
-        # The internal MHA in EnhancedTransformerLayer might need a temporal mask if sequences have variable actual lengths.
-        # For now, assuming all sequences for active symbols have length `seq_len`.
+        # --- 7. 跨時間尺度融合 (Cross-Time-Scale Fusion) (可選) ---
+        if self.cts_fusion_module is not None:
+            x = self.cts_fusion_module(x)
 
-        temporal_key_padding_mask = None # Placeholder, unless we derive it
+        x = self.dropout_layer(x) 
+
+        temporal_key_padding_mask = None 
 
         for layer in self.transformer_layers:
             x = layer(x, 
                       key_padding_mask=temporal_key_padding_mask, 
                       external_market_state_probs=external_market_state_probs_for_transformer)
             
-        # --- Output Processing ---
-        x = self.final_norm(x) # [B*N, seq_len, d_model]
+        x = self.final_norm(x) 
         
-        # Aggregate over sequence dimension (e.g., take the last time step or average)
-        # Taking the last time step's output for prediction
-        x_agg = x[:, -1, :] # [B*N, d_model]
+        x_agg = x[:, -1, :] 
         
         output = self.output_projection(x_agg) # [B*N, output_dim]
         output = self.output_activation_fn(output)
         
-        # Reshape back to [B, N, output_dim]
         output = output.reshape(batch_size, num_active_symbols, self.output_dim)
         
-        # Apply symbol padding mask to zero out outputs for padded symbols
         if symbol_padding_mask is not None:
-            # symbol_padding_mask is [B, N_active], True for padded.
-            # Unsqueeze to make it [B, N_active, 1] to broadcast over output_dim
             mask_expanded = symbol_padding_mask.unsqueeze(-1).expand_as(output)
             output = output.masked_fill(mask_expanded, 0.0)
             
         return output
 
     def get_dynamic_config(self) -> Dict[str, Any]:
+        # This method needs to be updated to reflect the actual attributes of the class.
+        # For example, self.num_symbols_possible, self.gmm_model_path, etc. are not defined in __init__.
+        # Providing a corrected version based on __init__ and common practice.
         config = {
+            "input_dim": self.input_dim,
             "d_model": self.d_model,
-            "num_layers": len(self.transformer_layers),
-            "num_heads": self.transformer_layers[0].attention_layer.num_heads,
-            "ffn_dim": self.transformer_layers[0].ffn[0].out_features,
-            "output_dim": self.output_projection.out_features,
+            "transformer_nhead": self.transformer_nhead,
+            "num_encoder_layers": len(self.transformer_layers),
+            "dim_feedforward": self.transformer_layers[0].ffn[0].out_features if self.transformer_layers else None,
+            "dropout": self.dropout_layer.p if hasattr(self.dropout_layer, 'p') else None, # Assuming self.dropout_layer is nn.Dropout
             "max_seq_len": self.max_seq_len,
-            "num_symbols_possible": self.num_symbols_possible,
-            "use_symbol_embedding": self.use_symbol_embedding,
+            "num_symbols": self.num_symbols,
+            "output_dim": self.output_dim,
             "use_msfe": self.use_msfe,
+            "use_adaptive_attention": self.use_adaptive_attention,
+            "num_market_states": self.num_market_states,
+            "use_gmm_market_state_detector": self.use_gmm_market_state_detector,
+            "gmm_market_state_detector_path": self.gmm_detector.model_path if self.gmm_detector and hasattr(self.gmm_detector, 'model_path') else None,
+            "gmm_ohlcv_feature_config": self.gmm_ohlcv_feature_config is not None,
             "use_cts_fusion": self.use_cts_fusion,
+            "use_symbol_embedding": self.use_symbol_embedding,
             "use_fourier_features": self.use_fourier_features,
             "use_wavelet_features": self.use_wavelet_features,
-            "gmm_model_path": self.gmm_model_path,
-            "num_market_states_from_gmm": self.num_market_states_from_gmm,
-            "ohlcv_feature_index_in_src": self.ohlcv_feature_index_in_src is not None,
+            "positional_encoding_type": self.positional_encoding_type,
+            "output_activation": self.output_activation_fn.__class__.__name__ if not isinstance(self.output_activation_fn, nn.Identity) else None,
         }
-        if self.use_msfe and hasattr(self, 'msfe'):
+        if self.use_msfe and hasattr(self, 'msfe') and self.msfe is not None:
+            config['msfe_hidden_dim'] = self.msfe.hidden_dim
             config['msfe_scales'] = self.msfe.scales
-            config['msfe_output_seq_len'] = self.msfe_output_seq_len
-        if self.use_fourier_features and hasattr(self, 'fourier_block'):
+            # config['msfe_output_seq_len'] = self.msfe.adaptive_pool_output_size # If MSFE has this attribute
+
+        if self.use_cts_fusion and hasattr(self, 'cts_fusion_module') and self.cts_fusion_module is not None:
+            config['cts_time_scales'] = self.cts_fusion_module.time_scales
+            config['cts_fusion_type'] = self.cts_fusion_module.fusion_type
+
+        if self.use_fourier_features and hasattr(self, 'fourier_block') and self.fourier_block is not None:
             config['fourier_num_modes'] = self.fourier_block.spectral_conv.num_modes
-        if self.use_wavelet_features and hasattr(self, 'wavelet_block'):
+
+        if self.use_wavelet_features and hasattr(self, 'wavelet_block') and self.wavelet_block is not None:
             config['wavelet_name'] = self.wavelet_block.dwt_layers[0].wavelet.name
             config['wavelet_levels'] = self.wavelet_block.levels
+            # config['trainable_wavelet_filters'] = isinstance(self.wavelet_block.dwt_layers[0].lo_filter, nn.Parameter)
+
         return config
 
 # Ensure this class is defined after all its dependencies like EnhancedTransformerLayer, etc.
