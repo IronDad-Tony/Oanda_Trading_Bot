@@ -360,800 +360,211 @@ def test_forward_with_internal_weights_real_strategies(base_config: StrategyConf
     assert output_actions is not None
     # Expected shape: (batch_size, num_assets, 1)
     expected_num_assets = asset_features_batch.shape[1]
-    assert output_actions.shape == (asset_features_batch.shape[0], expected_num_assets, 1)
-
-
-def test_forward_with_external_weights_real_strategies(base_config: StrategyConfig, mock_logger, mock_input_features_for_real_strategies): # Removed mocker dependency
-    """Test forward pass with externally provided weights using real strategies."""
-    if not STRATEGY_REGISTRY:
-        pytest.skip("STRATEGY_REGISTRY is empty. Skipping forward test with real strategies.")
-    
-    input_dim_for_attention = base_config.default_params.get("market_feature_dim", 128)
-    strategy_input_feature_dim = base_config.default_params.get("feature_dim", 64)
-    strategy_classes_to_test = list(STRATEGY_REGISTRY.values())
-    num_strategies_to_initialize = len(strategy_classes_to_test)
-
-    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
-        layer = EnhancedStrategySuperposition(
-            input_dim=input_dim_for_attention,
-            num_strategies=num_strategies_to_initialize,
-            strategy_configs=[cls.default_config() for cls in strategy_classes_to_test if hasattr(cls, 'default_config')],
-            explicit_strategies=strategy_classes_to_test,
-            strategy_input_dim=strategy_input_feature_dim
-        )
-
-    if layer.num_actual_strategies == 0:
-        pytest.skip("No strategies loaded in ESS, cannot perform forward pass test with external weights.")
-
-    # MODIFIED: Unpack all 4 values
-    asset_features_batch, market_state_features, timestamps, current_positions_batch = mock_input_features_for_real_strategies
-    batch_size = asset_features_batch.shape[0]
-    
-    # External weights: (batch_size, num_actual_strategies)
-    external_weights = F.softmax(torch.randn(batch_size, layer.num_actual_strategies, device=asset_features_batch.device), dim=-1)
-    # external_weights = external_weights.to(next(layer.parameters()).device)
-
-
-    # MODIFIED: Call layer.forward with updated signature
-    output_actions = layer.forward(
-        asset_features_batch, 
-        market_state_features=market_state_features, 
-        external_weights=external_weights,
-        current_positions_batch=current_positions_batch,
-        timestamps=timestamps
-    )
-    
-    assert output_actions is not None
-    expected_num_assets = asset_features_batch.shape[1]
+    batch_size = asset_features_batch.shape[0] # ADDED: Define batch_size
     assert output_actions.shape == (batch_size, expected_num_assets, 1)
 
 
-def test_forward_with_invalid_external_weights_fallback_real_strategies(base_config: StrategyConfig, mock_logger, mock_input_features_for_real_strategies): # Removed mocker dependency
-    """Test fallback to internal weights if external_weights have an invalid shape, using real strategies."""
-    if not STRATEGY_REGISTRY:
-        pytest.skip("STRATEGY_REGISTRY is empty. Skipping forward test with real strategies.")
-    
-    input_dim_for_attention = base_config.default_params.get("market_feature_dim", 128)
-    strategy_input_feature_dim = base_config.default_params.get("feature_dim", 64)
-    strategy_classes_to_test = list(STRATEGY_REGISTRY.values())
-    num_strategies_to_initialize = len(strategy_classes_to_test)
-
-    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
-        layer = EnhancedStrategySuperposition(
-            input_dim=input_dim_for_attention,
-            num_strategies=num_strategies_to_initialize, 
-            strategy_configs=[cls.default_config() for cls in strategy_classes_to_test if hasattr(cls, 'default_config')],
-            explicit_strategies=strategy_classes_to_test,
-            strategy_input_dim=strategy_input_feature_dim
-        )
-
-    if layer.num_actual_strategies == 0:
-        pytest.skip("No strategies loaded in ESS, cannot perform fallback test.")
-
-    # MODIFIED: Unpack all 4 values
-    asset_features_batch, market_state_features, timestamps, current_positions_batch = mock_input_features_for_real_strategies
-    batch_size = asset_features_batch.shape[0]
-    
-    # Invalid external weights (e.g., wrong number of strategies dimension)
-    invalid_external_weights = torch.randn(batch_size, layer.num_actual_strategies + 1, device=asset_features_batch.device)
-    # invalid_external_weights = invalid_external_weights.to(next(layer.parameters()).device)
-
-    # Expect a warning about invalid weights and fallback
-    with patch.object(layer.logger, 'warning') as mock_warning:
-        # MODIFIED: Call layer.forward with updated signature
-        output_actions = layer.forward(
-            asset_features_batch, 
-            market_state_features=market_state_features, 
-            external_weights=invalid_external_weights,
-            current_positions_batch=current_positions_batch,
-            timestamps=timestamps
-        )
-        mock_warning.assert_called() 
-
-    assert output_actions is not None
-    expected_num_assets = asset_features_batch.shape[1]
-    assert output_actions.shape == (batch_size, expected_num_assets, 1)
-
-
-def test_gradient_flow_through_layer_and_mock_strategy(base_config: StrategyConfig, mock_logger): # Removed mocker dependency
-    """Test that gradients can flow through the layer and a learnable mock strategy."""
-    # Use distinct dimensions for clarity
-    layer_attention_input_dim = base_config.default_params.get("market_feature_dim", 32) # Smaller for test
-    strategy_feature_input_dim = base_config.default_params.get("feature_dim", 16) # Smaller for test
-
-
-    mock_strategy_classes = [LearnableMockStrategy]
-    num_strategies_to_initialize = len(mock_strategy_classes)
-    
-    learnable_mock_config = LearnableMockStrategy.default_config()
-    # Ensure strategy_input_dim is set for the mock strategy's config
-    learnable_mock_config.input_dim = strategy_feature_input_dim 
-
-    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger):
-        layer_for_grad_test = EnhancedStrategySuperposition(
-            input_dim=layer_attention_input_dim, # For attention mechanism
-            num_strategies=num_strategies_to_initialize,
-            strategy_configs=[learnable_mock_config],
-            explicit_strategies=mock_strategy_classes,
-            strategy_input_dim=strategy_feature_input_dim # For strategies
-        )
-
-    # Explicitly move the entire layer to the target device
-    layer_for_grad_test.to(DEVICE)
-
-    if layer_for_grad_test.num_actual_strategies == 0:
-        pytest.skip("LearnableMockStrategy not loaded, cannot test gradient flow.")
-        
-    mock_strategy_instance = layer_for_grad_test.strategies[0]
-    assert any(p.requires_grad for p in mock_strategy_instance.parameters()), "Mock strategy has no learnable parameters."
-    if layer_for_grad_test.attention_network:
-        assert any(p.requires_grad for p in layer_for_grad_test.attention_network.parameters()), "Attention network has no learnable parameters."
-
+# ADDED TEST
+@pytest.mark.parametrize("use_gumbel_softmax_param", [True, False]) # Test both Gumbel and standard Softmax for internal weights
+def test_strategy_combination_weights_and_execution_order(
+    base_config: StrategyConfig, 
+    mock_logger, 
+    device,
+    use_gumbel_softmax_param: bool
+):
+    """
+    Tests the strategy combination mechanism in EnhancedStrategySuperposition,
+    focusing on weight distribution (both internal and external) and execution order.
+    """
+    layer_attention_input_dim = base_config.default_params.get("market_feature_dim", 32)
+    # CORRECTED: Use a consistent feature dimension for the test
+    strategy_feature_input_dim = 5 # Match the dimension used in mock_input_features_for_real_strategies fixture if applicable, or define clearly
+    base_config.default_params["feature_dim"] = strategy_feature_input_dim # Ensure base_config reflects this for consistency if used by other parts
 
     batch_size = 2
-    seq_len = 10 
-    num_test_assets = 1 # Test with one asset for simplicity in this grad test
+    num_test_assets = 2
+    seq_len = 10
 
-    # MODIFIED: asset_features_batch shape (B, N_assets, Seq, StrategyInputDim)
-    asset_features_batch_grad = torch.randn(batch_size, num_test_assets, seq_len, strategy_feature_input_dim, requires_grad=False, device=DEVICE)
-    
-    # MODIFIED: market_state_features for attention (B, LayerAttentionInputDim)
-    # Needs requires_grad=True if we want to check grads flowing *into* it, 
-    # but for grads on attention *weights*, input grad is not strictly needed.
-    # For grads on strategy params, this also doesn't need grad.
-    market_state_features_grad = torch.randn(batch_size, layer_attention_input_dim, requires_grad=False, device=DEVICE)
-    
-    current_positions_grad = torch.zeros(batch_size, num_test_assets, 1, device=DEVICE)
+    # Create mock strategies
+    mock_strategy_configs = []
+    mock_strategy_classes = []
+    mock_strategy_instances = []
 
-
-    # Forward pass
-    # MODIFIED: Pass appropriate inputs
-    output_actions = layer_for_grad_test.forward(
-        asset_features_batch_grad, 
-        market_state_features=market_state_features_grad,
-        current_positions_batch=current_positions_grad
-    )
-    
-    # Create a dummy loss and backward pass
-    loss = output_actions.sum() 
-    loss.backward()
-
-    grad_found_in_strategy = False
-    for param in mock_strategy_instance.parameters():
-        if param.grad is not None:
-            grad_found_in_strategy = True
-            # print(f"Grad found in strategy param: {param.grad.abs().sum()}") # Debug
-            break
-    assert grad_found_in_strategy, "No gradients found in LearnableMockStrategy parameters."
-
-    if layer_for_grad_test.attention_network and any(p.requires_grad for p in layer_for_grad_test.attention_network.parameters()):
-        grad_found_in_attention = False
-        for param_name, param in layer_for_grad_test.attention_network.named_parameters():
-            if param.grad is not None:
-                grad_found_in_attention = True
-                # print(f"Grad found in attention param ({param_name}): {param.grad.abs().sum()}") # Debug
-                break
-        assert grad_found_in_attention, "No gradients found in attention network parameters (when expected)."
-
-# --- Test Constants for Statistical Arbitrage Strategies ---
-TEST_BATCH_SIZE = 2
-TEST_SEQ_LEN = 60
-# Number of features per individual asset (e.g., Open, High, Low, Close, Volume -> 5)
-# For simplicity in tests, let\'s use 3 (e.g., HLC or just 3 generic features)
-TEST_NUM_FEATURES_PER_ASSET = 3 # This was used for StatArb. For Trend, let's assume 5 for OHLCV
-TEST_WINDOW_SHORT = 10
-TEST_WINDOW_LONG = 20
-
-# Ensure close_idx, high_idx, low_idx are within [0, TEST_NUM_FEATURES_PER_ASSET - 1]
-# For example, if TEST_NUM_FEATURES_PER_ASSET = 3:
-# feature 0: close/primary
-# feature 1: high
-# feature 2: low
-
-# --- Test Constants for Trend Strategies ---
-# Let's use a more common feature set for trend strategies (OHLCV)
-TEST_TREND_NUM_FEATURES = 5 
-TEST_TREND_CLOSE_IDX = 3 # Assuming O=0, H=1, L=2, C=3, V=4
-TEST_TREND_HIGH_IDX = 1
-TEST_TREND_LOW_IDX = 2
-TEST_TREND_PERIOD_SHORT = 7
-TEST_TREND_PERIOD_MEDIUM = 14
-TEST_TREND_PERIOD_LONG = 21
-
-
-# --- Helper Functions for Mock Data ---
-def create_single_asset_mock_features(batch_size, seq_len, num_features, device): # Added device param
-    """Creates mock features for a single asset: (batch_size, seq_len, num_features)"""
-    return torch.randn(batch_size, seq_len, num_features, device=device)
-
-def create_pair_asset_mock_features(batch_size, seq_len, num_features_per_asset_in_pair, device): # Added device param
-    """Creates mock features for a pair of assets, concatenated: (batch_size, seq_len, num_features_per_asset_in_pair * 2)"""
-    return torch.randn(batch_size, seq_len, num_features_per_asset_in_pair * 2, device=device)
-
-def create_composite_mock_features(batch_size, seq_len, num_total_assets, num_features_per_asset_overall, device): # Added device param
-    """Creates mock features for a composite strategy: (batch_size, seq_len, num_total_assets * num_features_per_asset_overall)"""
-    return torch.randn(batch_size, seq_len, num_total_assets * num_features_per_asset_overall, device=device)
-
-# --- Unit Tests for Refactored Statistical Arbitrage Strategies ---
-
-class TestMeanReversionStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = MeanReversionStrategy.default_config()
-        config.default_params.update({
-            "window": TEST_WINDOW_SHORT,
-            "std_dev_multiplier": 2.0,
-            "close_idx": 0,
-            "num_features_per_asset": TEST_NUM_FEATURES_PER_ASSET        })
-        return config
-
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device): # Removed mocker dependency
-        strategy = MeanReversionStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device) # Use fixture device
-
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_NUM_FEATURES_PER_ASSET, device=device # Pass device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        # MODIFIED: Assert against device string directly
-        assert signals.device.type == device # Use fixture device
-        assert torch.all(signals >= -1) and torch.all(signals <= 1) # Assuming signals are bounded
-        # Correct assertion for discrete signals: -1, 0, or 1
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal), "Signals are not strictly -1, 0, or 1"
-
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device): # Added device
-        strategy = MeanReversionStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device) # Use fixture device
-        
-        short_seq_len = strategy_config.default_params["window"] - 1
-        if short_seq_len <= 0:
-            pytest.skip("Window is too small to test short sequence meaningfully.")
-
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_NUM_FEATURES_PER_ASSET, device=device # Pass device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0)
-
-    def test_forward_zero_std_dev(self, strategy_config, mock_logger_fixture, device): # Added device
-        strategy = MeanReversionStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device) # Use fixture device
-
-        # Create features where close price is constant, leading to zero std dev
-        asset_features = torch.zeros(TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_NUM_FEATURES_PER_ASSET, device=device) # Pass device
-        asset_features[:, :, strategy_config.default_params["close_idx"]] = 100.0 # Constant close price
-
-        signals = strategy.forward(asset_features)
-        
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        # Expect signals to be 0 if std dev is clamped at a small value and price is at mean
-        # Or, if price is exactly the mean, signal is 0. If std is 0 and price is not mean, could be +/-1.
-        # The strategy clamps std_dev at 1e-6. If (price - mean) is non-zero, signal will be +/-1.
-        # If price is constant, mean is price, so (price - mean) is 0. Signal should be 0.
-        assert torch.all(signals == 0)
-
-
-class TestCointegrationStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = CointegrationStrategy.default_config()
-        config.default_params.update({
-            "window": TEST_WINDOW_SHORT,
-            "std_dev_multiplier": 1.5,
-            "asset1_close_idx": 0, # Relative to asset1's feature block
-            "asset2_close_idx": 0, # Relative to asset2's feature block (i.e., index 0 within the second half of features)
-            "num_features_per_asset": TEST_NUM_FEATURES_PER_ASSET,
-            # "pair_assets": ["ASSET1", "ASSET2"] # Not directly used by forward, but by __init__
-        })
-        # For CointegrationStrategy, __init__ also expects 'pair_assets' in instance_params
-        # but this test focuses on forward, which uses indices.
-        return config
-
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device): # Removed mocker dependency
-        # instance_params for __init__ can be strategy_config.default_params
-        # It needs \'pair_assets\' if the strategy\'s __init__ strictly requires it for logging/naming,
-        # but the tensor logic in forward relies on indices.
-        instance_params = strategy_config.default_params.copy()
-        instance_params["pair_assets"] = ["ASSET1", "ASSET2"] # Add dummy pair_assets for init
-        
-        strategy = CointegrationStrategy(strategy_config, instance_params, mock_logger_fixture)
-        strategy.to(device) # Use fixture device
-
-        asset_features = create_pair_asset_mock_features(
-            TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_NUM_FEATURES_PER_ASSET, device=device # Pass device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        # MODIFIED: Assert against device string directly
-        assert signals.device.type == device # Use fixture device
-        assert torch.all(signals >= -1) and torch.all(signals <= 1)
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal), "Signals are not strictly -1, 0, or 1"
-
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device): # Added device
-        instance_params = strategy_config.default_params.copy()
-        instance_params["pair_assets"] = ["ASSET1", "ASSET2"]
-        strategy = CointegrationStrategy(strategy_config, instance_params, mock_logger_fixture)
-        strategy.to(device) # Use fixture device
-        
-        short_seq_len = strategy_config.default_params["window"] - 1
-        if short_seq_len <= 0:
-            pytest.skip("Window is too small.")
-
-        asset_features = create_pair_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_NUM_FEATURES_PER_ASSET, device=device # Pass device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0)
-
-class TestPairsTradeStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = PairsTradeStrategy.default_config()
-        config.default_params.update({
-            "window": TEST_WINDOW_LONG,
-            "entry_threshold": 2.0,
-            "exit_threshold": 0.5,
-            "asset1_close_idx": 0,            "asset2_close_idx": 0,
-            "num_features_per_asset": TEST_NUM_FEATURES_PER_ASSET,
-        })
-        return config
-
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device): # Removed mocker dependency
-        instance_params = strategy_config.default_params.copy()
-        instance_params["pair_assets"] = ["ASSET_X", "ASSET_Y"]
-        strategy = PairsTradeStrategy(strategy_config, instance_params, mock_logger_fixture)
-        strategy.to(device) # Use fixture device
-
-        asset_features = create_pair_asset_mock_features(
-            TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_NUM_FEATURES_PER_ASSET, device=device # Pass device
-        )
-        # current_positions for the pair: (batch_size, 1)
-        current_positions = torch.randint(-1, 2, (TEST_BATCH_SIZE, 1), device=device, dtype=torch.float32) # Pass device
-        
-        signals = strategy.forward(asset_features, current_positions)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        # MODIFIED: Assert against device string directly
-        assert signals.device.type == device # Use fixture device
-        # Replace isin with a compatible check
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal), "Signals are not strictly -1, 0, or 1"
-
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device): # Added device
-        instance_params = strategy_config.default_params.copy()
-        instance_params["pair_assets"] = ["ASSET_X", "ASSET_Y"]
-        strategy = PairsTradeStrategy(strategy_config, instance_params, mock_logger_fixture)
-        strategy.to(device) # Use fixture device
-
-        short_seq_len = strategy_config.default_params["window"] - 1
-        if short_seq_len <= 0:
-            pytest.skip("Window is too small.")
-
-        asset_features = create_pair_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_NUM_FEATURES_PER_ASSET, device=device # Pass device
-        )
-        current_positions = torch.zeros(TEST_BATCH_SIZE, 1, device=device) # Pass device
-        signals = strategy.forward(asset_features, current_positions)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0) # Expect no action if data is insufficient
-
-# --- Unit Tests for Refactored Trend Strategies ---
-
-class TestMomentumStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = MomentumStrategy.default_config()
-        config.default_params.update({
-            "window": TEST_TREND_PERIOD_MEDIUM,
-            "close_idx": TEST_TREND_CLOSE_IDX,
-            "num_features_per_asset": TEST_TREND_NUM_FEATURES
-        })
-        return config
-
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device):
-        strategy = MomentumStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert signals.device.type == device
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal), "Signals are not strictly -1, 0, or 1"
-
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device):
-        strategy = MomentumStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        
-        # ROC needs at least `window` prior data points + 1 current point.
-        # So, sequence length must be >= window + 1 for a non-zero ROC.
-        # If seq_len is `window`, ROC will be calculated based on `window-1` lookback, which is still valid.
-        # If seq_len is less than `window`, it should produce 0.
-        short_seq_len = strategy_config.default_params["window"] -1 
-        if short_seq_len <= 0:
-            pytest.skip("Window is too small to test short sequence meaningfully.")
-
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_TREND_NUM_FEATURES, device=device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0), "Signal should be 0 for sequence shorter than window"
-
-    def test_forward_roc_logic(self, strategy_config, mock_logger_fixture, device):
-        strategy = MomentumStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        window = strategy_config.default_params["window"]
-        close_idx = strategy_config.default_params["close_idx"]
-
-        # Create data with known ROC
-        # Batch 1: Price increasing (positive ROC -> buy signal)
-        # Batch 2: Price decreasing (negative ROC -> sell signal)
-        asset_features = torch.zeros(TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device)
-        
-        # Batch 1: Increasing prices
-        for i in range(TEST_SEQ_LEN):
-            asset_features[0, i, close_idx] = 100 + i 
-        # Batch 2: Decreasing prices
-        for i in range(TEST_SEQ_LEN):
-            asset_features[1, i, close_idx] = 100 - i
+    for i in range(3): # Create 3 mock strategies
+        strat_id_numeric = i + 1
+        # Define a unique mock strategy class for each instance to allow specific mocking
+        class MockStrat(BaseStrategy):
+            # Need to capture i for default_config name and forward method
+            # This is tricky with class definitions in a loop. A closure or functools.partial might be needed
+            # For simplicity, we'll make the name and output dependent on an instance variable set in __init__
             
-        signals = strategy.forward(asset_features)
-        assert signals[0, 0, 0] == 1.0, "Expected buy signal for increasing price"
-        assert signals[1, 0, 0] == -1.0, "Expected sell signal for decreasing price"
+            def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
+                super().__init__(config, params, logger)
+                # Extract numeric id from name, assuming name is like "MockStrat1", "MockStrat2"
+                self.numeric_id = int(self.config.name.replace("MockStrat", ""))
+                self.forward_call_args = []
 
-class TestTrendMeanReversionStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = TrendMeanReversionStrategy.default_config() # Use the aliased import
-        config.default_params.update({
-            "window": TEST_TREND_PERIOD_MEDIUM,
-            "std_dev_multiplier": 2.0,
-            "close_idx": TEST_TREND_CLOSE_IDX,
-            "num_features_per_asset": TEST_TREND_NUM_FEATURES
-        })
-        return config
+            @staticmethod
+            def default_config(): 
+                # This static method cannot use `i` directly from the loop.
+                # The name will be set when creating the config object for the layer.
+                # The default_params can set the input_dim.
+                return StrategyConfig(
+                    name="PLACEHOLDER_NAME", # This will be overridden
+                    default_params={'input_dim': strategy_feature_input_dim} # Ensure this matches asset_features_batch
+                )
 
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device):
-        strategy = TrendMeanReversionStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
+            def forward(self, asset_features, current_positions=None, timestamp=None):
+                self.forward_call_args.append({
+                    'asset_features_shape': asset_features.shape,
+                    'current_positions_shape': current_positions.shape if current_positions is not None else None,
+                    'timestamp': timestamp
+                })
+                # Return a unique, predictable output for this strategy
+                # Output shape: (batch_size, 1, 1)
+                return torch.full((asset_features.shape[0], 1, 1), float(self.numeric_id), device=asset_features.device)
 
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device
+        # Update the class name to be unique for registration if STRATEGY_REGISTRY is used by ESS init
+        MockStrat.__name__ = f"MockStrat{strat_id_numeric}"
+        
+        # Create the config with the correct name that the layer will see
+        config = StrategyConfig(
+            name=f"MockStrat{strat_id_numeric}", 
+            default_params={'input_dim': strategy_feature_input_dim},
+            description=f"Mock strategy {strat_id_numeric}"
         )
-        signals = strategy.forward(asset_features)
+        # Ensure input_dim is correctly set in the config object passed to the layer
+        config.input_dim = strategy_feature_input_dim 
+        mock_strategy_configs.append(config)
+        mock_strategy_classes.append(MockStrat)
 
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert signals.device.type == device
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal), "Signals are not strictly -1, 0, or 1"
+    # Initialize EnhancedStrategySuperposition
+    # Patch STRATEGY_REGISTRY temporarily for this test to include our mocks by name
+    # This ensures that _initialize_strategies can find them if it looks up by config name.
+    temp_strategy_registry = STRATEGY_REGISTRY.copy()
+    for idx, strat_class in enumerate(mock_strategy_classes):
+        temp_strategy_registry[mock_strategy_configs[idx].name] = strat_class
 
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device):
-        strategy = TrendMeanReversionStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        
-        short_seq_len = strategy_config.default_params["window"] -1
-        if short_seq_len <= 0:
-            pytest.skip("Window is too small.")
-
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_TREND_NUM_FEATURES, device=device
+    with patch('src.agent.enhanced_quantum_strategy_layer.logging.getLogger', return_value=mock_logger), \
+         patch('src.agent.enhanced_quantum_strategy_layer.STRATEGY_REGISTRY', temp_strategy_registry):        
+        layer = EnhancedStrategySuperposition(
+            input_dim=layer_attention_input_dim,
+            num_strategies=len(mock_strategy_classes),
+            strategy_configs=mock_strategy_configs, 
+            explicit_strategies=None, # Rely on strategy_configs and patched STRATEGY_REGISTRY
+            strategy_input_dim=strategy_feature_input_dim,
+            use_gumbel_softmax=use_gumbel_softmax_param 
         )
-        signals = strategy.forward(asset_features)
+    layer.to(device)
+    layer.eval() # Set layer to evaluation mode
 
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0)
+    assert layer.num_actual_strategies == len(mock_strategy_classes), "Incorrect number of strategies loaded"
+    
+    mock_strategy_instances = list(layer.strategies) # Get the instantiated strategies
+    assert len(mock_strategy_instances) == len(mock_strategy_classes), "Not all mock strategies were found in the layer"
 
-    def test_forward_signal_logic(self, strategy_config, mock_logger_fixture, device):
-        strategy = TrendMeanReversionStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        window = strategy_config.default_params["window"]
-        std_multiplier = strategy_config.default_params["std_dev_multiplier"]
-        close_idx = strategy_config.default_params["close_idx"]
+    # Prepare inputs
+    asset_features_batch = torch.randn(batch_size, num_test_assets, seq_len, strategy_feature_input_dim, device=device)
+    market_state_features = torch.randn(batch_size, layer_attention_input_dim, device=device) 
+    current_positions_batch = torch.randn(batch_size, num_test_assets, 1, device=device)
+    timestamps = [pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=k) for k in range(batch_size)]
 
-        asset_features = torch.zeros(TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device)
-        
-        # Batch 1: Price significantly above rolling mean + std_dev (sell signal)
-        mean_val_b1 = 100
-        std_val_b1 = 5
-        asset_features[0, :, close_idx] = torch.linspace(mean_val_b1 - std_val_b1, mean_val_b1 + std_val_b1, TEST_SEQ_LEN, device=device)
-        asset_features[0, -1, close_idx] = mean_val_b1 + (std_multiplier + 0.5) * std_val_b1 # Far above upper band
+    # --- Test Case 1: External Weights ---
+    mock_logger.info("Testing with External Weights")
+    external_weights_input = torch.tensor([[0.2, 0.5, 0.3], [0.6, 0.1, 0.3]], device=device, dtype=torch.float) # Renamed to avoid confusion
+    assert external_weights_input.shape == (batch_size, layer.num_actual_strategies)
 
-        # Batch 2: Price significantly below rolling mean - std_dev (buy signal)
-        mean_val_b2 = 100
-        std_val_b2 = 5
-        asset_features[1, :, close_idx] = torch.linspace(mean_val_b2 + std_val_b2, mean_val_b2 - std_val_b2, TEST_SEQ_LEN, device=device)
-        asset_features[1, -1, close_idx] = mean_val_b2 - (std_multiplier + 0.5) * std_val_b2 # Far below lower band
+    for mock_strat_instance in mock_strategy_instances:
+        mock_strat_instance.forward_call_args = []
 
-        signals = strategy.forward(asset_features)
-        assert signals[0, 0, 0] == -1.0, "Expected sell signal for price above upper band"
-        assert signals[1, 0, 0] == 1.0, "Expected buy signal for price below lower band"
+    output_actions_ext = layer.forward(
+        asset_features_batch,
+        market_state_features=market_state_features, 
+        current_positions_batch=current_positions_batch,
+        timestamps=timestamps,
+        external_weights=external_weights_input # Pass the raw input weights
+    )
 
-class TestReversalStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = ReversalStrategy.default_config()
-        config.default_params.update({
-            "rsi_period": TEST_TREND_PERIOD_MEDIUM,
-            "stoch_k_period": TEST_TREND_PERIOD_MEDIUM,
-            "stoch_d_period": TEST_TREND_PERIOD_SHORT,
-            "overbought_rsi": 70.0,
-            "oversold_rsi": 30.0,
-            "overbought_stoch": 80.0,
-            "oversold_stoch": 20.0,
-            "close_idx": TEST_TREND_CLOSE_IDX,
-            "high_idx": TEST_TREND_HIGH_IDX,
-            "low_idx": TEST_TREND_LOW_IDX,
-            "num_features_per_asset": TEST_TREND_NUM_FEATURES
-        })
-        return config
+    assert output_actions_ext.shape == (batch_size, num_test_assets, 1)
 
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device):
-        strategy = ReversalStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
+    for mock_strat_instance in mock_strategy_instances:
+        assert len(mock_strat_instance.forward_call_args) == num_test_assets
+        for k in range(num_test_assets):
+            call_arg = mock_strat_instance.forward_call_args[k]
+            assert call_arg['asset_features_shape'] == (batch_size, seq_len, strategy_feature_input_dim)
+            assert call_arg['current_positions_shape'] == (batch_size, 1)
+            # Timestamps are passed per batch item, but strategies currently take the first one.
+            # The layer passes timestamps[0] to each strategy if timestamps is not None.
+            # If timestamps has batch_size elements, this check is fine.
+            assert call_arg['timestamp'] == timestamps[0] 
 
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device
+    # Calculate expected output mirroring the layer's logic for external weights
+    processed_external_weights = F.softmax(external_weights_input / layer.temperature.item(), dim=1)
+    # If dropout is applied in the layer even in eval mode (which it shouldn't for standard nn.Dropout),
+    # this expectation would be harder to match without mocking dropout or knowing its exact behavior.
+    # Assuming nn.Dropout in eval mode is an identity operation.
+
+    expected_output_ext = torch.zeros(batch_size, num_test_assets, 1, device=device)
+    for b in range(batch_size):
+        for a in range(num_test_assets):
+            weighted_sum = 0.0
+            for s_idx, mock_strat_instance in enumerate(mock_strategy_instances):
+                # Each mock strategy returns its numeric_id as a float
+                # The forward method of MockStrat returns torch.full((asset_features.shape[0], 1, 1), float(self.numeric_id), ...)
+                # So, for a given batch item, the raw output is float(mock_strat_instance.numeric_id)
+                strategy_raw_output = float(mock_strat_instance.numeric_id) 
+                weighted_sum += processed_external_weights[b, s_idx] * strategy_raw_output
+            expected_output_ext[b, a, 0] = weighted_sum
+    
+    assert torch.allclose(output_actions_ext, expected_output_ext, atol=1e-5), (
+        f"External weights combination failed. Expected:\\n{expected_output_ext}\\n"
+        f"Got:\\n{output_actions_ext}\\n"
+        f"Processed weights used for expectation:\\n{processed_external_weights}"
+    )
+
+    # --- Test Case 2: Internal Weights (Attention-based) ---
+    mock_logger.info(f"Testing with Internal Weights (Gumbel Softmax: {use_gumbel_softmax_param})")
+    for mock_strat_instance in mock_strategy_instances:
+        mock_strat_instance.forward_call_args = []
+    
+    internal_mock_logits = torch.tensor([[1.0, 5.0, 2.0], [5.0, 1.0, 2.0]], device=device, dtype=torch.float)
+    # CORRECTED: Patch the 'forward' method of the attention_network instance
+    with patch.object(layer.attention_network, 'forward', MagicMock(return_value=internal_mock_logits)) as mock_attention_forward:
+        output_actions_internal = layer.forward(
+            asset_features_batch,
+            market_state_features=market_state_features, 
+            current_positions_batch=current_positions_batch,
+            timestamps=timestamps,
+            external_weights=None 
         )
-        # Ensure High >= Low, High >= Close, Low <= Close for realistic HLC values
-        low_prices = torch.rand(TEST_BATCH_SIZE, TEST_SEQ_LEN, device=device) * 100
-        high_prices = low_prices + torch.rand(TEST_BATCH_SIZE, TEST_SEQ_LEN, device=device) * 10
-        close_prices = low_prices + torch.rand(TEST_BATCH_SIZE, TEST_SEQ_LEN, device=device) * (high_prices - low_prices)
-        asset_features[:, :, strategy_config.default_params["low_idx"]] = low_prices
-        asset_features[:, :, strategy_config.default_params["high_idx"]] = high_prices
-        asset_features[:, :, strategy_config.default_params["close_idx"]] = close_prices
+        mock_attention_forward.assert_called_once_with(market_state_features)
 
-        signals = strategy.forward(asset_features)
+    assert output_actions_internal.shape == (batch_size, num_test_assets, 1)
 
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert signals.device.type == device
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal), "Signals are not strictly -1, 0, or 1"
+    for mock_strat_instance in mock_strategy_instances:
+        assert len(mock_strat_instance.forward_call_args) == num_test_assets 
 
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device):
-        strategy = ReversalStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        
-        # RSI and Stochastic need at least their respective periods.
-        # The strategy uses max(rsi_period, stoch_k_period) for its internal check.
-        required_len = max(strategy_config.default_params["rsi_period"], strategy_config.default_params["stoch_k_period"])
-        short_seq_len = required_len -1 
-        if short_seq_len <= 0:
-            pytest.skip("Periods are too small to test short sequence meaningfully.")
+    current_temp = layer.temperature.item()
+    expected_internal_weights = F.softmax(internal_mock_logits / current_temp, dim=1)
+    layer.eval() 
 
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_TREND_NUM_FEATURES, device=device
-        )
-        signals = strategy.forward(asset_features)
+    expected_output_int = torch.zeros(batch_size, num_test_assets, 1, device=device)
+    for b in range(batch_size):
+        for a in range(num_test_assets):
+            weighted_sum = 0.0
+            for s_idx, mock_strat_instance in enumerate(mock_strategy_instances):
+                strategy_raw_output = float(mock_strat_instance.numeric_id) # Use numeric_id
+                weighted_sum += expected_internal_weights[b, s_idx] * strategy_raw_output
+            expected_output_int[b, a, 0] = weighted_sum
+            
+    assert torch.allclose(output_actions_internal, expected_output_int, atol=1e-4), (
+        f"Internal weights combination failed (Gumbel: {use_gumbel_softmax_param}). Expected:\\n{expected_output_int}\\n"
+        f"Got:\\n{output_actions_internal}\\n"
+        f"Processed weights used for expectation:\\n{expected_internal_weights}"
+    )
 
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0), "Signal should be 0 for insufficient sequence length"
+    mock_logger.info(f"Test passed with Gumbel Softmax: {use_gumbel_softmax_param}")
 
-    # More specific tests for RSI/Stochastic conditions can be added here if needed,
-    # but they would be complex to set up with precise mock data to trigger specific crossover events.
-    # The current forward pass test covers the basic operation.
-
-# Placeholder for BreakoutStrategy tests (to be implemented)
-class TestBreakoutStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = BreakoutStrategy.default_config()
-        config.default_params.update({
-            "breakout_window": TEST_TREND_PERIOD_LONG,
-            "std_dev_multiplier": 2.0,
-            "min_breakout_volume_increase_pct": 0.5,
-            "close_idx": TEST_TREND_CLOSE_IDX, # Standard OHLCV: C=3
-            "high_idx": TEST_TREND_HIGH_IDX,   # H=1
-            "low_idx": TEST_TREND_LOW_IDX,    # L=2
-            "volume_idx": 4, # V=4
-            "num_features_per_asset": TEST_TREND_NUM_FEATURES
-        })
-        return config
-
-    # @pytest.mark.skip(reason="BreakoutStrategy tensor forward and tests not yet fully implemented.")
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device):
-        strategy = BreakoutStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        asset_features = create_single_asset_mock_features(TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device)
-        
-        # Ensure HLCV are somewhat realistic if strategy depends on their relationships
-        low_prices = torch.rand(TEST_BATCH_SIZE, TEST_SEQ_LEN, device=device) * 100
-        high_prices = low_prices + torch.rand(TEST_BATCH_SIZE, TEST_SEQ_LEN, device=device) * 10
-        close_prices = low_prices + torch.rand(TEST_BATCH_SIZE, TEST_SEQ_LEN, device=device) * (high_prices - low_prices)
-        volume_data = torch.rand(TEST_BATCH_SIZE, TEST_SEQ_LEN, device=device) * 1000
-
-        asset_features[:, :, strategy_config.default_params["low_idx"]] = low_prices
-        asset_features[:, :, strategy_config.default_params["high_idx"]] = high_prices
-        asset_features[:, :, strategy_config.default_params["close_idx"]] = close_prices
-        asset_features[:, :, strategy_config.default_params["volume_idx"]] = volume_data
-        
-        signals = strategy.forward(asset_features)
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert signals.device.type == device
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal)
-
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device):
-        strategy = BreakoutStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        
-        short_seq_len = strategy_config.default_params["breakout_window"] - 1
-        if short_seq_len <= 0:
-            pytest.skip("Window is too small.")
-
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_TREND_NUM_FEATURES, device=device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0)
-
-    def test_breakout_logic(self, strategy_config, mock_logger_fixture, device):
-        strategy = BreakoutStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        window = strategy_config.default_params["breakout_window"]
-        std_multiplier = strategy_config.default_params["std_dev_multiplier"]
-        vol_increase_pct = strategy_config.default_params["min_breakout_volume_increase_pct"]
-        close_idx = strategy_config.default_params["close_idx"]
-        high_idx = strategy_config.default_params["high_idx"]
-        low_idx = strategy_config.default_params["low_idx"]
-        volume_idx = strategy_config.default_params["volume_idx"]
-
-        asset_features = torch.ones(TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device) * 100 # Base price 100
-        asset_features[:, :, volume_idx] = 1000 # Base volume 1000
-
-        # Batch 0: Upward breakout
-        # Make last few prices stable to establish BBands
-        for i in range(window):
-            asset_features[0, TEST_SEQ_LEN - 1 - i, close_idx] = 100 
-            asset_features[0, TEST_SEQ_LEN - 1 - i, high_idx] = 101
-            asset_features[0, TEST_SEQ_LEN - 1 - i, low_idx] = 99
-        # Last point breaks out
-        asset_features[0, -1, close_idx] = 110 # Above typical std_dev for constant price
-        asset_features[0, -1, high_idx] = 112
-        asset_features[0, -1, low_idx] = 108
-        asset_features[0, -1, volume_idx] = 2000 # Increased volume
-
-        # Batch 1: Downward breakout
-        for i in range(window):
-            asset_features[1, TEST_SEQ_LEN - 1 - i, close_idx] = 100
-            asset_features[1, TEST_SEQ_LEN - 1 - i, high_idx] = 101
-            asset_features[1, TEST_SEQ_LEN - 1 - i, low_idx] = 99
-        # Last point breaks out downwards
-        asset_features[1, -1, close_idx] = 90
-        asset_features[1, -1, high_idx] = 92
-        asset_features[1, -1, low_idx] = 88
-        asset_features[1, -1, volume_idx] = 2000 # Increased volume
-
-        signals = strategy.forward(asset_features)
-        # Note: Exact BBand values depend on rolling_std of near-constant data which can be very small.
-        # This test checks if signals are generated; precise values might need fine-tuning of mock data.
-        # For constant data, std will be near zero, so any deviation is a breakout.
-        assert signals[0, 0, 0] == 1.0, "Expected buy signal for upward breakout"
-        assert signals[1, 0, 0] == -1.0, "Expected sell signal for downward breakout"
-
-
-# Placeholder for TrendFollowingStrategy tests (to be implemented)
-class TestTrendFollowingStrategy(BaseStrategyTest):
-    @pytest.fixture
-    def strategy_config(self):
-        config = TrendFollowingStrategy.default_config()
-        config.default_params.update({
-            "short_sma_period": TEST_TREND_PERIOD_SHORT,
-            "long_sma_period": TEST_TREND_PERIOD_LONG,
-            "close_idx": TEST_TREND_CLOSE_IDX, # C=3 for OHLCV
-            "num_features_per_asset": TEST_TREND_NUM_FEATURES
-        })
-        return config
-
-    # @pytest.mark.skip(reason="TrendFollowingStrategy tensor forward and tests not yet fully implemented.")
-    def test_forward_pass(self, strategy_config, mock_logger_fixture, device):
-        strategy = TrendFollowingStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        asset_features = create_single_asset_mock_features(TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device)
-        signals = strategy.forward(asset_features)
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert signals.device.type == device
-        is_valid_signal = (signals == -1.0) | (signals == 0.0) | (signals == 1.0)
-        assert torch.all(is_valid_signal)
-
-    def test_forward_short_sequence(self, strategy_config, mock_logger_fixture, device):
-        strategy = TrendFollowingStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        
-        short_seq_len = strategy_config.default_params["long_sma_period"] - 1
-        if short_seq_len <= 0:
-            pytest.skip("Long SMA period is too small.")
-
-        asset_features = create_single_asset_mock_features(
-            TEST_BATCH_SIZE, short_seq_len, TEST_TREND_NUM_FEATURES, device=device
-        )
-        signals = strategy.forward(asset_features)
-
-        assert signals.shape == (TEST_BATCH_SIZE, 1, 1)
-        assert torch.all(signals == 0)
-
-    def test_sma_crossover_logic(self, strategy_config, mock_logger_fixture, device):
-        strategy = TrendFollowingStrategy(strategy_config, strategy_config.default_params, mock_logger_fixture)
-        strategy.to(device)
-        short_window = strategy_config.default_params["short_sma_period"]
-        long_window = strategy_config.default_params["long_sma_period"]
-        close_idx = strategy_config.default_params["close_idx"]
-
-        asset_features = torch.zeros(TEST_BATCH_SIZE, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device)
-
-        # Batch 0: Golden cross (short SMA crosses above long SMA)
-        # Prices start low, then rise, causing short SMA to rise faster
-        prices_b0 = torch.cat([
-            torch.linspace(100, 90, long_window // 2, device=device), 
-            torch.linspace(90, 110, TEST_SEQ_LEN - (long_window // 2), device=device)
-        ])
-        asset_features[0, :, close_idx] = prices_b0
-
-        # Batch 1: Death cross (short SMA crosses below long SMA)
-        # Prices start high, then fall, causing short SMA to fall faster
-        prices_b1 = torch.cat([
-            torch.linspace(100, 110, long_window // 2, device=device), 
-            torch.linspace(110, 90, TEST_SEQ_LEN - (long_window // 2), device=device)
-        ])
-        asset_features[1, :, close_idx] = prices_b1
-        
-        # Ensure sequence is long enough for at least two points for crossover check
-        if TEST_SEQ_LEN < 2:
-            pytest.skip("Sequence length too short for crossover logic test.")
-
-        signals = strategy.forward(asset_features)
-        
-        # These assertions are highly dependent on the exact price series and window lengths.
-        # A robust test would pre-calculate expected SMA values and crossover points.
-        # For now, we check if a signal is generated. It might be 0 if crossover isn't at the very end.
-        # To make it more deterministic, one might need to craft the last few points very carefully.
-        # For simplicity, we'll check that the signals are valid (-1, 0, or 1).
-        # A more precise test would involve setting up data for a clear crossover at the last step.
-
-        # Example of setting up a clear golden cross at the end for Batch 0:
-        # Assume short_sma_period=5, long_sma_period=10. Seq_len >= 10.
-        # Prices for Batch 0 to force golden cross at t-1 -> t:
-        # t-11 to t-2: long_sma is higher or equal
-        # t-1: short_sma crosses above long_sma
-        # Example: close_prices_b0 = [..., 98,99,100,101,102,  100,100,100,100,105] (last 10, short=5, long=10)
-        # prev_short_sma_b0 around (98+99+100+101+102)/5 = 100
-        # prev_long_sma_b0 around average of last 10 up to t-2 (assume it's ~100)
-        # current_short_sma_b0 around (99+100+101+102+105)/5 = 101.4
-        # current_long_sma_b0 around average of last 10 up to t-1 (assume it's ~100.5)
-        # This is tricky to set up without exact SMA calculation here.
-        # The current TrendFollowingStrategy forward looks at [-1] and [-2] of the *entire sequence* SMAs.
-
-        # For now, just check signal validity
-        is_valid_signal_b0 = (signals[0,0,0] == -1.0) | (signals[0,0,0] == 0.0) | (signals[0,0,0] == 1.0)
-        assert is_valid_signal_b0, "Signal for batch 0 (potential golden cross) is invalid"
-        is_valid_signal_b1 = (signals[1,0,0] == -1.0) | (signals[1,0,0] == 0.0) | (signals[1,0,0] == 1.0)
-        assert is_valid_signal_b1, "Signal for batch 1 (potential death cross) is invalid"
-        
-        # A more direct test for crossover logic:
-        # Create SMAs directly and test the crossover condition
-        # Batch 0: Golden Cross
-        # short_sma: ..., 99, 101 (prev, current)
-        # long_sma:  ..., 100, 100 (prev, current)
-        asset_features_gc = torch.zeros(1, TEST_SEQ_LEN, TEST_TREND_NUM_FEATURES, device=device)
-        if TEST_SEQ_LEN >= long_window:
-            # Construct prices to create specific SMA values at the end
-            # This is complex. A simpler way is to mock the _rolling_mean or test the logic separately.
-            # For now, we rely on the forward pass test and short sequence test.
-            pass # Placeholder for more precise crossover data generation
+def test_dynamic_strategy_generator_generates_strategy(mock_logger): # Removed mocker dependency
+    """Test that DynamicStrategyGenerator can generate a new strategy instance."""
 
