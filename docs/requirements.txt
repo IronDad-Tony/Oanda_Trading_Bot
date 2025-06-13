@@ -41,3 +41,7 @@ einops # 張量操作，簡化reshape等
 # pandas-ta # 快速計算技術指標的庫 (可選，或者自己實現)
 protobuf==3.19.6
 typing-extensions==4.5.0
+
+# 測試相關
+pytest
+pytest-mock

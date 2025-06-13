@@ -1,9 +1,11 @@
 # src/agent/strategies/base_strategy.py
+import joblib # ADDED
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Dict, Optional, Any, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict # MODIFIED: Import asdict
 import logging # Import logging
+import torch # ADDED: Import torch
 
 # Attempt to import the project-specific logger
 try:
@@ -26,85 +28,138 @@ class StrategyConfig:
     default_params: Dict[str, Any] = field(default_factory=dict)
     # List of assets this strategy is applicable to, if empty, applies to all provided.
     applicable_assets: List[str] = field(default_factory=list)
+    # ADDED: To hold strategy-specific parameter overrides at the layer configuration level
+    strategy_specific_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    input_dim: Optional[int] = None # ADDED: Input dimension for the strategy
 
+    @staticmethod
+    def merge_configs(base: 'StrategyConfig', override: 'StrategyConfig') -> 'StrategyConfig':
+        """Merges two StrategyConfig objects. Values from override_config take precedence."""
+        
+        merged_input_dim = override.input_dim if override.input_dim is not None else base.input_dim
 
-class BaseStrategy(ABC):
+        # Merge default_params
+        merged_default_params = base.default_params.copy()
+        merged_default_params.update(override.default_params)
+
+        # Merge applicable_assets (override list replaces base list if override is non-empty)
+        merged_applicable_assets = override.applicable_assets if override.applicable_assets else base.applicable_assets
+
+        # Merge strategy_specific_params (deep merge for inner dicts)
+        merged_strategy_specific_params = base.strategy_specific_params.copy()
+        for key, value_override in override.strategy_specific_params.items():
+            if key in merged_strategy_specific_params and \
+               isinstance(merged_strategy_specific_params[key], dict) and \
+               isinstance(value_override, dict):
+                inner_merged = merged_strategy_specific_params[key].copy()
+                inner_merged.update(value_override)
+                merged_strategy_specific_params[key] = inner_merged
+            else:
+                merged_strategy_specific_params[key] = value_override
+            
+        return StrategyConfig(
+            name=override.name, # Name from override config is preferred
+            description=override.description, # Always take override's, even if ""
+            risk_level=override.risk_level,
+            market_regime=override.market_regime,
+            complexity=override.complexity,
+            base_performance=override.base_performance,
+            default_params=merged_default_params,
+            applicable_assets=merged_applicable_assets,
+            strategy_specific_params=merged_strategy_specific_params,
+            input_dim=merged_input_dim
+        )
+
+class BaseStrategy(ABC, torch.nn.Module): # MODIFIED: Inherit from torch.nn.Module
     param_definitions: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
+        super().__init__() # MODIFIED: Call super().__init__() for torch.nn.Module
         self.config = config
         
-        # Initialize logger first so it can be used during parameter processing
-        if not hasattr(self, 'logger') or self.logger is None:
-            self.logger = logger if logger else logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
+        if logger is None:
+            # Fallback to a generic logger if none is provided
+            self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
+            if not self.logger.hasHandlers(): # Avoid adding multiple handlers if already configured
+                logging.basicConfig(level=logging.INFO) # Or your preferred default config
+                self.logger.info(f"No logger provided to {self.config.name}, using default basicConfig logger.")
+        else:
+            self.logger = logger
 
-        final_params: Dict[str, Any] = {}
-        default_params_from_config = self.config.default_params
+        # Initialize effective_params: Start with config's default_params
+        # Ensure default_params from config is a dictionary
+        effective_params_temp = {} 
+        if hasattr(self.config, 'default_params') and isinstance(self.config.default_params, dict):
+            effective_params_temp.update(self.config.default_params)
+        else:
+            self.logger.debug(f"Strategy {self.config.name}: config.default_params is not a dict or missing. Starting with empty default_params.")
 
-        # 1. Start with all defaults from config
-        for key, default_value in default_params_from_config.items():
-            final_params[key] = default_value
-
-        # 2. Override with instance params (params passed during instantiation), performing type coercion
-        if params:
+        # Override/add with instance-specific params, performing type coercion if possible
+        if params is not None and isinstance(params, dict):
             for key, value in params.items():
-                if key in default_params_from_config:
-                    default_value = default_params_from_config[key]
-                    
-                    if default_value is None: # If default is None, accept any type for override
-                         final_params[key] = value
-                         self.logger.debug(f"Strategy {self.config.name}: Parameter '{key}' uses provided value '{value}' (type {type(value).__name__}) as default was None.")
-                         continue 
-
-                    default_type = type(default_value)
-                    if not isinstance(value, default_type):
+                if key in effective_params_temp:
+                    default_value_from_config = effective_params_temp[key]
+                    if type(default_value_from_config) != type(value) and value is not None:
                         try:
-                            converted_value = None
-                            if default_type == bool and isinstance(value, str):
-                                if value.lower() in ['true', '1', 'yes']:
-                                    converted_value = True
-                                elif value.lower() in ['false', '0', 'no']:
-                                    converted_value = False
-                                else:
-                                    # If string is not a recognized boolean, fall back to standard bool conversion or raise error
-                                    # For now, let's try standard bool conversion which might be True for non-empty unrecognized strings
-                                    # Or, better, raise a warning and use default or keep original if that's desired.
-                                    # Let's log a warning and use the original value if it's an unrecognized string for bool.
-                                    self.logger.warning(f"Strategy {self.config.name}: Parameter '{key}' value '{value}' (string) is not a recognized boolean string. Using original value.")
-                                    converted_value = value # Or perhaps default_value, or raise error
-                            elif default_type == bool and isinstance(value, (int, float)):
-                                converted_value = bool(value) # Standard conversion for numbers to bool (0 is False, others True)
-                            else:
-                                converted_value = default_type(value) # Standard conversion for other types
-                            
-                            final_params[key] = converted_value
-                            self.logger.debug(f"Strategy {self.config.name}: Parameter '{key}' ('{value}') converted from {type(value).__name__} to {default_type.__name__} ('{converted_value}').")
+                            # Attempt to coerce to the type of the default value
+                            coerced_value = type(default_value_from_config)(value)
+                            effective_params_temp[key] = coerced_value
+                            self.logger.debug(f"Coerced param '{key}' from type {type(value)} to {type(default_value_from_config)}.")
                         except (ValueError, TypeError) as e:
-                            self.logger.warning(f"Strategy {self.config.name}: Could not convert parameter '{key}' value '{value}' (type {type(value).__name__}) to expected type {default_type.__name__}. Using original value. Error: {e}")
-                            final_params[key] = value # Keep original value if conversion fails
+                            self.logger.warning(f"Could not coerce param '{key}' (value: {value}) to type {type(default_value_from_config)}. Using original value. Error: {e}")
+                            effective_params_temp[key] = value # Use original value if coercion fails
                     else:
-                        final_params[key] = value # Types match, use provided value
+                        effective_params_temp[key] = value # Update with new value (same type or None)
                 else:
-                    # Parameter not in defaults, it's an extra parameter
-                    self.logger.warning(f"Strategy {self.config.name}: Received unexpected parameter '{key}' with value '{value}'. It will be included.")
-                    final_params[key] = value
-        
-        self.params = final_params
-        # self.strategy_id = config.name # strategy_id is now self.config.name
+                    effective_params_temp[key] = value # Add new param
+
+        self.params = effective_params_temp # Store the final effective parameters
+
+        # Load feature_config if feature_config_path is provided
+        self.feature_config = None
+        feature_config_path = self.params.get('feature_config_path')
+        if feature_config_path:
+            try:
+                self.feature_config = joblib.load(feature_config_path)
+                self.logger.info(f"Successfully loaded feature configuration from {feature_config_path}")
+            except Exception as e:
+                self.logger.error(f"Failed to load feature configuration from {feature_config_path}: {e}")
+        # MODIFIED: Ensure self.device is initialized, defaulting to 'cpu' if not specified
+        # This should ideally be handled by subclasses or through params,
+        # but providing a default here for broader compatibility.
+        # However, specific ML strategies should manage their device more explicitly.
+        # For BaseStrategy, it might not always need a device, so this is a placeholder.
+        # Consider if all strategies truly need a 'device' attribute at this base level.
+        # If a strategy uses PyTorch, it should handle its own device management.
+        # self.device = torch.device(self.params.get('device', 'cpu')) # Example, might be too specific for BaseStrategy
 
     @abstractmethod
-    def forward(self, market_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> Dict[str, pd.DataFrame]:
+    def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor: # MODIFIED SIGNATURE
         """
-        Processes raw market data to generate features or processed data.
-        Input: Dict of DataFrames, one per asset. Each DF should have 'open', 'high', 'low', 'close', 'volume'.
-               Index should be DatetimeIndex.
-        Output: Dict of DataFrames (can be a subset of input keys if strategy is asset-specific),
-                with added columns for indicators/features. Index should be preserved.
+        Processes features for a single asset to generate strategy-specific signals or processed features.
+        
+        Input: 
+            asset_features: torch.Tensor 
+                Features for a specific asset. 
+                Shape: (batch_size, num_features) 
+                         or (batch_size, sequence_length, num_features) if handling sequences.
+            current_positions: Optional[torch.Tensor] 
+                Current positions for the asset. 
+                Shape: (batch_size, 1) or similar.
+            timestamp: Optional[pd.Timestamp] 
+                The current timestamp for this forward pass (can be a single timestamp representative of the batch,
+                or if strategies need per-item timestamps, this design might need List[pd.Timestamp] 
+                and strategies to handle it).
+
+        Output: 
+            torch.Tensor 
+                Output signals or processed features for the strategy for the given asset.
+                Expected Shape: (batch_size, 1, 1) or (batch_size, 1) for a single signal value per batch item.
         """
         pass
 
-    @abstractmethod
-    def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    # @abstractmethod # MODIFIED: Removed abstractmethod decorator
+    def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame: # Kept as is for now
         """
         Generates trading signals based on processed data from self.forward().
         Input: Dict of DataFrames as returned by self.forward().
@@ -114,15 +169,29 @@ class BaseStrategy(ABC):
                 The last row of this DataFrame is typically used by the superposition layer.
                 Ensure the index aligns with the input data's timestamps.
         """
-        pass
+        # MODIFIED: Added default implementation
+        self.logger.warning(
+            f"Strategy {self.config.name} ({self.get_class_name()}) called generate_signals. "
+            f"This method is intended for older strategy patterns or specific use cases. "
+            f"Ensure this is the intended behavior for strategies refactored to use torch.nn.Module and forward()."
+        )
+        # Return an empty DataFrame with expected columns if this method is called unexpectedly.
+        # Adjust columns as necessary based on typical downstream expectations.
+        return pd.DataFrame(columns=['signal'])
 
     @property
     def effective_params(self) -> Dict[str, Any]:
         """Alias for params to maintain backward compatibility."""
         return self.params
 
-    def get_strategy_name(self) -> str:
-        return self.config.name
+    @classmethod
+    def get_strategy_name(cls) -> str:
+        # This method is intended to return a general name for the strategy class,
+        # not tied to a specific instance's config.
+        # It's often the class name itself or a predefined static name.
+        # If a dynamic name based on a default config is needed, that logic would be here.
+        # For now, let's return the class name as a sensible default for a class method.
+        return cls.__name__
 
     def get_params(self) -> Dict[str, Any]:
         return self.params
@@ -142,38 +211,24 @@ class BaseStrategy(ABC):
         return cls.param_definitions
 
     @classmethod
-    def get_parameter_space(cls, optimizer_type: str) -> Optional[Dict[str, Any]]:
+    def get_parameter_space(cls) -> Dict[str, Any]:
         """
-        Returns the parameter space for the given optimizer type.
-        For "genetic", it expects a dictionary where keys are parameter names and
-        values are tuples (min, max) for continuous/integer params, or lists for categorical params.
+        Returns the parameter space definition for the strategy.
+        This should be a dictionary where keys are parameter names and values are
+        descriptions or specifications (e.g., ranges, types, choices).
+        This is used by optimization and dynamic generation processes.
         """
-        if optimizer_type == "genetic":
-            space = {}
-            definitions = cls.param_definitions() # Changed from cls.get_param_definitions()
-            if not definitions:
-                # self.logger.debug(f"No param_definitions found for strategy {cls.__name__} to build genetic parameter space.") # Cannot use self.logger in classmethod directly without instance
-                # Consider logging this at the point of call if needed, or use a class-level logger if available.
-                pass # No definitions, so no space
-
-            for name, definition in definitions.items():
-                param_type = definition.get('type')
-                # For numerical types with min and max
-                if 'min' in definition and 'max' in definition and \
-                   (param_type is None or param_type in (int, float)): # Check type if available or assume numeric if min/max present
-                    # Ensure min is less than max to avoid issues with optimizer
-                    if definition['min'] < definition['max']:
-                        space[name] = (definition['min'], definition['max'])
-                    # else: log warning or skip if min >= max? For now, skip.
-                # For categorical types with choices
-                elif 'choices' in definition and isinstance(definition['choices'], list) and definition['choices']:
-                    space[name] = definition['choices']
-                elif param_type == bool: # ADDED: Handle boolean type explicitly
-                    space[name] = [True, False] # Define search space as actual boolean values
-            
-            # Return the constructed space. If empty, it means no optimizable parameters were found or defined correctly.
-            return space if space else None # Let's make it return None if empty, as per original thought.
-        return None
+        # Corrected: Access param_definitions as a class attribute
+        definitions = cls.param_definitions 
+        
+        # Ensure the definitions are suitable for direct use or further processing
+        # For example, if using a library like Optuna, this might return
+        # a dictionary of parameter types or distributions.
+        # For now, we assume it's a dictionary ready for use.
+        if not isinstance(definitions, dict):
+            logger.error(f"param_definitions for {cls.__name__} is not a dictionary. Found: {type(definitions)}")
+            return {}
+        return definitions
 
     def _get_primary_symbol(self, data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """

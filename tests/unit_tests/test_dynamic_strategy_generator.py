@@ -11,17 +11,24 @@ try:
     from src.agent.strategies.base_strategy import BaseStrategy, StrategyConfig
     from src.agent.optimizers.genetic_optimizer import GeneticOptimizer
     from src.agent.optimizers.neural_architecture_search import NeuralArchitectureSearch
+    from src.common.config import DEVICE 
 except ImportError as e:
     print(f"Import error during test setup: {e}. Attempting relative imports for testing.")
     import sys
     import os
-    # Corrected path to be relative to this test file's location
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
-    # The following imports will now try to resolve from the corrected sys.path
-    from agent.enhanced_quantum_strategy_layer import DynamicStrategyGenerator
-    from agent.strategies.base_strategy import BaseStrategy, StrategyConfig
-    from agent.optimizers.genetic_optimizer import GeneticOptimizer
-    from agent.optimizers.neural_architecture_search import NeuralArchitectureSearch
+    # Robust path handling: Add project root to sys.path
+    # Assumes tests are in a subdirectory of the project root (e.g., project_root/tests/...)
+    # And source code is in project_root/src
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root) # Add project root
+    
+    # Now try importing with src prefix, as if running from project root
+    from src.agent.enhanced_quantum_strategy_layer import DynamicStrategyGenerator
+    from src.agent.strategies.base_strategy import BaseStrategy, StrategyConfig
+    from src.agent.optimizers.genetic_optimizer import GeneticOptimizer
+    from src.agent.optimizers.neural_architecture_search import NeuralArchitectureSearch
+    from src.common.config import DEVICE
 
 # Mock logger for tests
 mock_dsg_logger = logging.getLogger('MockDSGLogger')
@@ -130,7 +137,7 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
             self.assertIsNone(strategy_instance)
             mock_log_error.assert_called_with(f"Invalid strategy_class provided: {str}. It must be a subclass of BaseStrategy.")
 
-    @patch('src.agent.enhanced_quantum_strategy_layer.GeneticOptimizer')
+    @patch('src.agent.optimizers.genetic_optimizer.GeneticOptimizer')
     def test_generate_strategy_with_genetic_optimizer(self, MockGeneticOptimizer):
         """Test strategy generation using the GeneticOptimizer."""
         mock_ga_instance = MockGeneticOptimizer.return_value
@@ -169,7 +176,7 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
         # self.assertIsNotNone(self.dsg.genetic_optimizer) # REMOVED - Optimizer instance is cleared after use
         # The current implementation in enhanced_quantum_strategy_layer.py clears it.
 
-    @patch('src.agent.enhanced_quantum_strategy_layer.GeneticOptimizer')
+    @patch('src.agent.optimizers.genetic_optimizer.GeneticOptimizer')
     def test_generate_strategy_genetic_optimizer_fails_to_optimize(self, MockGeneticOptimizer):
         """Test GA fails to find better params, uses defaults."""
         mock_ga_instance = MockGeneticOptimizer.return_value
@@ -188,7 +195,7 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
         self.assertEqual(strategy_instance.params['param1'], 1) # Default
         self.assertEqual(strategy_instance.params['param2'], 'test_default') # Default
 
-    @patch('src.agent.enhanced_quantum_strategy_layer.GeneticOptimizer')
+    @patch('src.agent.optimizers.genetic_optimizer.GeneticOptimizer')
     def test_generate_strategy_genetic_optimizer_exception(self, MockGeneticOptimizer):
         """Test GA raises an exception during optimization."""
         mock_ga_instance = MockGeneticOptimizer.return_value
@@ -209,7 +216,7 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
             mock_log_error.assert_any_call(f"Error during genetic optimization for MockStrategy: GA Error", exc_info=True)
 
 
-    @patch('src.agent.enhanced_quantum_strategy_layer.NeuralArchitectureSearch')
+    @patch('src.agent.optimizers.neural_architecture_search.NeuralArchitectureSearch')
     def test_generate_strategy_with_nas_optimizer(self, MockNASOptimizer):
         """Test strategy generation using the NeuralArchitectureSearch optimizer."""
         mock_nas_instance = MockNASOptimizer.return_value
@@ -226,8 +233,6 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
 
         # MockStrategy needs to be an nn.Module for NAS in the current DSG implementation
         # For this test, we'll assume MockStrategy is compatible or the check is relaxed/mocked.
-        # If MockStrategy is not an nn.Module, this test would fail the `issubclass` check.
-        # Let's make a temporary nn.Module version for this test or mock the check.
         
         class MockNASCompatibleStrategy(MockStrategy, torch.nn.Module): # type: ignore
             def __init__(self, config: Optional[StrategyConfig] = None, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
@@ -273,7 +278,7 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
         # self.assertIsNotNone(self.dsg.nas_optimizer) # REMOVED - Optimizer instance is cleared after use
         # self.dsg.nas_optimizer should be None after the call if it's cleared.
 
-    @patch('src.agent.enhanced_quantum_strategy_layer.NeuralArchitectureSearch')
+    @patch('src.agent.optimizers.neural_architecture_search.NeuralArchitectureSearch')
     def test_generate_strategy_nas_optimizer_fails(self, MockNASOptimizer):
         """Test NAS fails to find better params, uses defaults."""
         mock_nas_instance = MockNASOptimizer.return_value
@@ -301,7 +306,7 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
         self.assertEqual(strategy_instance.params['param1'], 1) # Default
         self.assertEqual(strategy_instance.params['param2'], 'test_default') # Default
 
-    @patch('src.agent.enhanced_quantum_strategy_layer.NeuralArchitectureSearch')
+    @patch('src.agent.optimizers.neural_architecture_search.NeuralArchitectureSearch')
     def test_generate_strategy_nas_optimizer_exception(self, MockNASOptimizer):
         """Test NAS raises an exception."""
         mock_nas_instance = MockNASOptimizer.return_value
@@ -344,17 +349,18 @@ class TestDynamicStrategyGenerator(unittest.TestCase):
         
         captured_fitness_callback = None
 
-        def mock_genetic_optimizer_init(*args, **kwargs):
+        # Corrected patch target for capturing the callback
+        def mock_genetic_optimizer_init_for_capture(*args, **kwargs):
             nonlocal captured_fitness_callback
             captured_fitness_callback = kwargs.get('fitness_function_callback')
             mock_instance = MagicMock()
             mock_instance.run_optimizer.return_value = (None, -float('inf')) # Default return
             return mock_instance
 
-        with patch('src.agent.enhanced_quantum_strategy_layer.GeneticOptimizer', side_effect=mock_genetic_optimizer_init) as MockGO:
+        with patch('src.agent.optimizers.genetic_optimizer.GeneticOptimizer', side_effect=mock_genetic_optimizer_init_for_capture) as MockGO_captured:
             self.dsg.generate_new_strategy(
                 strategy_class=MockStrategy,
-                fitness_function=self.mock_fitness_function, # This is the one we want to see called
+                fitness_function=self.mock_fitness_function, 
                 market_data_for_ga=self.mock_market_data,
                 current_context=self.mock_portfolio_context
             )
