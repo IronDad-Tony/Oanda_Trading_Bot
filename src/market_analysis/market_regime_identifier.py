@@ -156,20 +156,79 @@ class MarketRegimeIdentifier:
         else:
             return TrendStrength.STRONG_TREND
 
-    def get_macro_regime(self, s5_data: pd.DataFrame) -> MacroRegime:
+    def get_macro_regime(self, s5_data: pd.DataFrame, external_sentiment_score: Optional[float] = None) -> MacroRegime:
         """
-        Identifies the macro market regime (e.g., Bullish, Bearish, Ranging).
-        Placeholder: Currently returns RANGING.
-        This would involve HMM/GMM or other macro trend analysis.
+        Identifies the current macro market regime (Bullish, Bearish, Ranging).
+        This is a simplified example. A more robust implementation might use:
+        - Moving average crossovers (e.g., 50-day vs 200-day SMA on daily data)
+        - ADX trend direction combined with trend strength
+        - HMM/GMM for regime classification based on multiple features
+        - External sentiment analysis
+
+        Args:
+            s5_data (pd.DataFrame): S5 OHLCV data with DatetimeIndex.
+            external_sentiment_score (Optional[float]): An optional external sentiment score (e.g., -1 to 1).
+
+        Returns:
+            MacroRegime: The identified macro market regime.
         """
-        # resample_freq = self.config.get("hmm_resample_freq", "1D") # Example
-        # resampled_data = self._resample_ohlcv(s5_data, resample_freq)
-        # if self.hmm_model and len(resampled_data) > some_min_length:
-        #     # Preprocess data for HMM
-        #     # state = self.hmm_model.predict(processed_data)
-        #     # return self._map_hmm_state_to_macro_regime(state[-1])
+        # For this example, let's use a simple approach based on ADX and price action
+        # on a daily resampled series.
+        resample_freq = self.config.get("macro_resample_freq", "1D") # Default to daily if not specified
+        adx_period = self.config["adx_period"]
+        
+        daily_data = self._resample_ohlcv(s5_data, resample_freq)
+
+        if len(daily_data) < adx_period: # Need enough data for ADX
+            # print(f"Not enough data for Macro Regime ADX after resampling to {resample_freq}. Have {len(daily_data)}, need {adx_period}")
+            return MacroRegime.UNDEFINED
+
+        # Calculate ADX using pandas-ta
+        adx_df = daily_data.ta.adx(length=adx_period)
+        if adx_df is None or adx_df.empty:
+            # print(f"ADX calculation failed for Macro Regime on {resample_freq} data.")
+            return MacroRegime.UNDEFINED
+
+        # Ensure all required ADX columns are present
+        required_adx_cols = [f'ADX_{adx_period}', f'DMP_{adx_period}', f'DMN_{adx_period}']
+        if not all(col in adx_df.columns for col in required_adx_cols):
+            # print(f"ADX calculation did not return all required columns: {required_adx_cols}. Got: {adx_df.columns}")
+            return MacroRegime.UNDEFINED
+            
+        current_adx = adx_df[f'ADX_{adx_period}'].iloc[-1]
+        current_dmp = adx_df[f'DMP_{adx_period}'].iloc[-1] # Positive Directional Movement
+        current_dmn = adx_df[f'DMN_{adx_period}'].iloc[-1] # Negative Directional Movement
+
+        # Trend strength thresholds (can be different from general trend strength)
+        strong_trend_threshold = self.config["adx_thresholds"].get("weak_to_strong", 25) 
+        # weak_trend_threshold = self.config[\"adx_thresholds\"].get(\"no_to_weak\", 20)
+
+        # Basic regime identification
+        if current_adx > strong_trend_threshold:
+            if current_dmp > current_dmn:
+                return MacroRegime.BULLISH
+            elif current_dmn > current_dmp:
+                return MacroRegime.BEARISH
+            else:
+                # This case should be rare if ADX is high, but implies ranging if DMs are equal
+                return MacroRegime.RANGING 
+        else: # ADX indicates weak or no trend
+            return MacroRegime.RANGING
+
+        # Placeholder for more sophisticated logic, e.g., using HMM or sentiment
+        # if self.hmm_model:
+        #     # Prepare features for HMM
+        #     # regime = self.hmm_model.predict(...)
         #     pass
-        return MacroRegime.RANGING # Default placeholder
+
+        # Incorporate external sentiment if available
+        # if external_sentiment_score is not None:
+        #     # Adjust regime based on sentiment (e.g., if ranging but strong positive sentiment, lean bullish)
+        #     pass
+        
+        # Fallback, should be covered by ADX logic
+        return MacroRegime.UNDEFINED
+
 
     def get_current_regime(self, s5_data: pd.DataFrame) -> Dict[str, Enum]:
         """

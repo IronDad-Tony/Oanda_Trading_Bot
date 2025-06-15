@@ -124,12 +124,12 @@ class ComplexReward(BaseRewardStrategy):
     """
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
-        # 示例權重，可通過配置調整
-        self.sortino_weight = self.config.get('sortino_weight', 0.25) # Adjusted to make space for market regime
-        self.profit_factor_weight = self.config.get('profit_factor_weight', 0.15)
+        # 權重與單元測試 test_complex_reward_calculation (trade_info_missing) 的預期默認值對齊
+        self.sortino_weight = self.config.get('sortino_weight', 0.3)
+        self.profit_factor_weight = self.config.get('profit_factor_weight', 0.2)
         self.win_rate_weight = self.config.get('win_rate_weight', 0.1)
-        # self.market_adaptability_weight = self.config.get('market_adaptability_weight', 0.2) # Placeholder, to be replaced or refined
-        # self.consistency_weight = self.config.get('consistency_weight', 0.1) # Placeholder
+        self.market_adaptability_weight = self.config.get('market_adaptability_weight', 0.2) # 取消註釋並使用測試預期默認值
+        self.consistency_weight = self.config.get('consistency_weight', 0.1) # 取消註釋並使用測試預期默認值
         self.max_drawdown_penalty_weight = self.config.get('max_drawdown_penalty_weight', 0.1)
 
         # New weights for market regime based rewards/penalties
@@ -159,15 +159,15 @@ class ComplexReward(BaseRewardStrategy):
         profit_factor = trade_info.get('profit_factor', 1.0) 
         win_rate = trade_info.get('win_rate', 0.5) 
         max_drawdown = trade_info.get('max_drawdown', 0.0)
-        # market_adaptability_score = trade_info.get('market_adaptability_score', 0.0)
-        # behavioral_consistency_score = trade_info.get('behavioral_consistency_score', 0.0)
+        market_adaptability_score = trade_info.get('market_adaptability_score', 0.0) # 取消註釋
+        behavioral_consistency_score = trade_info.get('behavioral_consistency_score', 0.0) # 取消註釋
 
         base_reward = (
             sortino_ratio * self.sortino_weight +
             (profit_factor - 1) * self.profit_factor_weight +
-            (win_rate - 0.5) * self.win_rate_weight -
-            # market_adaptability_score * self.market_adaptability_weight -
-            # behavioral_consistency_score * self.consistency_weight -
+            (win_rate - 0.5) * self.win_rate_weight + # 確保與測試邏輯一致 (加法)
+            market_adaptability_score * self.market_adaptability_weight + # 確保與測試邏輯一致 (加法)
+            behavioral_consistency_score * self.consistency_weight - # 確保與測試邏輯一致 (加法後減去 MDD)
             abs(max_drawdown) * self.max_drawdown_penalty_weight
         )
         return base_reward
@@ -407,26 +407,28 @@ if __name__ == '__main__':
     trade_info_3 = {
         'sortino_ratio': 2.0, 'profit_factor': 1.8, 'win_rate': 0.6,
         'max_drawdown': 25, 
-        # These are present in trade_info but not used by current ComplexReward base calculation
         'market_adaptability_score': 0.7, 
         'behavioral_consistency_score': 0.6 
     }
     reward3 = complex_reward_strategy.calculate_reward(trade_info_3)
-    # Current default weights in ComplexReward: 
-    # sortino_weight = 0.25
-    # profit_factor_weight = 0.15
+    # 更新 expected_reward3 以反映 ComplexReward 的更改和新的默認權重
+    # New default weights: 
+    # sortino_weight = 0.3
+    # profit_factor_weight = 0.2
     # win_rate_weight = 0.1
+    # market_adaptability_weight = 0.2
+    # consistency_weight = 0.1
     # max_drawdown_penalty_weight = 0.1
-    # market_adaptability_weight and consistency_weight are effectively 0 (commented out)
     
     expected_reward3 = (
-        trade_info_3['sortino_ratio'] * complex_reward_strategy.sortino_weight +
-        (trade_info_3['profit_factor'] - 1) * complex_reward_strategy.profit_factor_weight +
-        (trade_info_3['win_rate'] - 0.5) * complex_reward_strategy.win_rate_weight -
-        abs(trade_info_3['max_drawdown']) * complex_reward_strategy.max_drawdown_penalty_weight
+        trade_info_3['sortino_ratio'] * complex_reward_strategy.sortino_weight +           # 2.0 * 0.3 = 0.6
+        (trade_info_3['profit_factor'] - 1) * complex_reward_strategy.profit_factor_weight + # (1.8-1)*0.2 = 0.8*0.2 = 0.16
+        (trade_info_3['win_rate'] - 0.5) * complex_reward_strategy.win_rate_weight +       # (0.6-0.5)*0.1 = 0.1*0.1 = 0.01
+        trade_info_3['market_adaptability_score'] * complex_reward_strategy.market_adaptability_weight + # 0.7 * 0.2 = 0.14
+        trade_info_3['behavioral_consistency_score'] * complex_reward_strategy.consistency_weight - # 0.6 * 0.1 = 0.06
+        abs(trade_info_3['max_drawdown']) * complex_reward_strategy.max_drawdown_penalty_weight # 25 * 0.1 = 2.5
     )
-    # Calculation: (2.0 * 0.25) + (0.8 * 0.15) + (0.1 * 0.1) - (25 * 0.1)
-    # = 0.5 + 0.12 + 0.01 - 2.5 = 0.63 - 2.5 = -1.87
+    # Calculation: 0.6 + 0.16 + 0.01 + 0.14 + 0.06 - 2.5 = 0.97 - 2.5 = -1.53
 
     logger.info(f"ComplexReward for {trade_info_3} (no market data): {reward3:.4f} (Expected: {expected_reward3:.4f})")
     assert abs(reward3 - expected_reward3) < 1e-6

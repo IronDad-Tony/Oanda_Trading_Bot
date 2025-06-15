@@ -12,7 +12,7 @@ TEST_FEATURES = 9
 # Attempt to import necessary modules
 try:
     from src.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
-    from src.models.enhanced_transformer import EnhancedUniversalTradingTransformer
+    from src.models.enhanced_transformer import EnhancedTransformer as EnhancedUniversalTradingTransformer
     from src.agent.meta_learning_system import AdaptiveStrategyEncoder, MetaLearningSystem # Assuming MetaLearningSystem might be tested later
     from src.common.config import (
         MAX_SYMBOLS_ALLOWED, TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, TRANSFORMER_MODEL_DIM,

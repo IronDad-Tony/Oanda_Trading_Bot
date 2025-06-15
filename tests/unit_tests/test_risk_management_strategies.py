@@ -1,4 +1,389 @@
-# filepath: c:\Users\tonyh\Oanda_Trading_Bot\tests\unit_tests\test_risk_management_strategies.py
+import sys
+import types
+import copy
+from abc import ABCMeta
+import numpy as np
+from unittest.mock import MagicMock
+from typing import Dict, List, Any, Optional, Type, Tuple, Callable # Added for mock's type hints
+
+# --- BEGIN COMPREHENSIVE TORCH MOCKING (Corrected Version) ---
+# This block must run BEFORE any 'src' module that imports 'torch' is loaded.
+
+# --- Main Mock Torch Module (Moved Up)---
+mock_torch = types.ModuleType('torch')
+
+class MockDevice: # Define MockDevice before it's used by _MOCK_TORCH_DEFAULT_CPU_DEVICE
+    def __init__(self, device_type):
+        self.type = device_type
+    def __str__(self): return self.type
+    def __repr__(self): return f"device(type='{self.type}')"
+
+_MOCK_TORCH_DEFAULT_CPU_DEVICE = MockDevice('cpu') # Defined early
+
+class MockTensor:
+    def __init__(self, data, dtype=None, device=None):
+        self.data = data
+        self._is_mps = False
+        self.dtype = dtype
+        self._device = device if device else _MOCK_TORCH_DEFAULT_CPU_DEVICE
+        self.requires_grad = False
+
+    def to(self, device_or_dtype_or_tensor, non_blocking=False):
+        target_device_obj = None
+        target_dtype_obj = None
+
+        if isinstance(device_or_dtype_or_tensor, MockDevice):
+            target_device_obj = device_or_dtype_or_tensor
+        elif isinstance(device_or_dtype_or_tensor, str):
+            device_type_str = device_or_dtype_or_tensor.split(':', 1)[0]
+            if device_type_str in ['cpu', 'cuda', 'mps']:
+                target_device_obj = MockDevice(device_type_str)
+        elif isinstance(device_or_dtype_or_tensor, types.SimpleNamespace): # types.SimpleNamespace used for dtypes
+            target_dtype_obj = device_or_dtype_or_tensor
+        elif isinstance(device_or_dtype_or_tensor, MockTensor):
+            target_device_obj = device_or_dtype_or_tensor.device
+            target_dtype_obj = device_or_dtype_or_tensor.dtype
+        
+        if target_device_obj:
+            self._device = target_device_obj
+        if target_dtype_obj:
+            self.dtype = target_dtype_obj
+        return self
+
+    def float(self): self.dtype = mock_torch.float32; return self
+    def long(self): self.dtype = mock_torch.int64; return self
+    def bool(self): self.dtype = mock_torch.bool; return self
+    def detach(self): new_tensor = self.clone(); new_tensor.requires_grad = False; return new_tensor
+    def cpu(self): self._device = MockDevice('cpu'); return self
+    def numpy(self): return np.array(self.data) if self.data is not None else np.array([])
+    def clone(self): new_tensor = copy.deepcopy(self); new_tensor._device = self._device; return new_tensor
+    def zero_(self):
+        if isinstance(self.data, (list, np.ndarray)):
+            self.data = np.zeros_like(self.data).tolist()
+        elif isinstance(self.data, (int, float)):
+            self.data = 0
+        return self
+    def __getitem__(self, item):
+        if isinstance(item, MockTensor): return self.data[item.data] if self.data is not None else self
+        return self.data[item] if self.data is not None else self
+    def __setitem__(self, key, value):
+        if self.data is not None: self.data[key] = value
+
+    def __add__(self, other): return MockTensor(self.data + (other.data if isinstance(other, MockTensor) else other), dtype=self.dtype, device=self._device)
+    def __radd__(self, other): return MockTensor((other.data if isinstance(other, MockTensor) else other) + self.data, dtype=self.dtype, device=self._device)
+    def __sub__(self, other): return MockTensor(self.data - (other.data if isinstance(other, MockTensor) else other), dtype=self.dtype, device=self._device)
+    def __mul__(self, other): return MockTensor(self.data * (other.data if isinstance(other, MockTensor) else other), dtype=self.dtype, device=self._device)
+    def __rmul__(self, other): return MockTensor((other.data if isinstance(other, MockTensor) else other) * self.data, dtype=self.dtype, device=self._device)
+    def __truediv__(self, other): return MockTensor(self.data / (other.data if isinstance(other, MockTensor) else other), dtype=self.dtype, device=self._device)
+    def __pow__(self, power): return MockTensor(self.data ** (power.data if isinstance(power, MockTensor) else power), dtype=self.dtype, device=self._device)
+    def __lt__(self, other): return MockTensor(self.data < (other.data if isinstance(other, MockTensor) else other), dtype=mock_torch.bool, device=self._device)
+    def __gt__(self, other): return MockTensor(self.data > (other.data if isinstance(other, MockTensor) else other), dtype=mock_torch.bool, device=self._device)
+    def __eq__(self, other):
+        if isinstance(other, MockTensor): return MockTensor(np.array_equal(self.data, other.data), dtype=mock_torch.bool, device=self._device)
+        return MockTensor(np.array_equal(self.data, other), dtype=mock_torch.bool, device=self._device)
+    def __ne__(self, other):
+        if isinstance(other, MockTensor): return MockTensor(not np.array_equal(self.data, other.data), dtype=mock_torch.bool, device=self._device)
+        return MockTensor(not np.array_equal(self.data, other), dtype=mock_torch.bool, device=self._device)
+
+    def mean(self, dim=None, keepdim=False):
+        res = np.mean(self.data, axis=dim)
+        if keepdim and dim is not None:
+            res = np.expand_dims(res, axis=dim)
+        return MockTensor(res if self.data else 0, dtype=self.dtype, device=self._device)
+
+    def sum(self, dim=None, keepdim=False, dtype=None):
+        res = np.sum(self.data, axis=dim)
+        if keepdim and dim is not None:
+            res = np.expand_dims(res, axis=dim)
+        return MockTensor(res if self.data else 0, dtype=dtype if dtype else self.dtype, device=self._device)
+
+    def sqrt(self): return MockTensor(np.sqrt(self.data), dtype=self.dtype, device=self._device)
+    def exp(self): return MockTensor(np.exp(self.data), dtype=self.dtype, device=self._device)
+    def abs(self): return MockTensor(np.abs(self.data), dtype=self.dtype, device=self._device)
+    def is_cuda(self): return self._device.type == 'cuda'
+    @property
+    def shape(self): return np.array(self.data).shape if self.data is not None else (0,)
+    def size(self, dim=None):
+        s = np.array(self.data).shape if self.data is not None else tuple()
+        if dim is None: return s
+        return s[dim] if dim < len(s) else 1
+    def unsqueeze(self, dim): return self # Simplified
+    def squeeze(self, dim=None): return self # Simplified
+    def view(self, *shape): return self # Simplified
+    def permute(self, *dims): return self # Simplified
+    def transpose(self, dim0, dim1): return self # Simplified
+    def contiguous(self): return self
+    def fill_(self, value):
+        if self.data is not None: self.data = np.full_like(self.data, value).tolist()
+        return self
+    @property
+    def device(self): return self._device
+    def item(self): return self.data[0] if isinstance(self.data, list) and len(self.data)==1 and isinstance(self.data[0], (int, float, bool)) else self.data
+    def argmax(self, dim=None, keepdim=False): return MockTensor(np.argmax(self.data, axis=dim), device=self._device)
+    def max(self, dim=None, keepdim=False):
+        if dim is None: return MockTensor(np.max(self.data), device=self._device)
+        else:
+            max_val = np.max(self.data, axis=dim)
+            argmax_val = np.argmax(self.data, axis=dim)
+            if keepdim:
+                max_val = np.expand_dims(max_val, axis=dim)
+                argmax_val = np.expand_dims(argmax_val, axis=dim)
+            return MockTensor(max_val, device=self._device), MockTensor(argmax_val, device=self._device)
+    def min(self, dim=None, keepdim=False):
+        if dim is None: return MockTensor(np.min(self.data), device=self._device)
+        else:
+            min_val = np.min(self.data, axis=dim)
+            argmin_val = np.argmin(self.data, axis=dim)
+            if keepdim:
+                min_val = np.expand_dims(min_val, axis=dim)
+                argmin_val = np.expand_dims(argmin_val, axis=dim)
+            return MockTensor(min_val, device=self._device), MockTensor(argmin_val, device=self._device)
+
+    def backward(self, gradient=None, retain_graph=None, create_graph=False): pass # Simplified
+    @property
+    def grad(self):
+        if not hasattr(self, '_grad'): self._grad = None # Initialize if not present
+        return self._grad
+    @grad.setter
+    def grad(self, value): self._grad = value
+    def requires_grad_(self, requires_grad=True): self.requires_grad = requires_grad; return self
+    def numel(self): return np.prod(self.shape)
+
+class MockParameter(MockTensor):
+    def __init__(self, data, requires_grad=True):
+        super().__init__(data, device=_MOCK_TORCH_DEFAULT_CPU_DEVICE) # Ensure default device consistency
+        self.requires_grad = requires_grad
+
+class MockModule(metaclass=ABCMeta): # Use ABCMeta for abstract base class behavior
+    def __init__(self, *args, **kwargs): # Allow *args, **kwargs for broader compatibility
+        self._parameters: Dict[str, MockParameter] = {}
+        self._modules: Dict[str, 'MockModule'] = {} # Corrected: Removed extra single quote
+        self._buffers: Dict[str, MockTensor] = {}
+        self._is_mock_module = True # Flag to identify mock modules
+        self._is_mps = False # Default MPS status
+        self._device = _MOCK_TORCH_DEFAULT_CPU_DEVICE # Default device
+        self.training = True # Default training mode
+
+    def to(self, device_or_dtype_or_tensor, non_blocking=False):
+        target_device = None
+        target_dtype = None
+
+        if isinstance(device_or_dtype_or_tensor, MockDevice):
+            target_device = device_or_dtype_or_tensor
+        elif isinstance(device_or_dtype_or_tensor, str):
+            device_type_str = device_or_dtype_or_tensor.split(':', 1)[0]
+            if device_type_str in ['cpu', 'cuda', 'mps']:
+                 target_device = MockDevice(device_type_str)
+        elif isinstance(device_or_dtype_or_tensor, types.SimpleNamespace): # For dtypes
+            target_dtype = device_or_dtype_or_tensor
+        elif isinstance(device_or_dtype_or_tensor, MockTensor): # If a tensor is passed
+            target_device = device_or_dtype_or_tensor.device
+            target_dtype = device_or_dtype_or_tensor.dtype
+
+        if target_device:
+            self._device = target_device
+            # Recursively move parameters, modules, and buffers
+            for p_name in self._parameters: self._parameters[p_name].to(target_device)
+            for m_name in self._modules: self._modules[m_name].to(target_device)
+            for b_name in self._buffers: self._buffers[b_name].to(target_device)
+        
+        if target_dtype:
+            # Recursively change dtype for parameters and buffers
+            for p_name in self._parameters: self._parameters[p_name].to(target_dtype)
+            # Modules typically don't have a single dtype, their sub-parameters/buffers do
+            for b_name in self._buffers: self._buffers[b_name].to(target_dtype)
+        return self
+
+    def train(self, mode=True): self.training = mode; return self
+    def eval(self): self.training = False; return self
+
+    def parameters(self, recurse: bool = True) -> List[MockParameter]:
+        params_list = list(self._parameters.values())
+        if recurse:
+            for m in self._modules.values():
+                params_list.extend(m.parameters(True)) # Ensure recurse=True for submodules
+        return params_list
+
+    def named_parameters(self, prefix: str = '', recurse: bool = True) -> List[Tuple[str, MockParameter]]:
+        named_params_list = []
+        for name, p in self._parameters.items():
+            named_params_list.append((prefix + name if prefix else name, p))
+        if recurse:
+            for name, m in self._modules.items():
+                sub_prefix = prefix + name + '.' if prefix else name + '.'
+                named_params_list.extend(m.named_parameters(sub_prefix, True))
+        return named_params_list
+        
+    def children(self) -> List['MockModule']: return list(self._modules.values())
+    def __call__(self, *args, **kwargs): return self.forward(*args, **kwargs) # Standard PyTorch behavior
+    def forward(self, *args, **kwargs): raise NotImplementedError # Must be implemented by subclasses
+    def apply(self, fn): # Apply a function to self and all submodules
+        fn(self)
+        for m in self._modules.values(): m.apply(fn)
+        return self
+    def state_dict(self, destination=None, prefix='', keep_vars=False): return {} # Simplified
+    def load_state_dict(self, state_dict, strict=True): pass # Simplified
+    def cuda(self, device=None): self.to(MockDevice('cuda')); return self # Convenience method
+    def cpu(self): self.to(MockDevice('cpu')); return self # Convenience method
+    def add_module(self, name: str, module: Optional['MockModule']):
+        if module is None: self._modules.pop(name, None) # Remove if None
+        else: self._modules[name] = module
+    def register_parameter(self, name: str, param: Optional[MockParameter]):
+        if param is None: self._parameters.pop(name, None) # Remove if None
+        else: self._parameters[name] = param
+    def register_buffer(self, name: str, tensor: Optional[MockTensor], persistent: bool = True): # persistent arg for compatibility
+        if tensor is None: self._buffers.pop(name, None) # Remove if None
+        else: self._buffers[name] = tensor
+
+    # Overriding __setattr__ to automatically register MockParameter and MockModule instances
+    def __setattr__(self, name, value):
+        if isinstance(value, MockParameter): self.register_parameter(name, value)
+        elif isinstance(value, MockModule): self._modules[name] = value
+        elif isinstance(value, MockTensor): # Check if it's a buffer being set
+            # This logic assumes buffers are pre-registered or handled by register_buffer
+            # If a tensor is assigned to an attribute that is a registered buffer, update it.
+            if name in self._buffers: self._buffers[name] = value
+            else: super().__setattr__(name, value) # Regular attribute assignment
+        else: super().__setattr__(name, value)
+
+# --- Mock torch.nn ---
+mock_torch_nn = types.ModuleType('torch.nn')
+mock_torch_nn.Module = MockModule
+mock_torch_nn.Parameter = MockParameter
+# Common nn layers (can be expanded) - returning a MockModule instance for chaining/attributes
+mock_torch_nn.Linear = lambda *args, **kwargs: MockModule()
+mock_torch_nn.Conv1d = lambda *args, **kwargs: MockModule()
+mock_torch_nn.ReLU = lambda *args, **kwargs: MockModule()
+mock_torch_nn.Sigmoid = lambda *args, **kwargs: MockModule()
+mock_torch_nn.Tanh = lambda *args, **kwargs: MockModule()
+mock_torch_nn.Softmax = lambda *args, **kwargs: MockModule() # Takes dim argument
+mock_torch_nn.Dropout = lambda *args, **kwargs: MockModule()
+mock_torch_nn.BatchNorm1d = lambda *args, **kwargs: MockModule()
+mock_torch_nn.LayerNorm = lambda *args, **kwargs: MockModule()
+mock_torch_nn.Embedding = lambda *args, **kwargs: MockModule()
+mock_torch_nn.LSTM = lambda *args, **kwargs: MockModule()
+mock_torch_nn.GRU = lambda *args, **kwargs: MockModule()
+mock_torch_nn.TransformerEncoderLayer = lambda *args, **kwargs: MockModule()
+mock_torch_nn.TransformerEncoder = lambda *args, **kwargs: MockModule()
+mock_torch_nn.Sequential = lambda *args: MockModule() # Accepts modules as args
+mock_torch_nn.ModuleList = lambda modules=None: MockModule() # Accepts list of modules
+mock_torch_nn.Identity = lambda *args, **kwargs: MockModule()
+# Common loss functions
+mock_torch_nn.CrossEntropyLoss = lambda *args, **kwargs: MockModule()
+mock_torch_nn.MSELoss = lambda *args, **kwargs: MockModule()
+
+# --- Mock torch.nn.functional ---
+mock_torch_nn_functional = types.ModuleType('torch.nn.functional')
+mock_torch_nn_functional.relu = lambda x, *args, **kwargs: x # Pass-through
+mock_torch_nn_functional.softmax = lambda x, *args, **kwargs: x # Pass-through, dim arg
+mock_torch_nn_functional.sigmoid = lambda x, *args, **kwargs: x # Pass-through
+mock_torch_nn_functional.tanh = lambda x, *args, **kwargs: x # Pass-through
+mock_torch_nn_functional.dropout = lambda x, *args, **kwargs: x # Pass-through
+mock_torch_nn_functional.layer_norm = lambda x, *args, **kwargs: x # Pass-through
+mock_torch_nn_functional.cross_entropy = lambda *args, **kwargs: MockTensor([0.0]) # Returns a scalar tensor
+mock_torch_nn_functional.mse_loss = lambda *args, **kwargs: MockTensor([0.0]) # Returns a scalar tensor
+mock_torch_nn_functional.gelu = lambda x, *args, **kwargs: x # GELU activation
+mock_torch_nn_functional.adaptive_avg_pool2d = lambda x, *args, **kwargs: x # Adaptive pooling
+mock_torch_nn_functional.gumbel_softmax = MagicMock(name="MockGumbelSoftmax", return_value=MockTensor([0.1, 0.9])) # Mock for gumbel_softmax
+mock_torch_nn.functional = mock_torch_nn_functional
+mock_torch.nn = mock_torch_nn
+
+# --- Mock torch.optim ---
+mock_torch_optim = types.ModuleType('torch.optim')
+class MockOptimizer:
+    def __init__(self, params, lr=0.001, **kwargs): # Common optimizer signature
+        self.param_groups = [{'params': list(params), 'lr': lr, **kwargs}] # Store params
+        self.state = {} # For optimizer state like momentum
+    def zero_grad(self, set_to_none: bool = False): # PyTorch 1.7+ set_to_none
+        for group in self.param_groups:
+            for p in group['params']:
+                if hasattr(p, 'grad') and p.grad is not None:
+                    if set_to_none: p.grad = None
+                    else:
+                        if hasattr(p.grad, 'detach'): p.grad = p.grad.detach() # Detach first
+                        p.grad.zero_() # Then zero
+    def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]: # Closure for some optimizers
+        loss = None
+        if closure is not None: loss = closure()
+        return loss
+mock_torch_optim.Adam = MockOptimizer
+mock_torch_optim.SGD = MockOptimizer
+mock_torch_optim.AdamW = MockOptimizer # Common modern optimizer
+mock_torch.optim = mock_torch_optim
+
+# --- Mock torch.cuda ---
+mock_torch_cuda = types.ModuleType('torch.cuda')
+mock_torch_cuda.is_available = lambda: False # Mock CUDA availability
+mock_torch_cuda.device_count = lambda: 0
+mock_torch_cuda.current_device = lambda: -1 # Or raise error if not available
+mock_torch_cuda.get_device_name = lambda device=None: ""
+mock_torch.cuda = mock_torch_cuda
+
+# --- Mock torch.backends.mps ---
+mock_torch_backends = types.ModuleType('torch.backends')
+mock_torch_backends_mps = types.ModuleType('torch.backends.mps')
+mock_torch_backends_mps.is_available = lambda: False # Mock MPS availability
+mock_torch_backends_mps.is_built = lambda: False # Mock MPS build status
+mock_torch_backends.mps = mock_torch_backends_mps
+mock_torch.backends = mock_torch_backends
+
+# --- Top-level torch attributes and functions ---
+mock_torch.Tensor = MockTensor
+mock_torch.tensor = lambda data, dtype=None, device=None, requires_grad=False: MockTensor(data, dtype=dtype, device=device) # Factory function
+mock_torch.is_tensor = lambda obj: isinstance(obj, MockTensor)
+mock_torch.from_numpy = lambda ndarray: MockTensor(ndarray.tolist()) # Convert numpy to MockTensor
+mock_torch.zeros = lambda *size, **kwargs: MockTensor(np.zeros(size).tolist(), dtype=kwargs.get('dtype'), device=kwargs.get('device'))
+mock_torch.ones = lambda *size, **kwargs: MockTensor(np.ones(size).tolist(), dtype=kwargs.get('dtype'), device=kwargs.get('device'))
+mock_torch.randn = lambda *size, **kwargs: MockTensor(np.random.randn(*size).tolist(), dtype=kwargs.get('dtype'), device=kwargs.get('device'))
+mock_torch.empty = lambda *size, **kwargs: MockTensor(np.empty(size).tolist(), dtype=kwargs.get('dtype'), device=kwargs.get('device'))
+mock_torch.arange = lambda *args, **kwargs: MockTensor(np.arange(*args).tolist(), dtype=kwargs.get('dtype'), device=kwargs.get('device'))
+mock_torch.manual_seed = lambda seed: None # No-op
+mock_torch.set_grad_enabled = lambda mode: None # No-op
+mock_torch.no_grad = lambda: MagicMock() # Context manager, returns a mock
+mock_torch.save = lambda obj, f, *args, **kwargs: None # No-op save
+mock_torch.load = lambda f, *args, **kwargs: {} # Return empty dict or mock object for load
+# Dtypes (represented as SimpleNamespace for attribute access like torch.float32)
+mock_torch.float32 = types.SimpleNamespace()
+mock_torch.float = mock_torch.float32 # Alias
+mock_torch.int64 = types.SimpleNamespace()
+mock_torch.long = mock_torch.int64 # Alias
+mock_torch.bool = types.SimpleNamespace()
+mock_torch.bfloat16 = types.SimpleNamespace() # For completeness
+mock_torch.get_default_dtype = lambda: mock_torch.float32
+mock_torch.set_default_dtype = lambda d: None # No-op
+# Common math functions (can delegate to MockTensor methods or numpy)
+mock_torch.sigmoid = lambda input, *args, **kwargs: input.sigmoid() if isinstance(input, MockTensor) else MockTensor(1 / (1 + np.exp(-input)))
+mock_torch.tanh = lambda input, *args, **kwargs: input.tanh() if isinstance(input, MockTensor) else MockTensor(np.tanh(input))
+mock_torch.exp = lambda input, *args, **kwargs: input.exp() if isinstance(input, MockTensor) else MockTensor(np.exp(input))
+mock_torch.sqrt = lambda input, *args, **kwargs: input.sqrt() if isinstance(input, MockTensor) else MockTensor(np.sqrt(input))
+
+# --- torch.device constructor ---
+# Needs to handle various ways torch.device can be called (e.g. "cuda", "cuda:0", MockDevice instance)
+def _mock_torch_device_constructor(device_arg=None):
+    if isinstance(device_arg, str):
+        dev_type = device_arg.split(':',1)[0] if ':' in device_arg else device_arg
+        # Basic validation for common device types
+        if dev_type in ['cpu', 'cuda', 'mps'] or "cuda" in dev_type : # "cuda:0" etc.
+            return MockDevice(dev_type)
+    if isinstance(device_arg, MockDevice): # If a MockDevice instance is passed
+        return device_arg
+    # Default to CPU if no valid argument or None
+    return _MOCK_TORCH_DEFAULT_CPU_DEVICE
+mock_torch.device = MagicMock(side_effect=_mock_torch_device_constructor)
+
+# --- Sys Path Mocking ---
+# This ensures that any subsequent 'import torch' or 'from torch import nn'
+# will use our mock objects instead of the real PyTorch library.
+sys.modules['torch'] = mock_torch
+sys.modules['torch.nn'] = mock_torch.nn
+sys.modules['torch.nn.functional'] = mock_torch.nn.functional
+sys.modules['torch.optim'] = mock_torch.optim
+sys.modules['torch.cuda'] = mock_torch.cuda
+sys.modules['torch.backends'] = mock_torch.backends
+sys.modules['torch.backends.mps'] = mock_torch.backends.mps
+# --- END COMPREHENSIVE TORCH MOCKING (Corrected Version) ---
+
+# filepath: c:\\Users\\tonyh\\Oanda_Trading_Bot\\tests\\unit_tests\\test_risk_management_strategies.py
 import pytest
 import torch
 import pandas as pd
@@ -235,7 +620,7 @@ class TestRiskParityStrategy:
         signals = strategy.forward(asset_features)
         # Volatility calculation needs vol_window=3 periods for returns, then std of those.
         # df['returns'] = [NaN, 0.000999, 0.000998, 0.000997, 0.000996]
-        # df['volatility'] (window=3, min_periods=3 for returns):
+        # df['volatility'] (window=3, min_periods=3 for returns, std dev calc):
         #   - index 0, 1: NaN (not enough data for full window of returns for std calc)
         #   - index 2: std(returns[0,1,2]) = std(NaN, 0.000999, 0.000998) -> NaN (due to initial NaN in returns)
         #   - index 2 (corrected logic): std(returns[0..2]) -> df['volatility'][2] is based on returns[0], returns[1], returns[2]. Since returns[0] is NaN, vol[2] is NaN.

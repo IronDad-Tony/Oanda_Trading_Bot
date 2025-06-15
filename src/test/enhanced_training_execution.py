@@ -51,7 +51,7 @@ def check_system_requirements():
     
     try:
         # Check Enhanced Transformer
-        from src.models.enhanced_transformer import EnhancedUniversalTradingTransformer
+        from src.models.enhanced_transformer import EnhancedTransformer as EnhancedUniversalTradingTransformer
         logger.info("✅ Enhanced Transformer - Available")
         
         # Check Enhanced Quantum Strategy Layer

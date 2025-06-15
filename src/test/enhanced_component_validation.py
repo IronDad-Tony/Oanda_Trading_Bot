@@ -35,7 +35,7 @@ def validate_enhanced_transformer():
     logger.info("🧠 Validating Enhanced Transformer...")
     
     try:
-        from src.models.enhanced_transformer import EnhancedUniversalTradingTransformer
+        from src.models.enhanced_transformer import EnhancedTransformer as EnhancedUniversalTradingTransformer
         from src.common.config import MAX_SYMBOLS_ALLOWED, TIMESTEPS
         
         # Create Enhanced Transformer
@@ -280,7 +280,7 @@ def run_performance_benchmark():
     logger.info("⚡ Running Performance Benchmark...")
     
     try:
-        from src.models.enhanced_transformer import EnhancedUniversalTradingTransformer
+        from src.models.enhanced_transformer import EnhancedTransformer as EnhancedUniversalTradingTransformer
         import time
         
         # Create model for benchmarking

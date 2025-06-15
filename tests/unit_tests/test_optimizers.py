@@ -1,9 +1,11 @@
 import unittest
+from unittest.mock import MagicMock, patch # Ensure MagicMock is imported
 import numpy as np
 import pandas as pd # GeneticOptimizer uses pd.DataFrame for historical_data
 import sys # Added for path manipulation
 import os # Added for path manipulation
 from typing import Dict, Any, Optional # Added Optional, Dict, Any
+import logging # Added for logger in tests
 
 # Add src directory to Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -98,19 +100,25 @@ def mock_fitness_function(strategy_instance: BaseStrategy, market_data: pd.DataF
 
 
 class TestGeneticOptimizer(unittest.TestCase):
-
     def setUp(self):
-        self.strategy_class = MockStrategy
+        self.logger = logging.getLogger("TestGeneticOptimizer")
+        self.logger.setLevel(logging.DEBUG) # Or CRITICAL to suppress
+
+        self.strategy_class = MockStrategy # Defined above test class
+        
+        # MODIFIED: param_space uses actual types, not strings, and matches test expectations
         self.param_space = {
-            'param_A': (1, 150),  # Integer range
-            'param_B': (0.1, 1.0) # Float range
+            'param_int': (int, (1, 10)),
+            'param_float': (float, (0.0, 1.0)),
+            'param_cat_str': (str, ['A', 'B', 'C']),
+            'param_bool': (bool, [True, False]) # PyGAD uses 0/1 for bool if not specified otherwise
         }
-        # Expected python types for parameters based on param_space
         self.param_types_expected = {
-            'param_A': int,
-            'param_B': float
+            'param_int': int,
+            'param_float': float,
+            'param_cat_str': str,
+            'param_bool': bool
         }
-        # Create some dummy historical data
         self.historical_data = pd.DataFrame({
             'open': np.random.rand(100) * 100,
             'high': np.random.rand(100) * 100 + 100,
@@ -119,249 +127,292 @@ class TestGeneticOptimizer(unittest.TestCase):
             'volume': np.random.rand(100) * 1000
         }, index=pd.date_range(start='2023-01-01', periods=100))
 
-        self.mock_portfolio_context = {'balance': 100000, 'instrument': 'EUR_USD'} # Added mock portfolio context
+        self.mock_portfolio_context = {'balance': 100000, 'instrument': 'EUR_USD'}
 
+        # Define self.optimizer_config before it's used in ga_settings_for_test
         self.optimizer_config = {
             'population_size': 20,
             'n_generations': 10,
-            'mutation_rate': 0.1,
-            'crossover_rate': 0.7,
-            'tournament_size': 3, # For tournament selection
-            # 'param_types': {'param_A': int, 'param_B': float}, # Kept for reference, not passed to GA
-            'early_stopping_generations': 5 # Added for clarity
+            'mutation_rate': 0.1,  # For mutation_percent_genes (0-100)
+            'crossover_rate': 0.7, # For crossover_probability (0-1)
+            'tournament_size': 3,
+            'early_stopping_generations': 5
         }
+
+        # These are the settings directly passed to PyGAD, derived from optimizer_config
+        self.ga_settings_for_test = {
+            'sol_per_pop': self.optimizer_config['population_size'],
+            'num_generations': self.optimizer_config['n_generations'],
+            'mutation_type': 'random', # Default or from config
+            'mutation_percent_genes': self.optimizer_config['mutation_rate'] * 100,
+            'crossover_type': 'single_point', # Default or from config
+            'crossover_probability': self.optimizer_config['crossover_rate'],
+            'parent_selection_type': 'sss', # Default or from config
+            'K_tournament': self.optimizer_config['tournament_size'],
+            'stop_criteria': f"saturate_{self.optimizer_config.get('early_stopping_generations', 5)}",
+            'random_seed': self.optimizer_config.get('random_seed'),
+            'allow_duplicate_genes': True # A common PyGAD default/recommendation
+        }
+        
+        self.mock_fitness_function_for_optimizer_test = MagicMock(return_value=10.0)
+
+        # Context to be passed to the fitness function by the optimizer
+        self.base_context_for_fitness = {
+            'market_data': self.historical_data, 
+            'portfolio_context': self.mock_portfolio_context,
+            'strategy_class_ref': self.strategy_class 
+        }
+
         self.optimizer = GeneticOptimizer(
-            strategy_class=self.strategy_class,
+            fitness_function=self.mock_fitness_function_for_optimizer_test,
             param_space=self.param_space,
-            population_size=self.optimizer_config['population_size'],
-            n_generations=self.optimizer_config['n_generations'],
-            crossover_rate=self.optimizer_config['crossover_rate'],
-            mutation_rate=self.optimizer_config['mutation_rate'],
-            fitness_function_callback=mock_fitness_function,
-            early_stopping_generations=self.optimizer_config.get('early_stopping_generations', 10),
-            tournament_size=self.optimizer_config.get('tournament_size', 3)
+            base_config=self.base_context_for_fitness, # This context is for the fitness_function
+            logger=self.logger,
+            ga_settings=self.ga_settings_for_test
         )
+        # self.optimizer.strategy_class = MockStrategyForOptimizer # No longer needed, strategy class is not part of GA init
         self.mock_market_data = pd.DataFrame({
-            'open': np.random.rand(10),
-            'high': np.random.rand(10),
-            'low': np.random.rand(10),
-            'close': np.random.rand(10),
+            'open': np.random.rand(10), 'high': np.random.rand(10),
+            'low': np.random.rand(10), 'close': np.random.rand(10),
             'volume': np.random.rand(10) * 100
         })
         self.empty_mock_market_data = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
 
     def test_optimizer_initialization(self):
         self.assertIsNotNone(self.optimizer)
-        self.assertEqual(self.optimizer.population_size, self.optimizer_config['population_size'])
-        self.assertEqual(self.optimizer.n_generations, self.optimizer_config['n_generations'])
-        self.assertEqual(self.optimizer.mutation_rate, self.optimizer_config['mutation_rate'])
-        self.assertEqual(self.optimizer.crossover_rate, self.optimizer_config['crossover_rate'])
-        self.assertEqual(self.optimizer.tournament_size, self.optimizer_config['tournament_size'])
-        self.assertEqual(self.optimizer.early_stopping_generations, self.optimizer_config.get('early_stopping_generations', 10))
-
-    def test_initialize_population(self):
-        population = self.optimizer._initialize_population()
-        self.assertEqual(len(population), self.optimizer.population_size)
-        for individual in population:
-            self.assertIn('param_A', individual)
-            self.assertIn('param_B', individual)
-            # Check types based on self.param_types_expected
-            self.assertIsInstance(individual['param_A'], self.param_types_expected['param_A'])
-            self.assertIsInstance(individual['param_B'], self.param_types_expected['param_B'])
-            # Check ranges
-            self.assertTrue(self.param_space['param_A'][0] <= individual['param_A'] <= self.param_space['param_A'][1])
-            self.assertTrue(self.param_space['param_B'][0] <= individual['param_B'] <= self.param_space['param_B'][1])
-
-    def test_calculate_fitness(self):
-        population = self.optimizer._initialize_population()
-        self.assertTrue(len(population) > 0, "Population should not be empty")
-        # First test with params from initialized population (less predictable result for assertion)
-        individual_params_from_pop = population[0]
-        fitness_score_from_pop = self.optimizer._calculate_fitness(individual_params_from_pop, self.historical_data, self.mock_portfolio_context)
-        self.assertIsInstance(fitness_score_from_pop, float)
-
-        # Second test with specific params for a predictable result
-        # The optimizer's _calculate_fitness will instantiate the strategy with these params
-        # then pass the instance to the fitness_function_callback (mock_fitness_function)
-        specific_individual_params = {'param_A': 1.5, 'param_B': 2.5} # Corrected to use param_A and param_B
-        fitness = self.optimizer._calculate_fitness(
-            individual_params=specific_individual_params, 
-            market_data=self.mock_market_data, # Has 10 rows
-            portfolio_context=self.mock_portfolio_context
-        )
-        # print(f"test_calculate_fitness: Specific Params: {specific_individual_params}, Fitness: {fitness}")
-        self.assertIsInstance(fitness, float)
-        # Expected fitness: param_A (1.5) + param_B (2.5) = 4.0. Signal is 4.0 for each of 10 rows.
-        # mock_fitness_function sums these signals: 4.0 * 10 = 40.0
-        self.assertEqual(fitness, 40.0)
-
-    def test_selection(self):
-        population = self.optimizer._initialize_population()
-        # Need to create population_with_fitness: List[Tuple[Dict[str, Any], float]]
-        population_with_fitness = []
-        for ind_params in population:
-            fitness = self.optimizer._calculate_fitness(ind_params, self.historical_data, self.mock_portfolio_context)
-            population_with_fitness.append((ind_params, fitness))
+        self.assertEqual(self.optimizer.ga_settings['sol_per_pop'], self.ga_settings_for_test['sol_per_pop'])
+        self.assertEqual(self.optimizer.ga_settings['num_generations'], self.ga_settings_for_test['num_generations'])
+        self.assertEqual(self.optimizer.ga_settings['mutation_percent_genes'], self.ga_settings_for_test['mutation_percent_genes'])
+        self.assertEqual(self.optimizer.ga_settings['crossover_probability'], self.ga_settings_for_test['crossover_probability'])
+        self.assertEqual(self.optimizer.ga_settings['K_tournament'], self.ga_settings_for_test['K_tournament'])
+        self.assertEqual(self.optimizer.ga_settings['stop_criteria'], self.ga_settings_for_test['stop_criteria'])
+        self.assertEqual(self.optimizer.ga_settings['random_seed'], self.ga_settings_for_test['random_seed'])
         
-        selected_parents = self.optimizer._selection(population_with_fitness)
-        self.assertEqual(len(selected_parents), self.optimizer.population_size)
+        # Check derived gene_space and gene_type (simplified check)
+        self.assertEqual(len(self.optimizer.gene_space), len(self.param_space))
+        self.assertEqual(len(self.optimizer.gene_type), len(self.param_space))
+        self.assertIn('param_int', self.optimizer.param_names)
+        self.assertIn('param_float', self.optimizer.param_names)
+        self.assertIn('param_cat_str', self.optimizer.param_names)
+        self.assertIn('param_bool', self.optimizer.param_names)
 
-    def test_crossover_param_types_preserved(self):
-        # Test with params relevant to self.optimizer.param_space
-        parent1 = {'param_A': 10, 'param_B': 0.5}
-        parent2 = {'param_A': 20, 'param_B': 0.8}
+        # Check types in gene_type (order should match param_names)
+        idx_p_int = self.optimizer.param_names.index('param_int')
+        idx_p_float = self.optimizer.param_names.index('param_float')
+        idx_p_cat_str = self.optimizer.param_names.index('param_cat_str')
+        idx_p_bool = self.optimizer.param_names.index('param_bool')
+
+        self.assertEqual(self.optimizer.gene_type[idx_p_int], int)
+        self.assertEqual(self.optimizer.gene_type[idx_p_float], float)
+        self.assertEqual(self.optimizer.gene_type[idx_p_cat_str], str)
+        self.assertEqual(self.optimizer.gene_type[idx_p_bool], int) # bool is handled as int (0/1)
+    
+    def test_param_space_preparation(self):
+        # Check that the param_space is prepared correctly for the optimizer
+        expected_param_space = {
+            'param_int': (int, (1, 10)),
+            'param_float': (float, (0.0, 1.0)),
+            'param_cat_str': (str, ['A', 'B', 'C']),
+            'param_bool': (bool, [True, False])
+        }
+        self.assertEqual(self.optimizer.param_space, expected_param_space)
+
+    def test_calculate_fitness_wrapper_logic(self):
+        # This tests the _calculate_fitness wrapper inside GeneticOptimizer
+        # It should correctly call the user-provided fitness function with decoded params and context
         
-        # Ensure parents conform to expected types, though _crossover itself doesn't type check them
-        self.assertIsInstance(parent1['param_A'], self.param_types_expected['param_A'])
-        self.assertIsInstance(parent2['param_B'], self.param_types_expected['param_B'])
-
-        child1, child2 = self.optimizer._crossover(parent1, parent2)
-
-        for child in [child1, child2]:
-            for param_name, expected_type in self.param_types_expected.items():
-                if param_name in child:
-                    self.assertIsInstance(child[param_name], expected_type, 
-                                          f"Child param {param_name} has wrong type. Expected {expected_type}, got {type(child[param_name])}")
-                    # Also check bounds if possible (though crossover might produce out-of-bound initially)
-                    # Bounds are typically enforced by mutation or a specific clamping step if crossover produces out-of-range values.
-                    # The current _crossover does not enforce bounds.
-
-    def test_mutate_param_types_preserved(self):
-        individual = {'param_A': 15, 'param_B': 0.6}
-        # Ensure individual conforms to expected types before mutation
-        self.assertIsInstance(individual['param_A'], self.param_types_expected['param_A'])
-        self.assertIsInstance(individual['param_B'], self.param_types_expected['param_B'])
+        # Example solution from GA (raw gene values)
+        # param_space = {
+        #     'param_int': (int, (1, 10)),
+        #     'param_float': (float, (0.0, 1.0)),
+        #     'param_cat_str': (str, ['A', 'B', 'C']),
+        #     'param_bool': (bool, [True, False]) # PyGAD uses 0/1
+        # }
+        # param_names order: ['param_int', 'param_float', 'param_cat_str', 'param_bool'] (depends on dict iteration order in Python 3.7+)
+        # To make it deterministic for test, let's assume an order or use the optimizer's internal param_names
         
-        mutated_individual = self.optimizer._mutate(individual.copy()) # Pass a copy
+        # Use the optimizer's actual param_names order
+        # Ensure the solution matches the param_space defined in setUp
+        solution_map = {'param_int': 3, 'param_float': 0.75, 'param_cat_str': 'B', 'param_bool': 0} # param_bool as 0 for False
+        solution = []
+        for p_name in self.optimizer.param_names:
+            if p_name not in solution_map:
+                # This case should ideally not happen if solution_map covers all param_names
+                # For robustness, add a default or handle missing key, though test setup should ensure it.
+                if self.optimizer.param_space[p_name][0] == bool: # type is bool
+                    solution.append(0) # Default to False (0)
+                elif self.optimizer.param_space[p_name][0] == str: # type is str
+                    solution.append(self.optimizer.param_space[p_name][1][0]) # Default to first categorical option
+                else: # int, float
+                    solution.append(self.optimizer.param_space[p_name][1][0]) # Default to lower bound
+            else:
+                solution.append(solution_map[p_name])
+        
+        solution_idx = 0 
+        
+        # The context passed to _calculate_fitness is the one given to run_optimizer
+        # For this test, let's simulate that context.
+        test_run_context = {'some_runtime_data': 'value'}
+        
+        fitness_value = self.optimizer._calculate_fitness(solution, solution_idx, context=test_run_context)
 
-        for param_name, expected_type in self.param_types_expected.items():
-            if param_name in mutated_individual:
-                self.assertIsInstance(mutated_individual[param_name], expected_type,
-                                      f"Mutated param {param_name} has wrong type. Expected {expected_type}, got {type(mutated_individual[param_name])}")
-                # Check bounds are respected by mutation
-                min_val, max_val = self.optimizer.param_space[param_name]
-                self.assertTrue(min_val <= mutated_individual[param_name] <= max_val, 
-                                f"Mutated param {param_name} {mutated_individual[param_name]} out of bounds ({min_val}, {max_val})")
+        self.mock_fitness_function_for_optimizer_test.assert_called_once()
+        call_args = self.mock_fitness_function_for_optimizer_test.call_args[0]
+        
+        params_dict_called = call_args[0]
+        context_called = call_args[1]
+        
+        self.assertEqual(params_dict_called['param_int'], 3)
+        self.assertEqual(params_dict_called['param_float'], 0.75)
+        self.assertEqual(params_dict_called['param_cat_str'], 'B')
+        self.assertEqual(params_dict_called['param_bool'], False) # 0 converted to False
+        
+        self.assertEqual(context_called, test_run_context) # Context passed to _calculate_fitness is used
+        self.assertEqual(fitness_value, 10.0) # Return value of mock
 
-    def test_evolve(self):
-        self.optimizer.n_generations = 3 
-        self.optimizer.population_size = 10
+    @patch('pygad.GA') # Mock the pygad.GA class
+    def test_evolve_successful_run(self, MockPyGADGA):
+        mock_ga_instance = MockPyGADGA.return_value
+        
+        # Simulate PyGAD's on_generation callback setting best_params_ and best_fitness_
+        # This happens internally in the GeneticOptimizer's on_generation method
+        # So, we need to ensure that the call to ga_instance.run() leads to on_generation being called
+        # and that on_generation correctly decodes and stores the best solution.
 
-        # Call evolve with market_data_for_fitness and portfolio_context_for_fitness
-        best_params, best_fitness = self.optimizer.evolve(
-            market_data_for_fitness=self.historical_data, 
-            portfolio_context_for_fitness=self.mock_portfolio_context
-        )
+        # To simulate this, we can mock the on_generation callback or check its effects.
+        # Let's assume on_generation works as intended and PyGAD provides a best solution.
+        
+        # The best solution from PyGAD (genes)
+        # Order based on self.optimizer.param_names
+        best_solution_genes_map = {'param_int': 5, 'param_float': 0.5, 'param_cat_str': 'A', 'param_bool': 1} # param_bool as 1 for True
+        best_solution_genes = [best_solution_genes_map[p_name] for p_name in self.optimizer.param_names]
+        
+        mock_ga_instance.best_solution.return_value = (best_solution_genes, 100.0, 0) # solution_genes, fitness, index
 
+        # We also need to ensure that self.optimizer.on_generation is called by PyGAD
+        # and correctly updates self.optimizer.best_params_ and self.optimizer.best_fitness_
+        # One way is to allow the actual on_generation to run.
+        # PyGAD calls on_generation with the ga_instance.
+        
+        # To make this test simpler and focus on run_optimizer's orchestration:
+        # We can directly set the outcome of the GA run as if on_generation populated it.
+        # This is because on_generation is tightly coupled with PyGAD's execution flow.
+        
+        # Let's refine: test that run_optimizer calls pygad.GA, then ga_instance.run(),
+        # and returns the best_params_ and best_fitness_ that on_generation (called by PyGAD) would have set.
+
+        # To test on_generation's effect, we can make a dummy call to it after run()
+        # or trust that PyGAD calls it. For now, let's assume PyGAD calls it.
+        # The GeneticOptimizer's run_optimizer will return self.best_params_ and self.best_fitness_
+        # which are set by the on_generation callback.
+
+        # So, if ga_instance.run() completes, and on_generation was correctly configured,
+        # self.best_params_ should be populated.
+
+        # Simulate that on_generation has been called and updated the optimizer's state
+        # This is a bit of a shortcut for testing run_optimizer's return values
+        # A more integrated test would involve PyGAD actually calling on_generation.
+        
+        # Let's make the mock_ga_instance.run() call the on_generation callback
+        # This is tricky because on_generation is a method of self.optimizer.
+        def mock_run(*args, **kwargs):
+            # Simulate PyGAD calling on_generation at least once with the best solution
+            self.optimizer.on_generation(mock_ga_instance)
+            return
+
+        mock_ga_instance.run.side_effect = mock_run
+        
+        test_run_context = {'runtime_key': 'runtime_value'}
+        best_params, best_fitness = self.optimizer.run_optimizer(current_context=test_run_context)
+
+        MockPyGADGA.assert_called_once() 
+        pygad_call_args = MockPyGADGA.call_args[1] 
+        
+        self.assertEqual(pygad_call_args['num_generations'], self.ga_settings_for_test['num_generations'])
+        self.assertEqual(pygad_call_args['sol_per_pop'], self.ga_settings_for_test['sol_per_pop'])
+        self.assertIsNotNone(pygad_call_args['fitness_func']) 
+        self.assertEqual(pygad_call_args['gene_space'], self.optimizer.gene_space)
+        # gene_type can be a list of types or a single type if all are same.
+        # self.optimizer.gene_type is always a list.
+        self.assertListEqual(pygad_call_args['gene_type'], self.optimizer.gene_type)
+        self.assertEqual(pygad_call_args['on_generation'], self.optimizer.on_generation)
+
+
+        mock_ga_instance.run.assert_called_once() 
+        
         self.assertIsNotNone(best_params)
-        self.assertIsInstance(best_params, dict)
-        self.assertIn('param_A', best_params)
-        self.assertIn('param_B', best_params)
-        self.assertIsInstance(best_params['param_A'], self.param_types_expected['param_A'])
-        self.assertIsInstance(best_params['param_B'], self.param_types_expected['param_B'])
+        self.assertEqual(best_fitness, 100.0)
+        self.assertEqual(best_params['param_int'], 5)
+        self.assertEqual(best_params['param_float'], 0.5)
+        self.assertEqual(best_params['param_cat_str'], 'A')
+        self.assertEqual(best_params['param_bool'], True) 
 
-        self.assertIsInstance(best_fitness, float)
+    def test_calculate_fitness_exception_in_user_func(self):
+        self.mock_fitness_function_for_optimizer_test.side_effect = ValueError("User fitness error")
         
-        self.assertTrue(self.param_space['param_A'][0] <= best_params['param_A'] <= self.param_space['param_A'][1])
-        self.assertTrue(self.param_space['param_B'][0] <= best_params['param_B'] <= self.param_space['param_B'][1])
-
-    def test_evolve_no_historical_data(self):
-        optimizer_no_data_config = self.optimizer_config.copy()
-        optimizer_no_data_config['n_generations'] = 2
-        optimizer_no_data_config['population_size'] = 5
+        solution_map = {'param_int': 1, 'param_float': 0.1, 'param_cat_str': 'A', 'param_bool': 1} # param_bool as 1 for True
+        solution = [solution_map[p_name] for p_name in self.optimizer.param_names]
         
-        optimizer_no_data = GeneticOptimizer(
-            strategy_class=self.strategy_class,
-            param_space=self.param_space,
-            population_size=optimizer_no_data_config['population_size'],
-            n_generations=optimizer_no_data_config['n_generations'],
-            crossover_rate=optimizer_no_data_config['crossover_rate'],
-            mutation_rate=optimizer_no_data_config['mutation_rate'],
-            fitness_function_callback=mock_fitness_function,
-            early_stopping_generations=optimizer_no_data_config.get('early_stopping_generations', 10),
-            tournament_size=optimizer_no_data_config.get('tournament_size', 3)
-        )
+        test_run_context = {'ctx_key': 'ctx_val'}
 
-        # Call evolve with market_data_for_fitness=None
-        # With robust MockStrategy, fitness should be 0.0 for all individuals if params lead to 0 sum of signals.
-        # Best params should be one of the initial random individuals.
-        best_params, best_fitness = optimizer_no_data.evolve(
-            market_data_for_fitness=None, 
-            portfolio_context_for_fitness=self.mock_portfolio_context,
-            verbose=False # Reduce noise for test run
-        )
-        # print(f"test_evolve_no_historical_data: Best Params: {best_params}, Best Fitness: {best_fitness}")
-        self.assertIsNotNone(best_params) # Expecting some params as fitness should be 0.0 not -inf
-        self.assertIsInstance(best_fitness, float)
-        # Fitness should be 0.0 because _calculate_signals will return a Series of 0s for None data
-        # and mock_fitness_function will sum these 0s.
-        self.assertEqual(best_fitness, 0.0)
+        with patch.object(self.logger, 'error') as mock_log_error:
+            fitness = self.optimizer._calculate_fitness(solution, 0, context=test_run_context)
+            self.assertEqual(fitness, -float('inf'))
+            
+            # Construct the expected params dict based on the solution and param_names
+            expected_params_dict = {
+                'param_int': 1, 
+                'param_float': 0.1, 
+                'param_cat_str': 'A', 
+                'param_bool': True # Decoded from 1
+            }
+            mock_log_error.assert_called_with(
+                f"Error in user-provided fitness_function for params {expected_params_dict}: User fitness error",
+                exc_info=True
+            )
+            
+    @patch('pygad.GA')
+    def test_evolve_no_context_provided_to_run_optimizer(self, MockPyGADGA):
+        # Test that run_optimizer raises an error or handles if current_context is missing,
+        # as it's now a required argument.
+        with self.assertRaises(TypeError): # run_optimizer() missing 1 required positional argument: 'current_context'
+            self.optimizer.run_optimizer()
 
-    def test_evolve_empty_historical_data(self):
-        empty_df = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'], index=pd.DatetimeIndex([]))
-        optimizer_empty_data_config = self.optimizer_config.copy()
-        optimizer_empty_data_config['n_generations'] = 2
-        optimizer_empty_data_config['population_size'] = 5
-
-        optimizer_empty_data = GeneticOptimizer(
-            strategy_class=self.strategy_class,
-            param_space=self.param_space,
-            population_size=optimizer_empty_data_config['population_size'],
-            n_generations=optimizer_empty_data_config['n_generations'],
-            crossover_rate=optimizer_empty_data_config['crossover_rate'],
-            mutation_rate=optimizer_empty_data_config['mutation_rate'],
-            fitness_function_callback=mock_fitness_function,
-            early_stopping_generations=optimizer_empty_data_config.get('early_stopping_generations', 10),
-            tournament_size=optimizer_empty_data_config.get('tournament_size', 3)
-        )
+    @patch('pygad.GA')
+    def test_run_optimizer_ga_exception(self, MockPyGADGA):
+        MockPyGADGA.side_effect = Exception("PyGAD init failed")
         
-        # Call evolve with empty DataFrame for market_data_for_fitness
-        # Similar to no_historical_data, fitness should be 0.0 for all individuals.
-        best_params, best_fitness = optimizer_empty_data.evolve(
-            market_data_for_fitness=empty_df, 
-            portfolio_context_for_fitness=self.mock_portfolio_context,
-            verbose=False # Reduce noise
-        )
-        # print(f"test_evolve_empty_historical_data: Best Params: {best_params}, Best Fitness: {best_fitness}")
-        self.assertIsNotNone(best_params) # Expecting some params
-        self.assertIsInstance(best_fitness, float)
-        # Fitness should be 0.0 for the same reasons as above.
-        self.assertEqual(best_fitness, 0.0)
+        test_run_context = {'data': 'some_data'}
+        with patch.object(self.logger, 'error') as mock_log_error:
+            params, fitness = self.optimizer.run_optimizer(current_context=test_run_context)
+            self.assertEqual(params, {})
+            self.assertEqual(fitness, -float('inf'))
+            mock_log_error.assert_called_with(
+                "Exception during PyGAD GA instantiation or run: PyGAD init failed",
+                exc_info=True
+            )
 
-    def test_evolve_with_early_stopping(self):
-        # Test evolve method with early stopping
-        optimizer_early_stopping = GeneticOptimizer(
-            strategy_class=MockStrategy,
-            param_space=self.param_space,
-            population_size=10,
-            n_generations=50, # Max generations, corrected from 'generations'
-            mutation_rate=0.1,
-            crossover_rate=0.7,
-            fitness_function_callback=mock_fitness_function, # Use the corrected mock fitness function
-            early_stopping_generations=3 # Stop if no improvement for 3 generations
-        )
-        best_params, best_fitness = optimizer_early_stopping.evolve(
-            market_data_for_fitness=self.mock_market_data,
-            portfolio_context_for_fitness=self.mock_portfolio_context,
-            verbose=False
-        )
-        # print(f"test_evolve_with_early_stopping: Best Params: {best_params}, Best Fitness: {best_fitness}")
-        self.assertIsNotNone(best_params)
-        self.assertIsInstance(best_fitness, float)
-        self.assertGreater(best_fitness, -float('inf'))
-        # Add an assertion to check if early stopping might have occurred.
-        # This requires the optimizer to store the number of generations it actually ran.
-        # Assuming optimizer_early_stopping has an attribute like 'generations_ran_' or similar
-        # For now, we'll assume it exists for the sake of the test logic.
-        # If not, this part of the test would need adjustment based on actual optimizer implementation.
-        if hasattr(optimizer_early_stopping, 'generations_ran_'): # Check if the attribute exists
-            # print(f"Early stopping generations ran: {optimizer_early_stopping.generations_ran_}")
-            self.assertTrue(optimizer_early_stopping.generations_ran_ <= optimizer_early_stopping.n_generations) # Corrected to n_generations
-            if best_fitness > -float('inf'): # if a valid solution was found
-                 pass # It could have run all generations or stopped early.
-                      # Hard to make a strict assertion without a predictable fitness landscape
-                      # or knowing the exact point of convergence for early stopping.
+    @patch('pygad.GA')
+    def test_run_optimizer_no_solution_found(self, MockPyGADGA):
+        mock_ga_instance = MockPyGADGA.return_value
+        
+        # Simulate on_generation never finding a solution better than -inf
+        # or PyGAD itself not finding one.
+        # If on_generation is called but best_fitness remains -inf, best_params_ remains None.
+        def mock_run_no_solution(*args, **kwargs):
+            # Simulate on_generation being called, but it doesn't improve best_fitness_ from -inf
+            # or best_solution() from PyGAD returns a very bad fitness.
+            mock_ga_instance.best_solution.return_value = ([], -float('inf'), 0) # No good solution
+            self.optimizer.on_generation(mock_ga_instance) # Manually call to simulate PyGAD's behavior
+            return
 
-    # ...existing code...
-if __name__ == '__main__':
-    unittest.main()
+        mock_ga_instance.run.side_effect = mock_run_no_solution
+        
+        test_run_context = {'data': 'some_data'}
+        with patch.object(self.logger, 'warning') as mock_log_warning:
+            params, fitness = self.optimizer.run_optimizer(current_context=test_run_context)
+            self.assertEqual(params, {})
+            self.assertEqual(fitness, -float('inf'))
+            mock_log_warning.assert_any_call( # Updated to assert_any_call due to other potential warnings
+                "Genetic optimizer did not find a valid solution during the run. Returning empty params and -inf fitness."
+            )

@@ -17,15 +17,18 @@ import torch.nn.functional as F
 from torch.nn.functional import gumbel_softmax
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional, Any, Union, Type, Callable
+from typing import Dict, List, Tuple, Optional, Any, Union, Type, Callable, Set # Added Set
 import logging # Use standard logging
 from abc import ABC, abstractmethod
 import random # For DynamicStrategyGenerator
 from dataclasses import asdict # ADDED: Import asdict
 import json # ADDED: For loading strategy configurations from file
+import copy # Added import
 
 from .strategies import STRATEGY_REGISTRY # From src/agent/strategies/__init__.py
 from .strategies.base_strategy import StrategyConfig, BaseStrategy
+from .optimizers.genetic_optimizer import GeneticOptimizer # ADDED
+from .optimizers.neural_architecture_search import NeuralArchitectureSearch # ADDED
 
 class EnhancedStrategySuperposition(nn.Module):
     def __init__(self, input_dim: int, num_strategies: int, # num_strategies is the target/max number
@@ -121,15 +124,19 @@ class EnhancedStrategySuperposition(nn.Module):
         
         self.gumbel_selector = None # For Gumbel-Softmax based selection if used
 
-    def _initialize_strategies(self, layer_input_dim: int, 
+    def _get_strategy_registry(self) -> Dict[str, Type[BaseStrategy]]:
+        """Returns a copy of the global strategy registry."""
+        return copy.deepcopy(STRATEGY_REGISTRY)
+
+    def _initialize_strategies(self, layer_input_dim: int,
                                processed_strategy_configs: Optional[List[Union[Dict[str, Any], StrategyConfig]]], 
                                explicit_strategies: Optional[List[Type[BaseStrategy]]], 
                                default_strategy_input_dim: int, 
                                dynamic_loading_enabled: bool):
-        self.strategies = nn.ModuleList()
-        self.strategy_names = []
-
-        processed_strategy_names = set() 
+        self.strategies: List[BaseStrategy] = []  # Initialize here
+        self.strategy_names: List[str] = []      # Initialize here
+        processed_strategy_names: Set[str] = set()
+        STRATEGY_REGISTRY_LOCAL = self._get_strategy_registry() # Use local copy
 
         if processed_strategy_configs:
             for cfg_item_idx, cfg_item in enumerate(processed_strategy_configs):
@@ -509,44 +516,342 @@ class EnhancedStrategySuperposition(nn.Module):
     # ... (rest of EnhancedStrategySuperposition, e.g., dynamic generator integration)
 
 class DynamicStrategyGenerator:
-    def __init__(self, base_strategies: Optional[List[Type[BaseStrategy]]] = None, generation_config: Optional[Dict[str, Any]] = None):
-        self.logger = logging.getLogger(f"{__name__}.DynamicStrategyGenerator")
-        self.base_strategies = base_strategies if base_strategies else []
-        self.generation_config = generation_config if generation_config else {}
-        if not self.base_strategies:
-            self.logger.warning("DynamicStrategyGenerator initialized with no base strategies.")
+    def __init__(self, 
+                 optimizer_config: Optional[Dict[str, Any]] = None, # ADDED
+                 logger: Optional[logging.Logger] = None,
+                 # base_strategies and generation_config are removed as per test expectations
+                 # The tests imply strategy_class is passed to generate_new_strategy
+                 ):
+        self.logger = logger if logger else logging.getLogger(f"{__name__}.DynamicStrategyGenerator")
+        self.optimizer_config = optimizer_config if optimizer_config else {} # MODIFIED
+        self.genetic_optimizer: Optional[GeneticOptimizer] = None
+        self.nas_optimizer: Optional[NeuralArchitectureSearch] = None
+        # self.base_strategies and self.generation_config removed
 
-    def generate_new_strategy(self, market_conditions: Dict[str, Any], existing_strategies: List[BaseStrategy]) -> Optional[Tuple[Type[BaseStrategy], StrategyConfig]]:
-        if not self.base_strategies:
-            self.logger.warning("No base strategies available for dynamic generation.")
+    def generate_new_strategy(self, 
+                              strategy_class: Type[BaseStrategy], 
+                              fitness_function: Optional[Callable] = None, 
+                              initial_parameters: Optional[Dict[str, Any]] = None, 
+                              strategy_config_override: Optional[StrategyConfig] = None, 
+                              market_data_for_ga: Optional[Union[pd.DataFrame, Dict[str, pd.DataFrame]]] = None, # For GA/NAS
+                              current_context: Optional[Dict[str, Any]] = None, # For GA/NAS fitness eval
+                              **kwargs) -> Optional[BaseStrategy]:
+        if not strategy_class or not issubclass(strategy_class, BaseStrategy):
+            self.logger.error(f"Invalid strategy_class provided: {strategy_class}. It must be a subclass of BaseStrategy.")
             return None
+
+        if current_context is not None and not isinstance(current_context, dict):
+            self.logger.error(f"Invalid current_context type: {type(current_context)}. Expected Dict or None.")
+            return None
+
+        self.logger.info(f"Attempting to generate strategy instance for: {strategy_class.__name__}")
+
+        # Determine optimizer configuration for this specific call, considering overrides
+        call_specific_optimizer_config = self.optimizer_config.copy() if self.optimizer_config else {}
+        optimizer_type_override = kwargs.get('optimizer_type_override')
+        optimizer_settings_override = kwargs.get('optimizer_settings_override')
+
+        if optimizer_type_override:
+            call_specific_optimizer_config["name"] = optimizer_type_override
+            if optimizer_settings_override is not None: # Allow overriding settings even if type is not new
+                call_specific_optimizer_config["settings"] = optimizer_settings_override
+            elif "settings" not in call_specific_optimizer_config: # If type override but no settings, ensure settings key exists
+                 call_specific_optimizer_config["settings"] = {}
+        elif optimizer_settings_override is not None and call_specific_optimizer_config: # Settings override for existing config
+            call_specific_optimizer_config["settings"] = optimizer_settings_override
+
+        # 1. Determine base configuration
+        final_config: StrategyConfig
+        base_default_config = strategy_class.default_config()
+        if not isinstance(base_default_config, StrategyConfig):
+            self.logger.warning(
+                f"{strategy_class.__name__}.default_config() did not return StrategyConfig. Using minimal."
+            )
+            base_default_config = StrategyConfig(name=strategy_class.__name__)
+
+        if strategy_config_override:
+            final_config = StrategyConfig.merge_configs(base_default_config, strategy_config_override)
+            if strategy_config_override.default_params is not None: # If override has params, they take precedence
+                 final_config.default_params = strategy_config_override.default_params.copy()
+        else:
+            final_config = base_default_config
         
+        # Ensure default_params exists on final_config
+        if final_config.default_params is None:
+            final_config.default_params = {}
+
+
+        # 2. Determine parameters: Optimizer > Initial Parameters > Default Config Parameters
+        current_best_params = final_config.default_params.copy() # Start with config defaults
+
+        # If initial_parameters are provided, they override the defaults from final_config at this stage.
+        if initial_parameters is not None:
+            current_best_params.update(initial_parameters)
+            self.logger.info(f"Updated current_best_params with initial_parameters before optimization: {current_best_params}")
+
+        use_optimizer = bool(call_specific_optimizer_config and call_specific_optimizer_config.get("name") and fitness_function)
+        optimized_params_from_optimizer: Optional[Dict[str, Any]] = None
+
+        if use_optimizer:
+            optimizer_name = call_specific_optimizer_config.get("name")
+            optimizer_settings = call_specific_optimizer_config.get("settings", {})
+            
+            # Prepare context for fitness function
+            # The fitness_function passed to DSG is expected to take (strategy_instance, portfolio_context, market_data, params_dict)
+            # The optimizer's fitness_function_callback will take (params_dict, context_for_optimizer_fitness)
+            # So, we need a wrapper.
+
+            def _fitness_wrapper_for_optimizer(params_to_evaluate: Dict[str, Any], context_for_optimizer_fitness: Dict[str, Any]) -> float:
+                if not fitness_function: # Should not happen if use_optimizer is true
+                    self.logger.error("Fitness function is None inside optimizer wrapper.")
+                    return -float('inf')
+                
+                # Create a temporary strategy instance with these params for evaluation
+                # The config used here should be `final_config`
+                # temp_eval_config = final_config.copy() # Create a copy to avoid modifying the original
+                # MODIFICATION: Use a deepcopy of final_config to ensure nested structures like default_params are also copied.
+                temp_eval_config = copy.deepcopy(final_config) 
+                
+                # Instantiate with params_to_evaluate
+                # BaseStrategy.__init__ will merge these params with its config's default_params
+                # So, ensure temp_eval_config.default_params is not set here, or params are passed directly
+                try:
+                    # Pass params directly to constructor, it will handle merging with its config.
+                    temp_strategy_instance = strategy_class(config=temp_eval_config, params=params_to_evaluate, logger=self.logger)
+                except Exception as e_init:
+                    self.logger.error(f"Error instantiating {strategy_class.__name__} in fitness wrapper with params {params_to_evaluate}: {e_init}", exc_info=True)
+                    return -float('inf')
+
+                # The original fitness_function expects: (strategy_instance, portfolio_context, market_data, raw_params_from_ga)
+                # The context_for_optimizer_fitness should contain market_data and portfolio_context
+                
+                _market_data = context_for_optimizer_fitness.get('market_data')
+                _portfolio_context = context_for_optimizer_fitness.get('portfolio_context')
+                
+                try:
+                    # The `fitness_function` is the one provided by the user of DSG.
+                    # It should handle the strategy instance and evaluate it.
+                    # The `params_to_evaluate` are also passed for its reference.
+                    return fitness_function(temp_strategy_instance, _portfolio_context, _market_data, params_to_evaluate)
+                except Exception as e_fit:
+                    self.logger.error(f"Error in provided fitness_function for {strategy_class.__name__} with params {params_to_evaluate}: {e_fit}", exc_info=True)
+                    return -float('inf')
+
+            optimizer_context_for_fitness = {
+                'market_data': market_data_for_ga, # This is market_data_for_GA from DSG args
+                'portfolio_context': current_context # This is current_context from DSG args
+                # 'strategy_class': strategy_class # Optimizer will get this separately
+            }
+
+            if optimizer_name == "GeneticOptimizer":
+                param_space_ga = strategy_class.get_parameter_space(optimizer_type="genetic")
+                if not param_space_ga:
+                    self.logger.warning(f"GeneticOptimizer selected, but {strategy_class.__name__} has no GA parameter space. Skipping optimization.")
+                else:
+                    try:
+                        self.genetic_optimizer = GeneticOptimizer(
+                            fitness_function=_fitness_wrapper_for_optimizer,
+                            param_space=param_space_ga,
+                            base_config=optimizer_context_for_fitness, # Context for fitness function
+                            logger=self.logger,
+                            ga_settings=optimizer_settings
+                        )
+                        self.logger.info(f"Running GeneticOptimizer for {strategy_class.__name__}.")
+                        # GeneticOptimizer's run_optimizer expects current_context
+                        optimized_params_from_optimizer, best_fitness = self.genetic_optimizer.run_optimizer(current_context=optimizer_context_for_fitness)
+                        
+                        if optimized_params_from_optimizer:
+                            self.logger.info(f"Genetic Optimizer found solution with fitness {best_fitness:.4f}. Params: {optimized_params_from_optimizer}")
+                        else:
+                            self.logger.warning(f"Genetic Optimizer for {strategy_class.get_strategy_name()} did not return a solution. Best fitness: {best_fitness:.4f}.")
+                    except Exception as e_ga:
+                        self.logger.error(f"Error during genetic optimization for {strategy_class.get_strategy_name()}: {e_ga}", exc_info=True)
+                    finally:
+                        self.genetic_optimizer = None # Clear instance
+
+            elif optimizer_name == "NeuralArchitectureSearch":
+                if not issubclass(strategy_class, torch.nn.Module):
+                    self.logger.error(f"NeuralArchitectureSearch requires strategy_class to be an nn.Module. {strategy_class.__name__} is not. Skipping NAS.")
+                else:
+                    param_space_nas = strategy_class.get_parameter_space_for_nas() # Or a generic NAS space getter
+                    if not param_space_nas:
+                         self.logger.warning(f"NeuralArchitectureSearch selected, but {strategy_class.__name__} has no NAS parameter space. Skipping optimization.")
+                    else:
+                        try:
+                            self.nas_optimizer = NeuralArchitectureSearch(
+                                strategy_class=strategy_class, # NAS needs the class
+                                search_space=param_space_nas,
+                                fitness_function_callback=_fitness_wrapper_for_optimizer, # Wrapper
+                                nas_settings=optimizer_settings,
+                                base_config_for_fitness=optimizer_context_for_fitness, # Context for fitness
+                                logger=self.logger
+                            )
+                            self.logger.info(f"Running NeuralArchitectureSearch for {strategy_class.__name__}.")
+                            # NAS run_optimizer might also expect no direct data args if context is in base_config
+                            best_nas_params = self.nas_optimizer.run_optimizer() 
+                            
+                            if best_nas_params: # NAS might return a dict of params
+                                self.logger.info(f"NeuralArchitectureSearch found best params for {strategy_class.__name__}: {best_nas_params}")
+                                optimized_params_from_optimizer = best_nas_params
+                            else:
+                                self.logger.info(f"NeuralArchitectureSearch did not find improved parameters for {strategy_class.__name__}.")
+                        except Exception as e_nas:
+                            self.logger.error(f"Error during Neural Architecture Search for {strategy_class.__name__}: {e_nas}", exc_info=True)
+                        finally:
+                            self.nas_optimizer = None # Clear instance
+            else:
+                self.logger.warning(f"Unknown optimizer: {optimizer_name}. Skipping optimization.")
+
+        # Apply parameters: Optimized > Initial > Default
+        if optimized_params_from_optimizer is not None:
+            # Optimizer ran and found params. These should override anything set by initial_parameters.
+            # So, we start from defaults, apply initial_parameters, then apply optimized_params.
+            # However, the current_best_params already has defaults + initial_parameters.
+            # We need to ensure optimized_params overwrite keys from initial_parameters if they exist.
+            # The .update() method does this correctly.
+            current_best_params.update(optimized_params_from_optimizer)
+            self.logger.info(f"Applied optimized parameters. Final params for {strategy_class.__name__}: {current_best_params}")
+        elif initial_parameters is not None and not use_optimizer:
+             self.logger.info(f"Using initial parameters (no optimizer run) for {strategy_class.__name__}: {current_best_params}")
+        else: 
+            self.logger.info(f"Using default config parameters for {strategy_class.__name__}: {current_best_params}")
+
+        # 3. Instantiate the strategy
         try:
-            selected_base_strategy_class = random.choice(self.base_strategies)
-        except IndexError:
-            self.logger.error("Base strategies list is empty, cannot select a strategy for generation.")
+            # The final_config already has its default_params set (or empty dict).
+            # The current_best_params are the ones to be used for this instance.
+            # BaseStrategy.__init__ takes `params` which will override `config.default_params`.
+            strategy_instance = strategy_class(config=final_config, params=current_best_params, logger=self.logger)
+            self.logger.info(f"Successfully generated strategy instance of {strategy_class.__name__} with final params: {strategy_instance.params}")
+            return strategy_instance
+        except Exception as e:
+            self.logger.error(f"Failed to instantiate strategy {strategy_class.__name__} with final_config and params: {e}", exc_info=True)
             return None
-        
-        self.logger.info(f"Attempting to generate a new strategy based on {selected_base_strategy_class.__name__}")
 
-        base_config = selected_base_strategy_class.default_config()
-        if not isinstance(base_config, StrategyConfig):
-            self.logger.warning(f"{selected_base_strategy_class.__name__}.default_config() did not return a StrategyConfig object (got {type(base_config)}). Using default StrategyConfig.")
-            base_config = StrategyConfig(name=selected_base_strategy_class.__name__)
+    def _prepare_optimizer_config(self, base_config: Optional[Dict], strategy_class: Type[BaseStrategy], 
+                                  strategy_params: Optional[Dict] = None, optimizer_type: str = "GA") -> Dict:
+        self.logger.debug(f"Preparing optimizer config. Base: {base_config}, Strategy: {strategy_class.__name__}, Params: {strategy_params}, OptType: {optimizer_type}")
         
-        # Placeholder for actual generation logic (e.g., modifying base_config based on market_conditions)
-        # For now, returns the selected class and its (potentially modified) base config
-        # Example modification:
-        # new_params = base_config.default_params.copy()
-        # if 'volatility' in market_conditions and 'window' in new_params:
-        #     new_params['window'] = int(new_params['window'] * (1 + market_conditions['volatility'])) # Adjust window by volatility
-        # generated_config = StrategyConfig(name=f"Dynamic_{selected_base_strategy_class.__name__}", default_params=new_params, ...)
-        
-        # For this iteration, we just return the base class and its default/base config
-        # The layer would then instantiate it.
-        # A more advanced generator might return an already configured *instance* or a new *subclass*.
-        # Returning (Class, Config) seems a reasonable contract for now.
-        self.logger.info(f"Generated strategy config for {selected_base_strategy_class.__name__} (using base config).")
-        return selected_base_strategy_class, base_config
+        final_config = copy.deepcopy(base_config) if base_config else {}
+        if strategy_params is None:
+            strategy_params = {}
 
-    # ... (rest of DynamicStrategyGenerator)
+        # Get parameter space from strategy class - this is the authoritative definition for the current run
+        strategy_class_param_space_list = strategy_class.get_parameter_space(optimizer_type=optimizer_type)
+        if strategy_class_param_space_list is None:
+            strategy_class_param_space_list = []
+
+        strategy_class_param_space_map = {
+            p['name']: p for p in strategy_class_param_space_list if isinstance(p, dict) and 'name' in p
+        }
+
+        # Original parameter space from base_config (for comparison and logging)
+        original_base_param_space_list = base_config.get('parameter_space', []) if base_config else []
+        original_base_param_space_map = {
+            p['name']: p for p in original_base_param_space_list if isinstance(p, dict) and 'name' in p
+        }
+
+        # The final 'parameter_space' for the optimizer will be based on the strategy_class definition
+        final_config['parameter_space'] = copy.deepcopy(strategy_class_param_space_list)
+
+        # Log differences in parameter space definitions (bounds, type, etc.)
+        for name, strat_def in strategy_class_param_space_map.items():
+            if name in original_base_param_space_map:
+                orig_def = original_base_param_space_map[name]
+                diffs = []
+                for field in ['low', 'high', 'step', 'type']: # Add other relevant fields if necessary
+                    strat_val = strat_def.get(field)
+                    orig_val = orig_def.get(field)
+                    if strat_val != orig_val:
+                        diffs.append(f"{field}: strategy '{strat_val}' vs base '{orig_val}'")
+                if diffs:
+                    self.logger.warning(
+                        f"Parameter space definition for '{name}' differs between strategy class and base optimizer_config. "
+                        f"Using strategy class definition. Differences: {'; '.join(diffs)}"
+                    )
+            else:
+                self.logger.info(f"Parameter '{name}' defined by strategy class, not in base optimizer_config's parameter_space.")
+        
+        for name in original_base_param_space_map:
+            if name not in strategy_class_param_space_map:
+                self.logger.info(f"Parameter '{name}' was in base optimizer_config's parameter_space but not defined by strategy class for optimizer type '{optimizer_type}'. It will not be part of the current 'parameter_space'.")
+
+        # Handle strategy_params (specific parameter values)
+        final_config.setdefault('initial_guess', {})
+        final_config.setdefault('fixed_parameters', {}) 
+
+        base_initial_guesses = base_config.get('initial_guess', {}) if base_config else {}
+        base_fixed_params = base_config.get('fixed_parameters', {}) if base_config else {}
+
+        processed_params_for_logging = {} 
+
+        # Populate from base_config's initial_guess and fixed_parameters
+        for name, value in base_initial_guesses.items():
+            if name in strategy_class_param_space_map: 
+                final_config['initial_guess'][name] = value
+                processed_params_for_logging[name] = {'value': value, 'source': "base_config's initial_guess"}
+            else: 
+                final_config['fixed_parameters'][name] = value
+                processed_params_for_logging[name] = {'value': value, 'source': "base_config as fixed_param"}
+        
+        for name, value in base_fixed_params.items():
+            if name in strategy_class_param_space_map and name in final_config['initial_guess']:
+                del final_config['initial_guess'][name] 
+            final_config['fixed_parameters'][name] = value
+            processed_params_for_logging[name] = {'value': value, 'source': "base_config's fixed_parameters"}
+
+
+        # Apply strategy_params, which take highest precedence
+        for name, value_from_strat_params in strategy_params.items():
+            original_value_info = processed_params_for_logging.get(name)
+            log_msg_prefix = f"Parameter '{name}' from strategy_params (value: {value_from_strat_params})"
+
+            if name in strategy_class_param_space_map: 
+                if original_value_info and original_value_info['value'] != value_from_strat_params:
+                    self.logger.info(f"{log_msg_prefix} takes precedence over {original_value_info['source']} (value: {original_value_info['value']})")
+                elif not original_value_info:
+                     self.logger.info(f"{log_msg_prefix} set as initial guess.")
+
+                final_config['initial_guess'][name] = value_from_strat_params
+                if name in final_config['fixed_parameters']: 
+                    del final_config['fixed_parameters'][name]
+                processed_params_for_logging[name] = {'value': value_from_strat_params, 'source': 'strategy_params (as initial_guess)'}
+            else: 
+                if original_value_info and original_value_info['value'] != value_from_strat_params:
+                     self.logger.info(f"{log_msg_prefix} (fixed) takes precedence over {original_value_info['source']} (value: {original_value_info['value']})")
+                elif not original_value_info:
+                    self.logger.info(f"{log_msg_prefix} set as fixed parameter.")
+
+                final_config['fixed_parameters'][name] = value_from_strat_params
+                if name in final_config['initial_guess']: 
+                    del final_config['initial_guess'][name]
+                processed_params_for_logging[name] = {'value': value_from_strat_params, 'source': 'strategy_params (as fixed_param)'}
+
+        # Log final parameter values
+        for name in list(processed_params_for_logging.keys()): # Iterate over a copy of keys
+            info = processed_params_for_logging[name]
+            if name in final_config['initial_guess'] and final_config['initial_guess'][name] == info['value']:
+                 self.logger.info(f"Final initial guess for '{name}' for optimizer: {info['value']}")
+            elif name in final_config['fixed_parameters'] and final_config['fixed_parameters'][name] == info['value']:
+                 self.logger.info(f"Final fixed value for '{name}': {info['value']}")
+            # If a param was in base_config but not overridden and not in strategy_class_param_space_map, it might not be logged here.
+            # This logging focuses on parameters that are actively part of the final_config's 'initial_guess' or 'fixed_parameters'.
+
+        # Ensure 'parameters' field (used by StrategyConfig) is populated with fixed_parameters
+        # It should also include any initial_guess values if the optimizer is not going to tune them (e.g. if optimizer is None)
+        # For now, 'parameters' will be fixed_parameters. StrategyConfig will merge these with optimized params.
+        final_config['parameters'] = final_config.get('fixed_parameters', {}).copy()
+        
+        # Clean up empty dicts if they were added by setdefault
+        if not final_config.get('initial_guess'): # Check if empty or None
+            final_config.pop('initial_guess', None)
+        if not final_config.get('fixed_parameters'):
+            final_config.pop('fixed_parameters', None)
+            if not final_config.get('parameters'): # if fixed_parameters was the only source for parameters
+                 final_config.pop('parameters', None)
+        elif not final_config.get('parameters'): # if fixed_parameters existed but parameters is empty (should not happen due to .copy())
+            final_config.pop('parameters', None)
+
+
+        self.logger.debug(f"Final prepared optimizer config: {final_config}")
+        return final_config

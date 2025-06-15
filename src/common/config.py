@@ -171,12 +171,12 @@ def setup_gpu_optimization():
 GPU_OPTIMIZED = setup_gpu_optimization()
 if torch.cuda.is_available():
     DEVICE = "cuda"
-    print(f"✅ 檢測到CUDA GPU，設備設置為: {DEVICE}")
-    print(f"   - GPU名稱: {torch.cuda.get_device_name(0)}")
-    print(f"   - GPU記憶體: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
+    print(f"CUDA GPU detected, device set to: {DEVICE}")
+    print(f"   - GPU name: {torch.cuda.get_device_name(0)}")
+    print(f"   - GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
 else:
     DEVICE = "cpu"
-    print("⚠️  未檢測到CUDA GPU，使用CPU模式")
+    print("CUDA GPU not detected, using CPU mode")
 
 # 混合精度訓練 (如果GPU支持且希望加速)
 USE_AMP = GPU_OPTIMIZED

@@ -1,0 +1,1 @@
+{"strategies": [{"name": "MomentumStrategy", "params": {"momentum_window": 20}, "input_dim": 32}], "global_strategy_input_dim": 32}

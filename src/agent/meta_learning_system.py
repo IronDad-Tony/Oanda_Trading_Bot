@@ -250,6 +250,189 @@ class AdaptiveStrategyEncoder(nn.Module):
         return self.dimension_history.copy()
 
 
+class MarketKnowledgeBase:
+    """
+    市場知識庫
+    存儲和檢索策略表現、市場狀態等信息
+    """
+    
+    def __init__(self, storage_path: Optional[str] = None):
+        """
+        初始化知識庫
+        
+        Args:
+            storage_path: 知識庫存儲路徑 (可選)
+        """
+        self.storage_path = storage_path
+        self.knowledge: Dict[str, Any] = {}
+        
+        if self.storage_path and os.path.exists(self.storage_path):
+            self.load_knowledge()
+            
+        logger.info(f"市場知識庫已初始化。存儲路徑: {self.storage_path if self.storage_path else '內存存儲'}")
+
+    def store_knowledge(self, key: str, value: Any, persist: bool = False):
+        """
+        存儲知識
+        
+        Args:
+            key: 知識鍵
+            value: 知識值
+            persist: 是否持久化存儲 (如果提供了存儲路徑)
+        """
+        self.knowledge[key] = value
+        logger.debug(f"知識已存儲: Key='{key}', Value='{value}'")
+        
+        if persist and self.storage_path:
+            self.save_knowledge()
+            
+    def retrieve_knowledge(self, key: str) -> Optional[Any]:
+        """
+        檢索知識
+        
+        Args:
+            key: 知識鍵
+            
+        Returns:
+            Optional[Any]: 知識值或 None
+        """
+        value = self.knowledge.get(key)
+        if value is not None:
+            logger.debug(f"知識已檢索: Key='{key}', Value='{value}'")
+        else:
+            logger.debug(f"知識未找到: Key='{key}'")
+        return value
+
+    def save_knowledge(self):
+        """保存知識庫到文件"""
+        if not self.storage_path:
+            logger.warning("未提供存儲路徑，無法保存知識庫")
+            return
+            
+        try:
+            with open(self.storage_path, 'wb') as f:
+                pickle.dump(self.knowledge, f)
+            logger.info(f"知識庫已保存到: {self.storage_path}")
+        except Exception as e:
+            logger.error(f"保存知識庫失敗: {e}")
+
+    def load_knowledge(self):
+        """從文件載入知識庫"""
+        if not self.storage_path or not os.path.exists(self.storage_path):
+            logger.warning(f"存儲文件不存在或未提供路徑: {self.storage_path}")
+            return
+            
+        try:
+            with open(self.storage_path, 'rb') as f:
+                self.knowledge = pickle.load(f)
+            logger.info(f"知識庫已從 {self.storage_path} 載入")
+        except Exception as e:
+            logger.error(f"載入知識庫失敗: {e}")
+
+    def get_all_knowledge_keys(self) -> List[str]:
+        """獲取所有知識鍵"""
+        return list(self.knowledge.keys())
+
+    def clear_knowledge(self, persist: bool = False):
+        """清除所有知識"""
+        self.knowledge.clear()
+        logger.info("知識庫已清除")
+        if persist and self.storage_path:
+            self.save_knowledge() # Save the empty state
+
+    def find_similar_market_conditions(self, current_market_state: Dict[str, Any], 
+                                     similarity_threshold: float = 0.8) -> List[Dict[str, Any]]:
+        """
+        Find similar market conditions in the knowledge base for cross-market knowledge transfer.
+        
+        Args:
+            current_market_state (Dict[str, Any]): Current market conditions to match against
+            similarity_threshold (float): Minimum similarity score to consider a match
+            
+        Returns:
+            List[Dict[str, Any]]: List of similar market conditions and their associated knowledge
+        """
+        similar_conditions = []
+        
+        if not current_market_state:
+            logger.warning("No current market state provided for similarity search")
+            return similar_conditions
+        
+        # Extract current regime information
+        current_regime = current_market_state.get('current_regime', {})
+        current_volatility = current_regime.get('volatility_level', 'unknown')
+        current_trend = current_regime.get('trend_strength', 'unknown')
+        current_macro = current_regime.get('macro_regime', 'unknown')
+        
+        # Convert enums to string values for comparison
+        if hasattr(current_volatility, 'value'):
+            current_volatility = current_volatility.value
+        if hasattr(current_trend, 'value'):
+            current_trend = current_trend.value  
+        if hasattr(current_macro, 'value'):
+            current_macro = current_macro.value
+            
+        logger.debug(f"Searching for similar conditions to: volatility={current_volatility}, "
+                    f"trend={current_trend}, macro={current_macro}")
+        
+        # Search through stored knowledge
+        for key, value in self.knowledge.items():
+            if 'regime_' in key and isinstance(value, dict):
+                # Extract regime information from knowledge key
+                key_parts = key.split('_regime_')
+                if len(key_parts) > 1:
+                    regime_str = key_parts[1]
+                    
+                    # Parse regime string to extract components
+                    # Expected format: "volatility_level_medium_trend_strength_weak_trend_macro_regime_ranging"
+                    similarity_score = 0.0
+                    matches = 0
+                    
+                    if f"volatility_level_{current_volatility}".lower() in regime_str.lower():
+                        similarity_score += 0.4
+                        matches += 1
+                    elif any(vol in regime_str.lower() for vol in ['low', 'medium', 'high']):
+                        similarity_score += 0.1  # Partial match for different volatility levels
+                        
+                    if f"trend_strength_{current_trend}".lower() in regime_str.lower():
+                        similarity_score += 0.4
+                        matches += 1
+                    elif any(trend in regime_str.lower() for trend in ['no_trend', 'weak_trend', 'strong_trend']):
+                        similarity_score += 0.1  # Partial match for different trend strengths
+                        
+                    if f"macro_regime_{current_macro}".lower() in regime_str.lower():
+                        similarity_score += 0.2
+                        matches += 1
+                    elif any(macro in regime_str.lower() for macro in ['bullish', 'bearish', 'ranging']):
+                        similarity_score += 0.05  # Partial match for different macro regimes
+                    
+                    # Bonus for exact matches on multiple dimensions
+                    if matches >= 2:
+                        similarity_score += 0.1
+                    if matches == 3:
+                        similarity_score += 0.1
+                    
+                    # Only include if above threshold
+                    if similarity_score >= similarity_threshold:
+                        similar_conditions.append({
+                            'knowledge_key': key,
+                            'similarity_score': similarity_score,
+                            'regime_string': regime_str,
+                            'knowledge_value': value,
+                            'exact_matches': matches
+                        })
+                        
+                        logger.debug(f"Found similar condition: {regime_str} (similarity: {similarity_score:.2f})")
+        
+        # Sort by similarity score (highest first)
+        similar_conditions.sort(key=lambda x: x['similarity_score'], reverse=True)
+        
+        logger.info(f"Found {len(similar_conditions)} similar market conditions "
+                   f"(threshold: {similarity_threshold})")
+        
+        return similar_conditions
+
+
 class MetaLearningSystem(nn.Module):
     """
     自適應元學習系統
@@ -258,7 +441,8 @@ class MetaLearningSystem(nn.Module):
     
     def __init__(self, initial_state_dim: int, action_dim: int,
                  meta_learning_dim: int = 256,
-                 config_detection_methods: List[str] = None):
+                 config_detection_methods: List[str] = None,
+                 knowledge_base: Optional[MarketKnowledgeBase] = None): # Added knowledge_base parameter
         super().__init__()
         
         self.initial_state_dim = initial_state_dim
@@ -308,6 +492,9 @@ class MetaLearningSystem(nn.Module):
         self.config_history = []
         self.dimension_changes = []
         self.adaptation_history = []  # 添加適應歷史記錄
+        
+        # 初始化知識庫
+        self.knowledge_base = knowledge_base if knowledge_base is not None else MarketKnowledgeBase()
         
         # 性能指標
         self.register_buffer('adaptation_success_rate', torch.tensor(0.0))
@@ -797,6 +984,297 @@ class MetaLearningSystem(nn.Module):
             'event_types': event_types,
             'recent_events': recent_events
         }
+    
+    def evaluate_strategy_performance(self,
+                                      strategy_id: str,
+                                      trade_history: List[Dict[str, Any]],
+                                      market_conditions: Optional[Dict[str, Any]] = None,
+                                      risk_free_rate_annual: float = 0.0 # Annual risk-free rate
+                                      ) -> Dict[str, float]:
+        """
+        Evaluates the performance of a given strategy based on its trade history
+        and current market conditions.
+
+        Args:
+            strategy_id (str): Identifier for the strategy.
+            trade_history (List[Dict[str, Any]]): List of trades. Each dict should contain
+                at least 'pnl' (profit and loss for the trade/period).
+                It's assumed that PnLs are for comparable periods if calculating annualized ratios.
+                For simplicity, we'll treat PnLs as per-period returns for ratio calculations.
+                A 'duration_days' field could be added to each trade for more accurate annualization.
+            market_conditions (Optional[Dict[str, Any]]): Current market regime, volatility, etc.
+            risk_free_rate_annual (float): Annual risk-free rate for Sharpe/Sortino calculations.
+
+        Returns:
+            Dict[str, float]: A dictionary of performance metrics.
+        """
+        logger.debug(f"Evaluating performance for strategy: {strategy_id}")
+        if not trade_history:
+            logger.warning(f"No trade history for strategy {strategy_id}. Returning zero metrics.")
+            return {
+                "total_pnl": 0.0,
+                "avg_pnl_per_trade": 0.0,
+                "sharpe_ratio": 0.0,
+                "sortino_ratio": 0.0,
+                "win_rate": 0.0,
+                "loss_rate": 0.0,
+                "profit_factor": 0.0,
+                "trade_count": 0.0,
+                "consistency_score": 0.0, # Lower is better (less variation relative to mean)
+                "adaptability_score": 0.0  # Placeholder
+            }
+
+        pnl_values = np.array([trade.get('pnl', 0.0) for trade in trade_history])
+        num_trades = len(pnl_values)
+
+        total_pnl = np.sum(pnl_values)
+        avg_pnl = np.mean(pnl_values) if num_trades > 0 else 0.0
+
+        winning_trades = np.sum(pnl_values > 0)
+        losing_trades = np.sum(pnl_values < 0)
+        
+        win_rate = (winning_trades / num_trades) if num_trades > 0 else 0.0
+        loss_rate = (losing_trades / num_trades) if num_trades > 0 else 0.0
+
+        total_profit_from_wins = np.sum(pnl_values[pnl_values > 0])
+        total_loss_from_losses = abs(np.sum(pnl_values[pnl_values < 0]))
+        profit_factor = (total_profit_from_wins / total_loss_from_losses) if total_loss_from_losses > 0 else np.inf
+
+        # For Sharpe and Sortino, assume pnl_values are returns for some period (e.g., per trade)
+        # To annualize, we'd need to know the number of trading periods in a year.
+        # For simplicity, let's assume 'periods_in_year' = 252 (trading days) if PnLs were daily.
+        # If PnLs are per trade, annualization is more complex.
+        # Here, we calculate non-annualized ratios based on the provided PnLs as returns.
+        # The risk_free_rate_annual should be converted to a per-period rate.
+        # Assuming PnLs are per-trade and we don't have a fixed "period", we use a simplified approach.
+        # Let's assume risk_free_rate_per_period = 0 for now for simplicity, or it needs to be passed.
+        
+        std_dev_pnl = np.std(pnl_values) if num_trades > 1 else 0.0
+
+        # Simplified Sharpe: (Mean PnL per trade) / (Std Dev of PnL per trade)
+        # Assuming risk-free rate per trade is negligible or handled by PnL definition.
+        sharpe_ratio = (avg_pnl / std_dev_pnl) if std_dev_pnl > 0 else 0.0
+        if num_trades <= 1: sharpe_ratio = 0.0
+
+
+        negative_pnls = pnl_values[pnl_values < 0]
+        downside_std_dev = np.std(negative_pnls) if len(negative_pnls) > 1 else 0.0
+        
+        # Simplified Sortino: (Mean PnL per trade) / (Downside Std Dev of PnL per trade)
+        sortino_ratio = (avg_pnl / downside_std_dev) if downside_std_dev > 0 else 0.0
+        if num_trades <=1 or len(negative_pnls) <=1 : sortino_ratio = 0.0
+
+
+        # Consistency Score: Coefficient of Variation (lower is better for positive avg_pnl)
+        # We want higher score for better consistency.
+        # If avg_pnl is positive, consistency = 1 / (1 + CoV) = 1 / (1 + std_dev_pnl / avg_pnl)
+        # If avg_pnl is zero or negative, consistency is low.
+        consistency_score = 0.0
+        if avg_pnl > 0 and std_dev_pnl >= 0: # std_dev_pnl can be 0 if all PnLs are same
+            if std_dev_pnl == 0 : # Perfect consistency if all PnLs are same and positive
+                 consistency_score = 1.0
+            else:
+                coefficient_of_variation = std_dev_pnl / avg_pnl
+                consistency_score = 1.0 / (1.0 + coefficient_of_variation)
+        elif num_trades > 0 and avg_pnl == 0 and std_dev_pnl == 0: # All zero PnLs
+             consistency_score = 0.5 # Neutral consistency for zero PnLs
+
+        # Store this performance in knowledge base
+        knowledge_key = f"strategy_performance_{strategy_id}"
+        current_regime_str = "unknown_regime"
+        if market_conditions and market_conditions.get('current_regime'):
+            # Attempt to create a string representation of the regime
+            regime_details = market_conditions['current_regime']
+            if isinstance(regime_details, dict):
+                # Example: {'volatility_level': VolatilityLevel.HIGH, 'trend_strength': TrendStrength.STRONG}
+                # Convert enums to their values for a cleaner string
+                regime_parts = []
+                for r_key, r_val in regime_details.items():
+                    if hasattr(r_val, 'value'): # Check if it's an enum with a .value attribute
+                        regime_parts.append(f"{r_key}_{r_val.value}")
+                    else:
+                        regime_parts.append(f"{r_key}_{str(r_val)}")
+                current_regime_str = "_".join(regime_parts)
+            else: # If it's not a dict, just convert to string
+                current_regime_str = str(regime_details)
+            
+            current_regime_str = current_regime_str.replace(" ", "_").replace("'", "").replace(":", "_").replace("{", "").replace("}", "").lower()
+            knowledge_key += f"_regime_{current_regime_str}"
+        
+        performance_metrics = {
+            "total_pnl": float(total_pnl),
+            "avg_pnl_per_trade": float(avg_pnl),
+            "sharpe_ratio": float(sharpe_ratio),
+            "sortino_ratio": float(sortino_ratio),
+            "win_rate": float(win_rate),
+            "loss_rate": float(loss_rate),
+            "profit_factor": float(profit_factor) if profit_factor != np.inf else 1000.0, # Cap inf profit factor
+            "trade_count": float(num_trades),
+            "consistency_score": float(consistency_score),
+            "adaptability_score": 0.5  # Placeholder, needs proper calculation
+        }
+        self.knowledge_base.store_knowledge(knowledge_key, performance_metrics)
+        
+        logger.info(f"Performance for strategy {strategy_id} (Regime: {current_regime_str}): {performance_metrics}")
+        return performance_metrics
+
+    def adapt_strategies(self, 
+                        current_market_state: Dict[str, Any],
+                        performance_evaluations: Dict[str, Dict[str, float]],
+                        adaptation_threshold: float = 0.3) -> Dict[str, Any]:
+        """
+        Automatically adjust strategies based on market state and strategy evaluation results.
+        
+        Args:
+            current_market_state (Dict[str, Any]): Current market conditions including regime, volatility, etc.
+            performance_evaluations (Dict[str, Dict[str, float]]): Strategy performance metrics from evaluate_strategy_performance
+            adaptation_threshold (float): Minimum performance threshold to trigger adaptations
+            
+        Returns:
+            Dict[str, Any]: Adaptation recommendations and changes made
+        """
+        logger.info("Starting strategy adaptation based on market state and performance evaluations...")
+        
+        adaptations = {
+            "timestamp": datetime.now().isoformat(),
+            "market_state": current_market_state,
+            "adaptations_made": [],
+            "recommendations": [],
+            "performance_summary": {}
+        }
+        
+        # Analyze overall performance
+        if performance_evaluations:
+            avg_sharpe = np.mean([metrics.get('sharpe_ratio', 0.0) for metrics in performance_evaluations.values()])
+            avg_win_rate = np.mean([metrics.get('win_rate', 0.0) for metrics in performance_evaluations.values()])
+            total_trades = sum([metrics.get('trade_count', 0.0) for metrics in performance_evaluations.values()])
+            
+            adaptations["performance_summary"] = {
+                "avg_sharpe_ratio": float(avg_sharpe),
+                "avg_win_rate": float(avg_win_rate),
+                "total_trades": float(total_trades),
+                "num_strategies_evaluated": len(performance_evaluations)
+            }
+            
+            # Identify underperforming strategies
+            underperforming = []
+            high_performing = []
+            
+            for strategy_id, metrics in performance_evaluations.items():
+                sharpe = metrics.get('sharpe_ratio', 0.0)
+                win_rate = metrics.get('win_rate', 0.0)
+                
+                if sharpe < adaptation_threshold and win_rate < 0.5:
+                    underperforming.append((strategy_id, metrics))
+                elif sharpe > adaptation_threshold * 2 and win_rate > 0.6:
+                    high_performing.append((strategy_id, metrics))
+            
+            # Generate adaptation recommendations based on market state
+            regime = current_market_state.get('current_regime', {})
+            volatility = regime.get('volatility_level', 'unknown')
+            trend_strength = regime.get('trend_strength', 'unknown')
+            macro_regime = regime.get('macro_regime', 'unknown')
+            
+            # Market-state specific adaptations
+            if hasattr(volatility, 'value'):
+                volatility = volatility.value
+            if hasattr(trend_strength, 'value'):
+                trend_strength = trend_strength.value
+            if hasattr(macro_regime, 'value'):
+                macro_regime = macro_regime.value
+                
+            # High volatility adaptations
+            if 'high' in str(volatility).lower():
+                adaptations["recommendations"].append({
+                    "type": "risk_management",
+                    "reason": "High volatility detected",
+                    "action": "Reduce position sizes and increase stop-loss sensitivity",
+                    "affected_strategies": [s[0] for s in underperforming]
+                })
+                
+                adaptations["adaptations_made"].append({
+                    "type": "parameter_adjustment",
+                    "parameter": "risk_multiplier",
+                    "old_value": 1.0,
+                    "new_value": 0.7,
+                    "reason": "High volatility adaptation"
+                })
+            
+            # Strong trend adaptations
+            if 'strong' in str(trend_strength).lower():
+                adaptations["recommendations"].append({
+                    "type": "strategy_weighting",
+                    "reason": "Strong trend detected",
+                    "action": "Increase weight on trend-following strategies",
+                    "boost_strategies": ["TrendFollowingStrategy", "MomentumStrategy", "BreakoutStrategy"]
+                })
+                
+            # Low trend (ranging market) adaptations
+            elif 'no' in str(trend_strength).lower() or 'weak' in str(trend_strength).lower():
+                adaptations["recommendations"].append({
+                    "type": "strategy_weighting", 
+                    "reason": "Weak/No trend detected (ranging market)",
+                    "action": "Increase weight on mean reversion and statistical arbitrage strategies",
+                    "boost_strategies": ["MeanReversionStrategy", "StatisticalArbitrageStrategy", "PairsTradingStrategy"]
+                })
+            
+            # Underperforming strategy adaptations
+            if underperforming:
+                adaptations["recommendations"].append({
+                    "type": "strategy_replacement",
+                    "reason": f"Strategies underperforming (Sharpe < {adaptation_threshold})",
+                    "action": "Consider reducing weight or replacing with high-performing alternatives",
+                    "underperforming_strategies": [s[0] for s in underperforming],
+                    "suggested_replacements": [s[0] for s in high_performing[:2]]  # Top 2 performers
+                })
+                
+                # Adaptive learning rate adjustment for underperforming strategies
+                for strategy_id, metrics in underperforming:
+                    adaptations["adaptations_made"].append({
+                        "type": "learning_rate_adjustment",
+                        "strategy": strategy_id,
+                        "old_lr": "default",
+                        "new_lr": "reduced_50%",
+                        "reason": f"Poor performance: Sharpe={metrics.get('sharpe_ratio', 0.0):.3f}"
+                    })
+            
+            # Cross-market knowledge transfer
+            if self.knowledge_base:
+                similar_conditions = self.knowledge_base.find_similar_market_conditions(current_market_state)
+                if similar_conditions:
+                    adaptations["recommendations"].append({
+                        "type": "knowledge_transfer",
+                        "reason": "Similar market conditions found in knowledge base",
+                        "action": "Apply insights from similar historical periods",
+                        "historical_matches": len(similar_conditions),
+                        "suggested_adjustments": "Use proven strategy combinations from similar regimes"
+                    })
+        
+        else:
+            adaptations["recommendations"].append({
+                "type": "data_collection",
+                "reason": "No performance evaluations provided",
+                "action": "Collect more trading data before making adaptations"
+            })
+        
+        # Store adaptation in knowledge base
+        if self.knowledge_base:
+            adaptation_key = f"adaptation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            self.knowledge_base.store_knowledge(adaptation_key, adaptations)
+            
+        # Update adaptation history
+        self.adaptation_history.append(adaptations)
+        
+        # Update success metrics (simplified)
+        if len(adaptations["adaptations_made"]) > 0:
+            self.total_adaptations += 1
+            # Simplified success tracking - could be more sophisticated
+            self.adaptation_success_rate = (self.adaptation_success_rate * (self.total_adaptations - 1) + 1.0) / self.total_adaptations
+        
+        logger.info(f"Strategy adaptation completed. Made {len(adaptations['adaptations_made'])} adaptations, "
+                   f"{len(adaptations['recommendations'])} recommendations.")
+        
+        return adaptations
 
 
 # 測試函數
@@ -936,3 +1414,136 @@ if __name__ == "__main__":
         print("\n✅ 自適應元學習系統測試成功！")
     else:
         print("\n❌ 自適應元學習系統測試失敗！")
+    
+    import numpy as np # Required for std in evaluate_strategy_performance
+    logging.basicConfig(level=logging.DEBUG)
+    logger.info("----- Testing MetaLearningSystem -----")
+
+    # Instantiate MarketKnowledgeBase first
+    kb = MarketKnowledgeBase()
+    
+    # Instantiate MetaLearningSystem
+    mls = MetaLearningSystem(initial_state_dim=64, action_dim=10, meta_learning_dim=128)
+    mls.knowledge_base = kb # Assign the kb instance to the mls instance
+
+    # Mock MarketRegimeIdentifier and its output
+    class MockVolatilityLevel:
+        HIGH = "High"
+        MEDIUM = "Medium"
+        LOW = "Low"
+
+    class MockTrendStrength:
+        STRONG = "Strong"
+        WEAK = "Weak"
+        NO_TREND = "No_Trend"
+    
+    class MockMacroRegime:
+        BULLISH = "Bullish"
+        BEARISH = "Bearish"
+        RANGING = "Ranging"
+
+
+    # 1. Test MarketKnowledgeBase
+    logger.info("Testing MarketKnowledgeBase...")
+    kb = MarketKnowledgeBase()
+    assert kb is not None
+    
+    # Test storing and retrieving knowledge
+    sample_performance_data = {
+        "total_pnl": 1000.0,
+        "avg_pnl_per_trade": 50.0,
+        "sharpe_ratio": 1.5,
+        "sortino_ratio": 2.0,
+        "win_rate": 0.8,
+        "loss_rate": 0.2,
+        "profit_factor": 4.0,
+        "trade_count": 20,
+        "consistency_score": 0.9
+    }
+    kb.store_knowledge("strategy_performance_TestStrategy", sample_performance_data)
+    
+    retrieved_data = kb.retrieve_knowledge("strategy_performance_TestStrategy")
+    logger.info(f"Retrieved data: {retrieved_data}")
+    assert retrieved_data is not None
+    assert retrieved_data["total_pnl"] == 1000.0
+    
+    # Test strategy performance evaluation
+    sample_trade_history_1 = [
+        {'pnl': 10}, {'pnl': -5}, {'pnl': 15}, {'pnl': 2} # Total PnL = 22, Avg PnL = 5.5
+    ]
+    market_cond_test_1 = {
+        'current_regime': {
+            'volatility_level': MockVolatilityLevel.HIGH, 
+            'trend_strength': MockTrendStrength.STRONG, 
+            'macro_regime': MockMacroRegime.BULLISH
+            }
+    }
+    perf_metrics_1 = mls.evaluate_strategy_performance("StrategyAlpha", sample_trade_history_1, market_cond_test_1)
+    logger.info(f"Performance metrics for StrategyAlpha (Test 1): {perf_metrics_1}")
+    assert perf_metrics_1["trade_count"] == 4
+    assert abs(perf_metrics_1["total_pnl"] - 22) < 1e-6
+    assert abs(perf_metrics_1["avg_pnl_per_trade"] - 5.5) < 1e-6
+    assert perf_metrics_1["win_rate"] == 0.75 # 3 wins / 4 trades
+    assert perf_metrics_1["loss_rate"] == 0.25 # 1 loss / 4 trades
+    # Total wins = 10+15+2 = 27. Total loss = 5. Profit factor = 27/5 = 5.4
+    assert abs(perf_metrics_1["profit_factor"] - 5.4) < 1e-6 
+
+
+    # Check KB storage for Test 1
+    regime_details_1 = market_cond_test_1['current_regime']
+    regime_str_for_key_1 = f"volatility_level_{regime_details_1['volatility_level'].lower()}_trend_strength_{regime_details_1['trend_strength'].lower()}_macro_regime_{regime_details_1['macro_regime'].lower()}"
+    expected_kb_key_1 = f"strategy_performance_StrategyAlpha_regime_{regime_str_for_key_1}"
+    
+    stored_perf_1 = kb.retrieve_knowledge(expected_kb_key_1)
+    logger.info(f"Attempting to retrieve stored performance (Test 1) with key: {expected_kb_key_1}")
+    assert stored_perf_1 is not None, f"Key not found in KB: {expected_kb_key_1}"
+    assert stored_perf_1["total_pnl"] == perf_metrics_1["total_pnl"]
+    logger.info(f"Successfully retrieved stored performance from KB (Test 1): {stored_perf_1}")
+
+    # Test with all positive PnLs for consistency
+    sample_trade_history_2 = [{'pnl': 10}, {'pnl': 12}, {'pnl': 11}, {'pnl': 13}] # Avg=11.5, Std=1.118
+    perf_metrics_2 = mls.evaluate_strategy_performance("StrategyBeta", sample_trade_history_2, market_cond_test_1)
+    logger.info(f"Performance metrics for StrategyBeta (Test 2 - all positive): {perf_metrics_2}")
+    assert perf_metrics_2["win_rate"] == 1.0
+    assert perf_metrics_2["loss_rate"] == 0.0
+    assert perf_metrics_2["profit_factor"] == 1000.0 # No losses, capped at 1000
+    assert perf_metrics_2["consistency_score"] > 0.8 # Should be high
+
+    # Test with identical PnLs for perfect consistency
+    sample_trade_history_3 = [{'pnl': 5}, {'pnl': 5}, {'pnl': 5}]
+    perf_metrics_3 = mls.evaluate_strategy_performance("StrategyGamma", sample_trade_history_3, market_cond_test_1)
+    logger.info(f"Performance metrics for StrategyGamma (Test 3 - identical PnLs): {perf_metrics_3}")
+    assert abs(perf_metrics_3["consistency_score"] - 1.0) < 1e-6
+
+    # Test with zero PnLs
+    sample_trade_history_4 = [{'pnl': 0}, {'pnl': 0}, {'pnl': 0}]
+    perf_metrics_4 = mls.evaluate_strategy_performance("StrategyDelta", sample_trade_history_4, market_cond_test_1)
+    logger.info(f"Performance metrics for StrategyDelta (Test 4 - zero PnLs): {perf_metrics_4}")
+    assert abs(perf_metrics_4["consistency_score"] - 0.5) < 1e-6 # Neutral consistency
+    assert abs(perf_metrics_4["sharpe_ratio"] - 0.0) < 1e-6
+    assert abs(perf_metrics_4["sortino_ratio"] - 0.0) < 1e-6
+    assert abs(perf_metrics_4["profit_factor"] - 0.0) < 1e-6 # No wins, no losses
+
+    # Test with negative average PnL
+    sample_trade_history_5 = [{'pnl': -2}, {'pnl': -3}, {'pnl': -1}]
+    perf_metrics_5 = mls.evaluate_strategy_performance("StrategyEpsilon", sample_trade_history_5, market_cond_test_1)
+    logger.info(f"Performance metrics for StrategyEpsilon (Test 5 - negative avg PnL): {perf_metrics_5}")
+    assert perf_metrics_5["consistency_score"] == 0.0 # Low consistency for negative avg PnL
+    assert perf_metrics_5["profit_factor"] == 0.0 # No wins
+
+    # Test with single trade
+    sample_trade_history_6 = [{'pnl': 10}]
+    perf_metrics_6 = mls.evaluate_strategy_performance("StrategyZeta", sample_trade_history_6, market_cond_test_1)
+    logger.info(f"Performance metrics for StrategyZeta (Test 6 - single trade): {perf_metrics_6}")
+    assert perf_metrics_6["sharpe_ratio"] == 0.0
+    assert perf_metrics_6["sortino_ratio"] == 0.0
+    assert abs(perf_metrics_6["consistency_score"] - 1.0) < 1e-6 # Single trade, perfect consistency by this metric
+
+    # Test empty trade history
+    sample_trade_history_7 = []
+    perf_metrics_7 = mls.evaluate_strategy_performance("StrategyEta", sample_trade_history_7, market_cond_test_1)
+    logger.info(f"Performance metrics for StrategyEta (Test 7 - empty history): {perf_metrics_7}")
+    assert perf_metrics_7["trade_count"] == 0.0
+    assert perf_metrics_7["consistency_score"] == 0.0
+
+    logger.info("----- MetaLearningSystem Tests Passed (enhanced evaluation) -----")

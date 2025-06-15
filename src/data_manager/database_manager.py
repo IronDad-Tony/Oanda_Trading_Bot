@@ -93,14 +93,14 @@ def get_db_connection() -> sqlite3.Connection:
 
 def create_tables_if_not_exist():
     """
-    檢查並創建專案所需的資料庫表 (如果它們還不存在)。
+    Check and create database tables if they don't exist.
     """
-    logger.info(f"檢查並初始化資料庫表於: {DATABASE_PATH}")
+    logger.info(f"Checking and initializing database tables at: {DATABASE_PATH}")
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # 歷史價格數據表
+            # Historical price data table
             price_cols_for_sql = []
             for col in PRICE_COLUMNS:
                 if col not in ['symbol', 'time', 'granularity', 'volume']:
@@ -172,14 +172,14 @@ def create_tables_if_not_exist():
             );
             """
             cursor.execute(create_model_registry_table_sql)
-            logger.debug(f"表 '{TABLE_MODEL_REGISTRY}' 已檢查/創建。")
+            logger.debug(f"Table '{TABLE_MODEL_REGISTRY}' checked/created.")
 
             conn.commit()
-        logger.info("資料庫表初始化完成。")
+        logger.info("Database tables initialization completed.")
     except sqlite3.Error as e:
-        logger.error(f"創建資料庫表時發生 SQLite 錯誤: {e}", exc_info=True)
+        logger.error(f"SQLite error when creating database tables: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"創建資料庫表時發生未知錯誤: {e}", exc_info=True)
+        logger.error(f"Unknown error when creating database tables: {e}", exc_info=True)
 
 # ... (insert_historical_data, query_historical_data, update_download_metadata, get_download_metadata, register_model, get_model_registry_entry 函數保持不變，
 #      但它們現在會使用正確導入的 logger 和 DATABASE_PATH)

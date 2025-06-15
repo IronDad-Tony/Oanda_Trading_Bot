@@ -1,0 +1,34 @@
+{
+    "symbols": [
+        {
+            "name": "EUR_USD",
+            "granularity": "S5",
+            "max_lookback_days": 30,
+            "tradable": true
+        },
+        {
+            "name": "USD_JPY",
+            "granularity": "S5",
+            "max_lookback_days": 30,
+            "tradable": true
+        }
+    ],
+    "data_source": "oanda",
+    "account_currency": "AUD",
+    "initial_capital": 100000.0,
+    "max_concurrent_trades": 2,
+    "global_stop_loss_percentage": 0.1,
+    "global_take_profit_percentage": 0.2,
+    "feature_config": {
+        "use_time_features": true,
+        "use_fourier_features": false,
+        "use_wavelet_features": false
+    },
+    "reward_config": {
+        "balance_change_weight": 1.0,
+        "risk_adjusted_return_weight": 0.5,
+        "drawdown_penalty_weight": 0.2,
+        "trade_frequency_penalty_weight": 0.01,
+        "holding_period_penalty_weight": 0.01
+    }
+}

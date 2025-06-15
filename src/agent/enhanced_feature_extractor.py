@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 import numpy as np
 
 try:
-    from src.models.enhanced_transformer import EnhancedUniversalTradingTransformer
+    from src.models.enhanced_transformer import EnhancedTransformer as EnhancedUniversalTradingTransformer
     from src.common.config import (
         MAX_SYMBOLS_ALLOWED,
         TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, 
@@ -33,7 +33,7 @@ except ImportError as e:
     import os
     sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
     try:
-        from src.models.enhanced_transformer import EnhancedUniversalTradingTransformer
+        from src.models.enhanced_transformer import EnhancedTransformer as EnhancedUniversalTradingTransformer
         from src.common.config import (
             MAX_SYMBOLS_ALLOWED,
             TRANSFORMER_OUTPUT_DIM_PER_SYMBOL, 
@@ -100,24 +100,27 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         logger.info(f"增強版特徵提取器設備設置: {device}")
         if device.type == 'cuda':
             logger.info(f"- GPU名稱: {torch.cuda.get_device_name(device)}")
-            logger.info(f"- GPU記憶體: {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f}GB")
-            
+            logger.info(f"- GPU記憶體: {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f}GB")        # 從model_config中提取配置值，如果沒有則使用默認值
+        d_model = model_config.get('hidden_dim', TRANSFORMER_MODEL_DIM) if model_config else TRANSFORMER_MODEL_DIM
+        num_encoder_layers = model_config.get('num_layers', TRANSFORMER_NUM_LAYERS) if model_config else TRANSFORMER_NUM_LAYERS
+        transformer_nhead = model_config.get('num_heads', TRANSFORMER_NUM_HEADS) if model_config else TRANSFORMER_NUM_HEADS
+        dim_feedforward = model_config.get('intermediate_dim', TRANSFORMER_FFN_DIM) if model_config else TRANSFORMER_FFN_DIM
+        dropout = model_config.get('dropout_rate', TRANSFORMER_DROPOUT_RATE) if model_config else TRANSFORMER_DROPOUT_RATE
+        max_seq_len = model_config.get('max_sequence_length', observation_space.spaces["features_from_dataset"].shape[1]) if model_config else observation_space.spaces["features_from_dataset"].shape[1]
+        
         # 初始化增強版Transformer模型
-        # Pass the received model_config to the EnhancedUniversalTradingTransformer
         self.enhanced_transformer = EnhancedUniversalTradingTransformer(
-            num_input_features=observation_space.spaces["features_from_dataset"].shape[2],
-            num_symbols_possible=MAX_SYMBOLS_ALLOWED,
-            model_config=model_config,  # PASS THE MODEL_CONFIG HERE
-            # Default values below will be overridden by model_config if provided to EnhancedUniversalTradingTransformer
-            model_dim=TRANSFORMER_MODEL_DIM, # Default, will be overridden by model_config if model_config['hidden_dim'] exists
-            num_layers=TRANSFORMER_NUM_LAYERS, # Default, will be overridden by model_config if model_config['num_layers'] exists
-            num_heads=TRANSFORMER_NUM_HEADS, # Default, will be overridden by model_config if model_config['num_heads'] exists
-            ffn_dim=TRANSFORMER_FFN_DIM, # Default, will be overridden by model_config if model_config['intermediate_dim'] exists
-            dropout_rate=TRANSFORMER_DROPOUT_RATE, # Default, will be overridden by model_config if model_config['dropout_rate'] exists
-            max_seq_len=observation_space.spaces["features_from_dataset"].shape[1], # Default, will be overridden by model_config if model_config['max_sequence_length'] exists
-            output_dim_per_symbol=enhanced_transformer_output_dim_per_symbol, # This is passed directly
-            use_multi_scale=ENHANCED_TRANSFORMER_USE_MULTI_SCALE,
-            use_cross_time_fusion=ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION
+            input_dim=observation_space.spaces["features_from_dataset"].shape[2],
+            d_model=d_model,
+            transformer_nhead=transformer_nhead,
+            num_encoder_layers=num_encoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            max_seq_len=max_seq_len,
+            num_symbols=MAX_SYMBOLS_ALLOWED,
+            output_dim=enhanced_transformer_output_dim_per_symbol,
+            use_msfe=ENHANCED_TRANSFORMER_USE_MULTI_SCALE,
+            use_cts_fusion=ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION
         ).to(device)
         
         # Get the actual config used by the transformer for logging

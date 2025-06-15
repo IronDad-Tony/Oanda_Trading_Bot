@@ -27,7 +27,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
-    from src.models.enhanced_transformer import EnhancedUniversalTradingTransformer
+    from src.models.enhanced_transformer import EnhancedTransformer as EnhancedUniversalTradingTransformer
     from src.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
     from src.environment.progressive_learning_system import ProgressiveLearningSystem, LearningStage
     from src.environment.progressive_reward_calculator import ProgressiveRewardCalculator

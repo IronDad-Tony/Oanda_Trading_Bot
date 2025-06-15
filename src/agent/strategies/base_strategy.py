@@ -6,6 +6,7 @@ from typing import Dict, Optional, Any, List
 from dataclasses import dataclass, field, asdict # MODIFIED: Import asdict
 import logging # Import logging
 import torch # ADDED: Import torch
+import copy # ADDED
 
 # Attempt to import the project-specific logger
 try:
@@ -31,6 +32,9 @@ class StrategyConfig:
     # ADDED: To hold strategy-specific parameter overrides at the layer configuration level
     strategy_specific_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     input_dim: Optional[int] = None # ADDED: Input dimension for the strategy
+
+    def copy(self) -> 'StrategyConfig': # ADDED
+        return copy.deepcopy(self)
 
     @staticmethod
     def merge_configs(base: 'StrategyConfig', override: 'StrategyConfig') -> 'StrategyConfig':
@@ -90,14 +94,14 @@ class BaseStrategy(ABC, torch.nn.Module): # MODIFIED: Inherit from torch.nn.Modu
         # Ensure default_params from config is a dictionary
         effective_params_temp = {} 
         if hasattr(self.config, 'default_params') and isinstance(self.config.default_params, dict):
-            effective_params_temp.update(self.config.default_params)
+            effective_params_temp = self.config.default_params.copy() # Use a copy
         else:
             self.logger.debug(f"Strategy {self.config.name}: config.default_params is not a dict or missing. Starting with empty default_params.")
 
         # Override/add with instance-specific params, performing type coercion if possible
         if params is not None and isinstance(params, dict):
             for key, value in params.items():
-                if key in effective_params_temp:
+                if key in effective_params_temp: # Key is known from default_params
                     default_value_from_config = effective_params_temp[key]
                     if type(default_value_from_config) != type(value) and value is not None:
                         try:
@@ -110,8 +114,9 @@ class BaseStrategy(ABC, torch.nn.Module): # MODIFIED: Inherit from torch.nn.Modu
                             effective_params_temp[key] = value # Use original value if coercion fails
                     else:
                         effective_params_temp[key] = value # Update with new value (same type or None)
-                else:
+                else: # Key is new / not in default_params
                     effective_params_temp[key] = value # Add new param
+                    self.logger.warning(f"Strategy {self.config.name}: Received unexpected parameter '{key}' with value '{value}'. It will be included.")
 
         self.params = effective_params_temp # Store the final effective parameters
 

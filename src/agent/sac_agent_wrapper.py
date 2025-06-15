@@ -74,7 +74,7 @@ except ImportError:
 
 # Attempt to import QuantumEnhancedTransformer, handling potential import errors
 try:
-    from src.models.enhanced_transformer import QuantumEnhancedTransformer
+    from src.models.enhanced_transformer import EnhancedTransformer as QuantumEnhancedTransformer
 except ImportError as e:
     logger.warning(f"Importing QuantumEnhancedTransformer failed: {e}")
     QuantumEnhancedTransformer = None # Define as None if import fails

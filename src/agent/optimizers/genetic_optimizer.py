@@ -240,6 +240,38 @@ class GeneticOptimizer:
 
         return self.best_params_, self.best_fitness_
 
+    def objective_function_with_context(
+        self, ga_instance, solution, solution_idx
+    ) -> float:
+        """
+        Objective function to be used by PyGAD, incorporating context.
+        """
+        try:
+            # Ensure solution is a list or 1D numpy array
+            if isinstance(solution, np.ndarray):
+                solution = solution.flatten().tolist()
+            elif not isinstance(solution, list):
+                solution = list(solution)
+
+            if not self.gene_space:
+                self.logger.error("gene_space is not defined in GeneticOptimizer.")
+                return -np.inf # Should not happen if run_optimizer is called correctly
+
+            # Map solution (list of values) to parameter names using self.gene_space
+            current_params = {
+                self.gene_space[i]['name']: solution[i]
+                for i in range(len(solution))
+            }
+
+            fitness = self.fitness_function(current_params, ga_instance.context)
+            if fitness is None:
+                self.logger.warning(f"Fitness function returned None for params: {current_params}. Assigning -inf fitness.")
+                return -np.inf
+            return float(fitness)
+        except Exception as e:
+            self.logger.error(f"Error in objective_function_with_context for solution {solution}: {e}", exc_info=True)
+            return -np.inf # Penalize solutions that cause errors
+
 # Example of how this GeneticOptimizer might be used (for illustration, not part of the class):
 # def my_fitness_function(params: Dict[str, Any], context: Dict[str, Any]) -> float:
 #     x = params['x']
