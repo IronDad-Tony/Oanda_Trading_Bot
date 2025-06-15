@@ -118,23 +118,23 @@ class EnhancedStrategySuperposition(nn.Module):
         else:
             self.logger.warning("No strategies loaded, attention network, and adaptive components not created.")
             self.attention_network = None
-            self.dropout = nn.Identity()
+            self.dropout = nn.Identity()            
             self.adaptive_bias_weights = None
             self.strategy_performance_ema = None
         
         self.gumbel_selector = None # For Gumbel-Softmax based selection if used
-
+    
     def _get_strategy_registry(self) -> Dict[str, Type[BaseStrategy]]:
         """Returns a copy of the global strategy registry."""
         return copy.deepcopy(STRATEGY_REGISTRY)
-
+    
     def _initialize_strategies(self, layer_input_dim: int,
                                processed_strategy_configs: Optional[List[Union[Dict[str, Any], StrategyConfig]]], 
                                explicit_strategies: Optional[List[Type[BaseStrategy]]], 
                                default_strategy_input_dim: int, 
                                dynamic_loading_enabled: bool):
-        self.strategies: List[BaseStrategy] = []  # Initialize here
-        self.strategy_names: List[str] = []      # Initialize here
+        # self.strategies is already initialized as nn.ModuleList() - don't reassign
+        # self.strategy_names is already initialized as List[str] - don't reassign
         processed_strategy_names: Set[str] = set()
         STRATEGY_REGISTRY_LOCAL = self._get_strategy_registry() # Use local copy
 

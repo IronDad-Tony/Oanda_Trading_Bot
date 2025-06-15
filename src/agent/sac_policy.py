@@ -45,6 +45,15 @@ except ImportError as e:
     TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
     logger.warning("sac_policy.py: Using fallback values for config due to import error.") # type: ignore
 
+# 量子策略層導入
+try:
+    from src.agent.quantum_policy import QuantumPolicyWrapper
+    quantum_available = True
+except ImportError as e:
+    logger.warning(f"量子策略層導入失敗: {e}")
+    QuantumPolicyWrapper = None
+    quantum_available = False
+
 
 class CustomSACPolicy(SACPolicy):
     def __init__(
@@ -112,22 +121,99 @@ class CustomSACPolicy(SACPolicy):
         # 我們不需要在 CustomSACPolicy 的 __init__ 簽名中包含它們，
         # 除非我們打算重寫 _build_actor_critic 或 make_actor 方法並手動傳遞。
         # 為了保持與SACPolicy的接口一致性並讓它內部處理，我們從 __init__ 移除它們。
-        # SACPolicy.__init__ 實際上也沒有直接接收 use_expln, squash_output, clip_mean
+        # SACPolicy.__init__ 實際上也沒有直接接收 use_expln 和 clip_mean
         # 它們是 actor_kwargs 的一部分，或者由 make_actor 方法處理。
         # 為了安全，我們也從 super().__init__ 的調用中移除它們，讓 SACPolicy 的默認行為生效。
         # 經過查閱 SB3 源碼，SACPolicy 的 __init__ 確實不包含 use_expln 和 clip_mean
         # 而 log_std_init 是傳遞給 Actor 的。
         # 最安全的做法是只傳遞 SACPolicy.__init__ 實際定義的參數。
 
-        # 重新檢查 SACPolicy.__init__ 的參數 (基於SB3 v2.x):
-        # observation_space, action_space, lr_schedule,
-        # net_arch, activation_fn, features_extractor_class, features_extractor_kwargs,
-        # normalize_images, optimizer_class, optimizer_kwargs, n_critics, share_features_extractor
-        # use_sde (來自BasePolicy)
-        # actor_kwargs, critic_kwargs (這兩個可以傳遞額外參數給Actor和Critic)
-
-        # 因此，我們上面的 super().__init__ 應該是：
-        # (已在上面修正，只保留 SACPolicy 和 BasePolicy __init__ 直接接受的參數)
+        # 初始化量子策略層（如果可用）
+        self.quantum_layer = None
+        self.use_quantum_layer = quantum_available
+        
+        if self.use_quantum_layer and QuantumPolicyWrapper is not None:
+            try:
+                # 獲取特徵提取器的輸出維度
+                if hasattr(self.features_extractor, '_features_dim'):
+                    features_dim = self.features_extractor._features_dim
+                else:
+                    features_dim = 256  # 默認值
+                
+                # 獲取動作空間維度
+                if hasattr(action_space, 'shape'):
+                    action_dim = action_space.shape[0]
+                else:
+                    action_dim = MAX_SYMBOLS_ALLOWED
+                
+                # 創建量子策略包裝器
+                self.quantum_layer = QuantumPolicyWrapper(
+                    state_dim=features_dim,
+                    action_dim=action_dim,
+                    latent_dim=256,
+                    num_strategies=3,
+                    num_energy_levels=8
+                )
+                
+                logger.info(f"✅ 量子策略層已成功集成到SAC策略中")
+                logger.info(f"   - 狀態維度: {features_dim}")
+                logger.info(f"   - 動作維度: {action_dim}")
+                logger.info(f"   - 策略數量: 3")
+                logger.info(f"   - 能級數量: 8")
+                
+            except Exception as e:
+                logger.error(f"❌ 量子策略層初始化失敗: {e}")
+                self.quantum_layer = None
+                self.use_quantum_layer = False
+        else:
+            if not quantum_available:
+                logger.warning("⚠️ 量子策略層不可用，將使用標準SAC策略")
+            else:
+                logger.warning("⚠️ QuantumPolicyWrapper為None，將使用標準SAC策略")
+    
+    def forward_with_quantum_layer(self, features: torch.Tensor, deterministic: bool = False):
+        """
+        如果量子策略層可用，使用它來處理特徵
+        
+        Args:
+            features: 來自特徵提取器的特徵
+            deterministic: 是否使用確定性動作
+            
+        Returns:
+            處理後的特徵或動作
+        """
+        if self.use_quantum_layer and self.quantum_layer is not None:
+            try:
+                # 使用量子策略層處理特徵
+                quantum_output = self.quantum_layer(features, deterministic=deterministic)
+                
+                # 獲取量子指標用於監控
+                if hasattr(self.quantum_layer, 'get_quantum_metrics'):
+                    quantum_metrics = self.quantum_layer.get_quantum_metrics()
+                    # 可以在這裡記錄量子指標
+                
+                return quantum_output
+            except Exception as e:
+                logger.warning(f"量子策略層處理失敗，回退到標準處理: {e}")
+                return features
+        else:
+            return features
+    
+    def get_quantum_info(self):
+        """獲取量子策略層的信息"""
+        if self.use_quantum_layer and self.quantum_layer is not None:
+            return {
+                'quantum_available': True,
+                'quantum_metrics': self.quantum_layer.get_quantum_metrics() if hasattr(self.quantum_layer, 'get_quantum_metrics') else {},
+                'last_quantum_info': self.quantum_layer.get_last_quantum_info() if hasattr(self.quantum_layer, 'get_last_quantum_info') else None
+            }
+        else:
+            return {
+                'quantum_available': False,
+                'quantum_metrics': {},
+                'last_quantum_info': None
+            }
+        
 
 
 if __name__ == "__main__":

@@ -260,8 +260,7 @@ class QuantumEnhancedSAC:
                 device_obj = torch.device(device)
         else:
             device_obj = device
-            
-        # 驗證設備可用性
+              # 驗證設備可用性
         if device_obj.type == "cuda" and not torch.cuda.is_available():
             logger.warning("指定使用CUDA但CUDA不可用，回退到CPU")
             device_obj = torch.device("cpu")
@@ -270,7 +269,8 @@ class QuantumEnhancedSAC:
     
     def _optimize_gpu_settings(self):
         """優化GPU設置以提高訓練效率"""
-        try:            # 清理GPU內存
+        try:
+            # 清理GPU內存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -287,8 +287,8 @@ class QuantumEnhancedSAC:
                     torch.backends.cuda.matmul.allow_tf32 = True
                 if hasattr(torch.backends.cudnn, 'allow_tf32'):
                     torch.backends.cudnn.allow_tf32 = True
-                  # GPU內存配置已在config.py中統一設置
                 
+                # GPU內存配置已在config.py中統一設置
                 logger.info("GPU優化設置已啟用：cuDNN基準模式、TF32、統一內存配置")
                 
         except Exception as e:
@@ -296,7 +296,25 @@ class QuantumEnhancedSAC:
 
     def train(self, total_timesteps: int, callback: Optional[Union[BaseCallback, List[BaseCallback]]] = None,
               log_interval: int = 1, reset_num_timesteps: bool = True):
+        """修復版訓練方法"""
         logger.info(f"開始訓練 SAC 智能體，總步數: {total_timesteps}...")
+        
+        # 修復1: 確保 learning_starts 合理
+        if hasattr(self.agent, 'learning_starts'):
+            original_learning_starts = self.agent.learning_starts
+            # 設置為較小的值以確保訓練能夠開始
+            self.agent.learning_starts = min(self.agent.learning_starts, max(100, total_timesteps // 10))
+            logger.info(f"調整 learning_starts: {original_learning_starts} -> {self.agent.learning_starts}")
+        
+        # 修復2: 確保模型在訓練模式
+        if hasattr(self.agent, 'policy'):
+            self.agent.policy.train()
+            if hasattr(self.agent.policy, 'actor'):
+                self.agent.policy.actor.train()
+            if hasattr(self.agent.policy, 'critic'):
+                self.agent.policy.critic.train()
+            logger.info("設置模型為訓練模式")
+        
         start_time = time.time()
         
         # 訓練前的GPU內存清理
@@ -340,6 +358,71 @@ class QuantumEnhancedSAC:
                 torch.cuda.reset_peak_memory_stats()
             
             logger.info(f"智能體訓練完成。耗時: {training_duration:.2f} 秒。")
+            
+            # 修復3: 訓練後檢查參數更新
+            if hasattr(self.agent, 'num_timesteps'):
+                logger.info(f"實際訓練步數: {self.agent.num_timesteps}")
+            
+        except Exception as e:
+            logger.error(f"智能體訓練過程中發生錯誤: {e}", exc_info=True)
+            # 訓練失敗時清理GPU內存
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+            raise
+            self.agent.policy.train()
+            if hasattr(self.agent.policy, 'actor'):
+                self.agent.policy.actor.train()
+            if hasattr(self.agent.policy, 'critic'):
+                self.agent.policy.critic.train()
+            logger.info("設置模型為訓練模式")
+        
+        start_time = time.time()
+        
+        # 訓練前的GPU內存清理
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+            initial_memory = torch.cuda.memory_allocated() / 1024**2  # MB
+            logger.info(f"訓練開始時GPU內存使用: {initial_memory:.1f}MB")
+        
+        # 初始化混合精度訓練的梯度縮放器
+        scaler = None
+        if self.use_amp and self.device.type == 'cuda':
+            scaler = torch.amp.GradScaler(device='cuda', enabled=self.use_amp)
+            logger.info("使用混合精度訓練模式，已初始化梯度縮放器")
+            
+            # 設置更保守的損失縮放以避免溢出
+            scaler._init_scale = 2**15  # 降低初始縮放因子
+            
+        try:
+            # 添加AMP溢出監控
+            if scaler is not None:
+                # 在SAC的learn方法中，我們無法直接控制梯度縮放
+                # 但可以在訓練前後檢查GPU內存和模型參數狀態
+                logger.info("AMP模式：監控訓練前模型狀態...")
+                self._check_model_health_amp()
+            
+            self.agent.learn(total_timesteps=total_timesteps, callback=callback, log_interval=log_interval,
+                             reset_num_timesteps=reset_num_timesteps, progress_bar=False)
+            
+            training_duration = time.time() - start_time
+            
+            # 訓練後檢查
+            if scaler is not None:
+                logger.info("AMP模式：檢查訓練後模型狀態...")
+                self._check_model_health_amp()
+            
+            # 訓練後的GPU內存統計
+            if self.device.type == 'cuda':
+                final_memory = torch.cuda.memory_allocated() / 1024**2  # MB
+                max_memory = torch.cuda.max_memory_allocated() / 1024**2  # MB
+                logger.info(f"訓練完成時GPU內存使用: {final_memory:.1f}MB, 峰值: {max_memory:.1f}MB")
+                torch.cuda.reset_peak_memory_stats()
+            
+            logger.info(f"智能體訓練完成。耗時: {training_duration:.2f} 秒。")
+            
+            # 修復3: 訓練後檢查參數更新
+            if hasattr(self.agent, 'num_timesteps'):
+                logger.info(f"實際訓練步數: {self.agent.num_timesteps}")
             
         except Exception as e:
             logger.error(f"智能體訓練過程中發生錯誤: {e}", exc_info=True)

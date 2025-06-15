@@ -981,49 +981,88 @@ class EnhancedTransformer(nn.Module):
         return output
 
     def get_dynamic_config(self) -> Dict[str, Any]:
-        # This method needs to be updated to reflect the actual attributes of the class.
-        # For example, self.num_symbols_possible, self.gmm_model_path, etc. are not defined in __init__.
-        # Providing a corrected version based on __init__ and common practice.
-        config = {
-            "input_dim": self.input_dim,
-            "d_model": self.d_model,
-            "transformer_nhead": self.transformer_nhead,
-            "num_encoder_layers": len(self.transformer_layers),
-            "dim_feedforward": self.transformer_layers[0].ffn[0].out_features if self.transformer_layers else None,
-            "dropout": self.dropout_layer.p if hasattr(self.dropout_layer, 'p') else None, # Assuming self.dropout_layer is nn.Dropout
-            "max_seq_len": self.max_seq_len,
-            "num_symbols": self.num_symbols,
-            "output_dim": self.output_dim,
-            "use_msfe": self.use_msfe,
-            "use_adaptive_attention": self.use_adaptive_attention,
-            "num_market_states": self.num_market_states,
-            "use_gmm_market_state_detector": self.use_gmm_market_state_detector,
-            "gmm_market_state_detector_path": self.gmm_detector.model_path if self.gmm_detector and hasattr(self.gmm_detector, 'model_path') else None,
-            "gmm_ohlcv_feature_config": self.gmm_ohlcv_feature_config is not None,
-            "use_cts_fusion": self.use_cts_fusion,
-            "use_symbol_embedding": self.use_symbol_embedding,
-            "use_fourier_features": self.use_fourier_features,
-            "use_wavelet_features": self.use_wavelet_features,
-            "positional_encoding_type": self.positional_encoding_type,
-            "output_activation": self.output_activation_fn.__class__.__name__ if not isinstance(self.output_activation_fn, nn.Identity) else None,
-        }
-        if self.use_msfe and hasattr(self, 'msfe') and self.msfe is not None:
-            config['msfe_hidden_dim'] = self.msfe.hidden_dim
-            config['msfe_scales'] = self.msfe.scales
-            # config['msfe_output_seq_len'] = self.msfe.adaptive_pool_output_size # If MSFE has this attribute
+        """Get the dynamic configuration of the Transformer."""
+        try:
+            # Get transformer layer information safely
+            num_layers = len(self.transformer_layers) if hasattr(self, 'transformer_layers') and self.transformer_layers else 0
+            
+            # Try to get dim_feedforward from transformer layers
+            dim_feedforward = None
+            if hasattr(self, 'transformer_layers') and self.transformer_layers:
+                try:
+                    first_layer = self.transformer_layers[0]
+                    if hasattr(first_layer, 'ffn') and hasattr(first_layer.ffn, '__len__') and len(first_layer.ffn) > 0:
+                        dim_feedforward = first_layer.ffn[0].out_features
+                except (AttributeError, IndexError):
+                    dim_feedforward = getattr(self, 'dim_feedforward', None)
+            
+            # Get dropout value safely
+            dropout_val = None
+            if hasattr(self, 'dropout_layer') and hasattr(self.dropout_layer, 'p'):
+                dropout_val = self.dropout_layer.p
+            
+            config = {
+                "input_dim": getattr(self, 'input_dim', None),
+                "d_model": getattr(self, 'd_model', None),
+                "transformer_nhead": getattr(self, 'transformer_nhead', None),
+                "num_encoder_layers": num_layers,
+                "dim_feedforward": dim_feedforward,
+                "dropout": dropout_val,
+                "max_seq_len": getattr(self, 'max_seq_len', None),
+                "num_symbols": getattr(self, 'num_symbols', None),
+                "output_dim": getattr(self, 'output_dim', None),
+                "use_msfe": getattr(self, 'use_msfe', False),
+                "use_adaptive_attention": getattr(self, 'use_adaptive_attention', False),
+                "num_market_states": getattr(self, 'num_market_states', None),
+                "use_gmm_market_state_detector": getattr(self, 'use_gmm_market_state_detector', False),
+                "gmm_market_state_detector_path": None,
+                "gmm_ohlcv_feature_config": getattr(self, 'gmm_ohlcv_feature_config', None) is not None,
+                "use_cts_fusion": getattr(self, 'use_cts_fusion', False),
+                "use_symbol_embedding": getattr(self, 'use_symbol_embedding', False),
+                "use_fourier_features": getattr(self, 'use_fourier_features', False),
+                "use_wavelet_features": getattr(self, 'use_wavelet_features', False),
+                "positional_encoding_type": getattr(self, 'positional_encoding_type', None),
+                "output_activation": self.output_activation_fn.__class__.__name__ if hasattr(self, 'output_activation_fn') and not isinstance(self.output_activation_fn, nn.Identity) else None,
+            }
+              # Safely get GMM detector path
+            if hasattr(self, 'gmm_detector') and self.gmm_detector and hasattr(self.gmm_detector, 'model_path'):
+                config["gmm_market_state_detector_path"] = self.gmm_detector.model_path
+                
+            # Add additional configuration details if available
+            if self.use_msfe and hasattr(self, 'msfe') and self.msfe is not None:
+                config['msfe_hidden_dim'] = getattr(self.msfe, 'hidden_dim', None)
+                config['msfe_scales'] = getattr(self.msfe, 'scales', None)
 
-        if self.use_cts_fusion and hasattr(self, 'cts_fusion_module') and self.cts_fusion_module is not None:
-            config['cts_time_scales'] = self.cts_fusion_module.time_scales
-            config['cts_fusion_type'] = self.cts_fusion_module.fusion_type
+            if self.use_cts_fusion and hasattr(self, 'cts_fusion_module') and self.cts_fusion_module is not None:
+                config['cts_time_scales'] = getattr(self.cts_fusion_module, 'time_scales', None)
+                config['cts_fusion_type'] = getattr(self.cts_fusion_module, 'fusion_type', None)
 
-        if self.use_fourier_features and hasattr(self, 'fourier_block') and self.fourier_block is not None:
-            config['fourier_num_modes'] = self.fourier_block.spectral_conv.num_modes
+            if self.use_fourier_features and hasattr(self, 'fourier_block') and self.fourier_block is not None:
+                if hasattr(self.fourier_block, 'spectral_conv'):
+                    config['fourier_num_modes'] = getattr(self.fourier_block.spectral_conv, 'num_modes', None)
 
-        if self.use_wavelet_features and hasattr(self, 'wavelet_block') and self.wavelet_block is not None:
-            config['wavelet_name'] = self.wavelet_block.dwt_layers[0].wavelet.name
-            config['wavelet_levels'] = self.wavelet_block.levels
-            # config['trainable_wavelet_filters'] = isinstance(self.wavelet_block.dwt_layers[0].lo_filter, nn.Parameter)
-
+            if self.use_wavelet_features and hasattr(self, 'wavelet_block') and self.wavelet_block is not None:
+                if hasattr(self.wavelet_block, 'dwt_layers') and self.wavelet_block.dwt_layers:
+                    wavelet_layer = self.wavelet_block.dwt_layers[0]
+                    if hasattr(wavelet_layer, 'wavelet') and hasattr(wavelet_layer.wavelet, 'name'):
+                        config['wavelet_name'] = wavelet_layer.wavelet.name
+                config['wavelet_levels'] = getattr(self.wavelet_block, 'levels', None)
+                
+        except Exception as e:
+            # If anything goes wrong, return a basic config
+            config = {
+                "input_dim": getattr(self, 'input_dim', None),
+                "d_model": getattr(self, 'd_model', None),
+                "transformer_nhead": getattr(self, 'transformer_nhead', None),
+                "num_encoder_layers": 0,
+                "dim_feedforward": None,
+                "dropout": None,
+                "max_seq_len": getattr(self, 'max_seq_len', None),
+                "num_symbols": getattr(self, 'num_symbols', None),
+                "output_dim": getattr(self, 'output_dim', None),
+                "error": f"Config retrieval error: {str(e)}"
+            }
+            
         return config
 
 # Ensure this class is defined after all its dependencies like EnhancedTransformerLayer, etc.

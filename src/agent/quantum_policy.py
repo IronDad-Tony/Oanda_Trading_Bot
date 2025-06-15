@@ -39,12 +39,10 @@ class QuantumPolicyWrapper(nn.Module):
         
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.latent_dim = latent_dim
-          # 初始化增強版量子策略層
+        self.latent_dim = latent_dim          # 初始化增強版量子策略層
         self.quantum_layer = EnhancedStrategySuperposition(
-            state_dim=state_dim,
-            action_dim=action_dim,
-            enable_dynamic_generation=True
+            input_dim=state_dim,
+            num_strategies=num_strategies
         )
         
         # SAC需要的額外層用於輸出動作分佈參數

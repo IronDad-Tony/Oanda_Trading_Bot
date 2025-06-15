@@ -596,6 +596,22 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
         return False
 
     logger.info(f"Attempting to start new training session for symbols: {symbols}, total_timesteps: {total_timesteps}")
+    
+    # 修復1: 確保 total_timesteps 足夠大
+    min_timesteps = 1000  # 最小訓練步數
+    if total_timesteps < min_timesteps:
+        logger.warning(f"total_timesteps ({total_timesteps}) 太小，調整為 {min_timesteps}")
+        total_timesteps = min_timesteps
+    
+    # 修復2: 調整訓練參數
+    training_config = {
+        'total_timesteps': total_timesteps,
+        'learning_starts': max(100, total_timesteps // 20),  # 5% 的步數開始學習
+        'eval_freq': min(eval_freq, total_timesteps // 4),   # 確保評估頻率合理
+        'save_freq': min(save_freq, total_timesteps // 2),   # 確保保存頻率合理
+    }
+    
+    logger.info(f"修復後的訓練配置: {training_config}")
     shared_manager.clear_data() 
     shared_manager.reset_stop_flag()
     # Reset session-specific step tracking
@@ -611,16 +627,15 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
         
         trainer_instance_for_thread = None 
         if TRAINER_AVAILABLE:
-            logger.info("TRAINER_AVAILABLE is True. Creating new EnhancedUniversalTrainer instance.")
-            # Create a new trainer instance for this training session
+            logger.info("TRAINER_AVAILABLE is True. Creating new EnhancedUniversalTrainer instance.")            # Create a new trainer instance for this training session
             current_trainer = EnhancedUniversalTrainer(
                 trading_symbols=symbols,
                 start_time=start_time_dt,
                 end_time=end_time_dt,
                 granularity="S5", 
-                total_timesteps=total_timesteps,
-                save_freq=save_freq,
-                eval_freq=eval_freq,
+                total_timesteps=training_config['total_timesteps'],  # 使用修復後的配置
+                save_freq=training_config['save_freq'],
+                eval_freq=training_config['eval_freq'],
                 model_name_prefix="sac_universal_trader",
                 # Pass UI parameters to trainer
                 initial_capital=initial_capital,
@@ -630,6 +645,12 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
                 # The trainer should ideally get the shared_manager via a method or init arg
                 # For now, we pass it to the worker, which can set it if the trainer supports it.
             )
+            
+            # 修復3: 設置合理的 learning_starts
+            if hasattr(current_trainer, 'agent_wrapper') and hasattr(current_trainer.agent_wrapper, 'agent'):
+                current_trainer.agent_wrapper.agent.learning_starts = training_config['learning_starts']
+                logger.info(f"設置 learning_starts 為: {training_config['learning_starts']}")
+                
             st.session_state.trainer = current_trainer # Store the new trainer in session state
             trainer_instance_for_thread = current_trainer
             logger.info(f"New EnhancedUniversalTrainer instance created and stored in session_state.trainer: {current_trainer}")
@@ -641,7 +662,7 @@ def start_training(symbols, start_date, end_date, total_timesteps, save_freq, ev
 
         training_thread = threading.Thread(
             target=training_worker,
-            args=(trainer_instance_for_thread, shared_manager, symbols, total_timesteps, initial_capital),
+            args=(trainer_instance_for_thread, shared_manager, symbols, training_config['total_timesteps'], initial_capital),
             daemon=True
         )
         training_thread.start()
