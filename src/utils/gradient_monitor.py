@@ -53,7 +53,8 @@ class GradientMonitor:
                 self.parameter_history[name].append((step, norm))
                 
         return param_norms
-      def record_gradients(self, step: int = None):
+    
+    def record_gradients(self, step: int = None):
         """記錄當前梯度狀態"""
         if not self.is_valid:
             return {}

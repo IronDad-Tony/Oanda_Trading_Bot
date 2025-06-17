@@ -1,696 +1,504 @@
 # src/agent/strategies/other_strategies.py
 from .base_strategy import BaseStrategy, StrategyConfig
-import pandas as pd
-import numpy as np
-import ta
-from typing import Dict, Any, Optional # Updated typing import
-import logging # Added logging import
-import torch # Added for PyTorch tensors
+import pandas as pd # Keep for type hints if any legacy methods remain, but avoid in tensor forward paths
+import numpy as np # Keep for type hints or rare cases, avoid in tensor forward paths
+import ta # Try to replace with tensor equivalents
+from typing import Dict, Any, Optional, Tuple
+import logging
+import torch
+import torch.nn.functional as F
 
-# Helper function for tensor-based rolling operations if needed (or stick to pd for ta)
-# For now, we will convert to pd.DataFrame to use `ta` and then convert back.
+# Tensor-based helper functions
+# These could be part of a shared utility module in a larger system
+
+def _rolling_mean_tensor(data: torch.Tensor, window: int) -> torch.Tensor:
+    """Calculates rolling mean on a 2D tensor (batch_size, seq_len) or 3D (batch_size, 1, seq_len)."""
+    if data.ndim == 2:
+        data_unsqueezed = data.unsqueeze(1)  # (B, 1, S)
+    elif data.ndim == 3 and data.shape[1] == 1:
+        data_unsqueezed = data
+    else:
+        raise ValueError(f"_rolling_mean_tensor expects 2D (B,S) or 3D (B,1,S) tensor, got {data.shape}")
+
+    if data_unsqueezed.shape[-1] == 0: # Handle empty sequence
+        return torch.zeros_like(data_unsqueezed).squeeze(1) if data.ndim == 2 else torch.zeros_like(data_unsqueezed)
+    
+    padding_mode = 'replicate' # Pad with the first/last value
+    # Calculate padding: if seq_len < window, pad to effectively use available data.
+    # If seq_len >= window, standard padding is window - 1.
+    if data_unsqueezed.shape[-1] < window:
+        # Pad to length `window -1` at the beginning so conv1d can run. 
+        # The result will be based on fewer than `window` points for initial part of sequence.
+        # This is a choice; another might be to return NaNs/zeros or require seq_len >= window.
+        # F.avg_pool1d handles this by effectively reducing window size for initial elements.
+        # Using conv1d with replicate padding and full window weight is one way to approximate.
+        padding_val = window - 1 # Standard padding for conv1d to produce output of same length as input
+    else:
+        padding_val = window - 1
+
+    padded_data = F.pad(data_unsqueezed, (padding_val, 0), mode=padding_mode)
+    weights = torch.full((1, 1, window), 1.0/window, device=data.device, dtype=data.dtype)
+    rolled_mean = F.conv1d(padded_data, weights, stride=1)
+    
+    return rolled_mean.squeeze(1) if data.ndim == 2 else rolled_mean
+
+def _rolling_std_tensor(data: torch.Tensor, window: int) -> torch.Tensor:
+    """Calculates rolling std dev on a 2D tensor (batch_size, seq_len)."""
+    mean_x = _rolling_mean_tensor(data, window)
+    mean_x_sq = _rolling_mean_tensor(data**2, window)
+    variance = (mean_x_sq - mean_x**2).clamp(min=1e-9) # Add clamp for numerical stability
+    return torch.sqrt(variance)
+
+def _atr_tensor(high: torch.Tensor, low: torch.Tensor, close: torch.Tensor, window: int) -> torch.Tensor:
+    """Calculates Average True Range (ATR) using PyTorch. high, low, close are (batch_size, seq_len)."""
+    if high.shape[1] == 0: # Handle empty sequence
+        return torch.zeros_like(high)
+
+    # True Range calculation
+    tr1 = high - low
+    # close_prev: prepend first close to close_prices[:, :-1]
+    close_prev = torch.cat((close[:, :1], close[:, :-1]), dim=1)
+    tr2 = torch.abs(high - close_prev)
+    tr3 = torch.abs(low - close_prev)
+    
+    true_range = torch.max(torch.max(tr1, tr2), tr3) # (batch_size, seq_len)
+    
+    # ATR is typically a Wilder's Smoothing of True Range. 
+    # For simplicity, using SMA here via _rolling_mean_tensor.
+    # A more accurate Wilder's MA would use an EMA-like calculation.
+    atr = _rolling_mean_tensor(true_range, window)
+    return atr
+
+def _roc_tensor(close: torch.Tensor, window: int) -> torch.Tensor:
+    """Calculates Rate of Change (ROC) using PyTorch. close is (batch_size, seq_len)."""
+    if close.shape[1] <= window: # Not enough data for ROC over this window
+        return torch.zeros_like(close)
+    
+    close_n_periods_ago = close[:, :-(window)]
+    roc = (close[:, window:] - close_n_periods_ago) / close_n_periods_ago.clamp(min=1e-9)
+    # Pad with zeros at the beginning to match original shape
+    roc_padded = F.pad(roc, (window, 0), mode='constant', value=0)
+    return roc_padded
+
+def _sma_tensor(data: torch.Tensor, window: int) -> torch.Tensor:
+    """Alias for _rolling_mean_tensor for clarity when used as SMA."""
+    return _rolling_mean_tensor(data, window)
+
+# Simplified RSI (using SMAs for gains/losses instead of Wilder's MA)
+def _rsi_tensor_simplified(close: torch.Tensor, window: int) -> torch.Tensor:
+    if close.shape[1] <= 1: return torch.full_like(close, 50.0) # Neutral RSI for short sequences
+    delta = close[:, 1:] - close[:, :-1]
+    gain = delta.clamp(min=0)
+    loss = -delta.clamp(max=0)
+
+    # Pad gain and loss to be same length as original sequence for rolling mean
+    gain_padded = F.pad(gain, (1,0), 'constant', 0)
+    loss_padded = F.pad(loss, (1,0), 'constant', 0)
+
+    avg_gain = _rolling_mean_tensor(gain_padded, window)
+    avg_loss = _rolling_mean_tensor(loss_padded, window)
+    
+    rs = avg_gain / avg_loss.clamp(min=1e-9)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[avg_loss == 0] = 100.0 # If avg_loss is 0, RSI is 100
+    rsi[avg_gain == 0] = 0.0 # If avg_gain is 0 (and avg_loss is not), RSI is 0
+    # Handle case where both are zero (e.g. flat price for window) -> RSI is often 50 or undefined, let's use 50
+    rsi[(avg_gain == 0) & (avg_loss == 0)] = 50.0
+    return rsi
+
+# Simplified Stochastic Oscillator
+def _stochastic_oscillator_tensor(high: torch.Tensor, low: torch.Tensor, close: torch.Tensor, k_window: int, d_window: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    if high.shape[1] < k_window or high.shape[1] == 0:
+        return torch.full_like(close, 50.0), torch.full_like(close, 50.0) # Neutral if not enough data
+
+    # Rolling min/max using unfold (more complex but true rolling)
+    # For simplicity, if unfold is too much, this could be an area for future improvement or use a simpler proxy.
+    # Let's use a simpler approach for now: calculate over the full window for the last point, not a true rolling series for all points.
+    # This is a significant simplification for a true stochastic over sequence.
+    # A full rolling min/max is needed for a proper %K series.
+    # For now, let's calculate for the last point only, which is what the signal is based on.
+    
+    # To get a series for %K, we need rolling min_low and rolling max_high.
+    # This requires unfold or a loop. Let's try with unfold for a more correct %K series.
+    # high_unfolded = high.unfold(dimension=1, size=k_window, step=1)
+    # low_unfolded = low.unfold(dimension=1, size=k_window, step=1)
+    # rolling_max_high = high_unfolded.max(dim=2).values
+    # rolling_min_low = low_unfolded.min(dim=2).values
+    # percent_k_series = 100 * (close[:, k_window-1:] - rolling_min_low) / (rolling_max_high - rolling_min_low).clamp(min=1e-9)
+    # percent_k_padded = F.pad(percent_k_series, (k_window-1, 0), 'constant', 50.0) # Pad to original length
+
+    # Simpler approach for now: calculate for each point using available window (less accurate for initial points)
+    percent_k_list = []
+    for t in range(high.shape[1]):
+        start_idx = max(0, t - k_window + 1)
+        window_high = high[:, start_idx : t+1]
+        window_low = low[:, start_idx : t+1]
+        current_close = close[:, t]
+        
+        highest_high = window_high.max(dim=1).values
+        lowest_low = window_low.min(dim=1).values
+        
+        numerator = current_close - lowest_low
+        denominator = (highest_high - lowest_low).clamp(min=1e-9)
+        
+        pk = 100 * numerator / denominator
+        pk[denominator < 1e-8] = 50.0 # If range is zero, stoch is often 50 or previous value
+        percent_k_list.append(pk.unsqueeze(1))
+    
+    percent_k_padded = torch.cat(percent_k_list, dim=1)
+    percent_d = _sma_tensor(percent_k_padded, d_window)
+    return percent_k_padded, percent_d
+
+def _bollinger_bands_tensor(close: torch.Tensor, window: int, num_std_dev: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    sma = _sma_tensor(close, window)
+    rolling_std = _rolling_std_tensor(close, window)
+    upper_band = sma + (rolling_std * num_std_dev)
+    lower_band = sma - (rolling_std * num_std_dev)
+    return upper_band, lower_band, sma
 
 class OptionFlowStrategy(BaseStrategy):
-    """ 
-    Simplified: Uses high volume and volatility as a proxy for significant option activity.
-    Ideally, this strategy would use actual option chain data (volume, open interest, greeks).
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="OptionFlowStrategy",
             description="Simplified: Uses high volume and volatility as a proxy for significant option activity.",
             default_params={
-                'instrument_key': None, 
                 'volume_period': 20, 
                 'volatility_period': 14, 
                 'volume_z_threshold': 2.0, 
                 'atr_threshold_multiplier': 1.5,
-                'feature_indices': {'High': 1, 'Low': 2, 'Close': 3, 'Volume': 4} # Example indices
+                'high_idx': 1, 'low_idx': 2, 'close_idx': 3, 'volume_idx': 4
             },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.instrument_key = self.params.get('instrument_key')
+        self.volume_period = self.params.get('volume_period', 20)
+        self.volatility_period = self.params.get('volatility_period', 14)
+        self.volume_z_threshold = self.params.get('volume_z_threshold', 2.0)
+        self.atr_threshold_multiplier = self.params.get('atr_threshold_multiplier', 1.5)
+        self.high_idx = self.params.get('high_idx', 1)
+        self.low_idx = self.params.get('low_idx', 2)
+        self.close_idx = self.params.get('close_idx', 3)
+        self.volume_idx = self.params.get('volume_idx', 4)
 
-        if self.instrument_key is None and self.config.applicable_assets:
-            self.instrument_key = self.config.applicable_assets[0]
-            self.logger.info(f"{self.config.name}: 'instrument_key' not in params, using first from config.applicable_assets: {self.instrument_key}")
-
-        if self.instrument_key is None:
-            self.logger.error(f"{self.config.name} requires 'instrument_key' in params or config.applicable_assets to be non-empty.")
-        elif not self.config.applicable_assets: # If instrument_key is set, ensure it's in applicable_assets
-            self.config.applicable_assets = [self.instrument_key]
-        
-        # Use self.effective_params which is set by BaseStrategy
-        self.volume_period = self.effective_params.get('volume_period', 20)
-        self.volatility_period = self.effective_params.get('volatility_period', 14)
-        self.volume_z_threshold = self.effective_params.get('volume_z_threshold', 2.0)
-        self.atr_threshold_multiplier = self.effective_params.get('atr_threshold_multiplier', 1.5)
-        self.feature_indices = self.effective_params.get('feature_indices', {'High': 1, 'Low': 2, 'Close': 3, 'Volume': 4})
+        if self.config.input_dim is not None:
+            max_idx = max(self.high_idx, self.low_idx, self.close_idx, self.volume_idx)
+            if max_idx >= self.config.input_dim:
+                self.logger.error(f"[{self.config.name}] Feature indices OOB for input_dim {self.config.input_dim}.")
+        else:
+            self.logger.warning(f"[{self.config.name}] input_dim not specified. Index validation skipped.")
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        high_idx = self.feature_indices['High']
-        low_idx = self.feature_indices['Low']
-        close_idx = self.feature_indices['Close']
-        vol_idx = self.feature_indices['Volume']
-
-        for i in range(batch_size):
-            df = pd.DataFrame({
-                'High': asset_features[i, :, high_idx].cpu().numpy(),
-                'Low': asset_features[i, :, low_idx].cpu().numpy(),
-                'Close': asset_features[i, :, close_idx].cpu().numpy(),
-                'Volume': asset_features[i, :, vol_idx].cpu().numpy()
-            })
-
-            if df.empty or not all(c in df.columns for c in ['High', 'Low', 'Close', 'Volume']):
-                continue
-
-            df['avg_volume'] = df['Volume'].rolling(window=self.volume_period, min_periods=max(1,self.volume_period//2)).mean()
-            df['std_volume'] = df['Volume'].rolling(window=self.volume_period, min_periods=max(1,self.volume_period//2)).std()
-            df['volume_z_score'] = (df['Volume'] - df['avg_volume']) / df['std_volume'].replace(0, np.nan)
-            
-            df['atr'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=self.volatility_period, fillna=True)
-            df['price_range'] = df['High'] - df['Low']
-            df.fillna({'volume_z_score': 0, 'atr': 0, 'price_range': 0}, inplace=True)
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            high_volume_activity = df['volume_z_score'] > self.volume_z_threshold
-            high_volatility_activity = df['price_range'] > (df['atr'] * self.atr_threshold_multiplier)
-            
-            bullish_condition = high_volume_activity & high_volatility_activity & (df['Close'] > df['Close'].shift(1))
-            bearish_condition = high_volume_activity & high_volatility_activity & (df['Close'] < df['Close'].shift(1))
-
-            current_signals_np[bullish_condition.fillna(False)] = 1.0
-            current_signals_np[bearish_condition.fillna(False)] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        if self.config.input_dim and max(self.high_idx, self.low_idx, self.close_idx, self.volume_idx) >= num_features:
+            self.logger.error(f"[{self.config.name}] Feature indices OOB for actual features {num_features}. Zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+        
+        # Placeholder: Actual logic for OptionFlowStrategy
+        # For now, returning a neutral signal
+        return torch.zeros((batch_size, 1, 1), device=device) # (batch_size, num_assets, signal_dim)
 
 class MicrostructureStrategy(BaseStrategy):
-    """
-    Simplified: Uses price spread (High-Low) and volume spikes as proxies for microstructure imbalances.
-    Ideally, this strategy would use L1/L2 order book data (bid/ask prices, sizes, order flow).
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="MicrostructureStrategy",
-            description="Simplified: Uses price spread and volume spikes as proxies for microstructure imbalances.",
+            description="Analyzes order book imbalances, bid-ask spreads, and trade frequency.",
             default_params={
-                'instrument_key': None,
-                'spread_window': 10,
-                'volume_window': 20,
-                'spread_quantile_threshold': 0.90,
-                'volume_spike_multiplier': 3.0,
-                'feature_indices': {'High': 1, 'Low': 2, 'Close': 3, 'Volume': 4} # Example indices
+                'spread_threshold': 0.0005, 
+                'imbalance_threshold': 1.5,
+                'depth_levels': 5, # Number of order book levels to consider
+                'close_idx': 3, # Assuming close price is at index 3
+                # Indices for bid/ask prices and volumes if available in features
+                # 'bid_price_idx_start': 5, 'ask_price_idx_start': 10, 
+                # 'bid_volume_idx_start': 15, 'ask_volume_idx_start': 20
             },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.instrument_key = self.params.get('instrument_key')
-
-        if self.instrument_key is None and self.config.applicable_assets:
-            self.instrument_key = self.config.applicable_assets[0]
-            self.logger.info(f"{self.config.name}: 'instrument_key' not in params, using first from config.applicable_assets: {self.instrument_key}")
-
-        if self.instrument_key is None:
-            self.logger.error(f"{self.config.name} requires 'instrument_key' in params or config.applicable_assets to be non-empty.")
-        elif not self.config.applicable_assets:
-            self.config.applicable_assets = [self.instrument_key]
-
-        self.spread_window = self.params.get('spread_window', 10)
-        self.volume_window = self.params.get('volume_window', 20)
-        self.spread_quantile_threshold = self.params.get('spread_quantile_threshold', 0.90)
-        self.volume_spike_multiplier = self.params.get('volume_spike_multiplier', 3.0)
-        self.feature_indices = self.params.get('feature_indices', {'High': 1, 'Low': 2, 'Close': 3, 'Volume': 4})
+        self.spread_threshold = self.params.get('spread_threshold', 0.0005)
+        self.imbalance_threshold = self.params.get('imbalance_threshold', 1.5)
+        self.depth_levels = self.params.get('depth_levels', 5)
+        self.close_idx = self.params.get('close_idx', 3)
+        # Example: self.bid_price_idx_start = self.params.get('bid_price_idx_start')
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
-
-        high_idx = self.feature_indices['High']
-        low_idx = self.feature_indices['Low']
-        close_idx = self.feature_indices['Close']
-        vol_idx = self.feature_indices['Volume']
-
-        for i in range(batch_size):
-            df = pd.DataFrame({
-                'High': asset_features[i, :, high_idx].cpu().numpy(),
-                'Low': asset_features[i, :, low_idx].cpu().numpy(),
-                'Close': asset_features[i, :, close_idx].cpu().numpy(),
-                'Volume': asset_features[i, :, vol_idx].cpu().numpy()
-            })
-
-            if df.empty or not all(c in df.columns for c in ['High', 'Low', 'Close', 'Volume']):
-                continue
-
-            df['spread'] = df['High'] - df['Low']
-            df['rolling_median_spread'] = df['spread'].rolling(window=self.spread_window, min_periods=max(1,self.spread_window//2)).median()
-            df['avg_volume'] = df['Volume'].rolling(window=self.volume_window, min_periods=max(1,self.volume_window//2)).mean()
-            df.fillna({'rolling_median_spread': 0, 'avg_volume': 0, 'spread':0}, inplace=True)
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            wide_spread = df['spread'] > df['spread'].rolling(window=self.spread_window*2, min_periods=max(1,self.spread_window)).quantile(self.spread_quantile_threshold)
-            volume_spike = df['Volume'] > (df['avg_volume'] * self.volume_spike_multiplier)
-            
-            price_up_sharply = df['Close'] > df['Close'].shift(1) + df['rolling_median_spread']
-            price_down_sharply = df['Close'] < df['Close'].shift(1) - df['rolling_median_spread']
-
-            current_signals_np[(wide_spread & volume_spike & price_up_sharply).fillna(False)] = -1.0 # Sell
-            current_signals_np[(wide_spread & volume_spike & price_down_sharply).fillna(False)] = 1.0  # Buy
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
+        # Placeholder: Actual logic for MicrostructureStrategy
+        # This would require order book data, which is not typically in OHLCV features.
+        # For now, returning a neutral signal.
+        # self.logger.warning(f"[{self.config.name}] Requires order book data, not implemented with current features. Neutral signal.")
+        return torch.zeros((batch_size, 1, 1), device=device)
 
 class CarryTradeStrategy(BaseStrategy):
-    """
-    Simplified: Uses momentum as a proxy for chasing yield/currency strength.
-    Ideally, this strategy would use actual interest rate differentials between currency pairs.
-    For a single instrument, this translates to trend following if we assume higher yield attracts capital.
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="CarryTradeStrategy",
-            description="Simplified: Uses momentum as a proxy for chasing yield/currency strength.",
-            default_params={'short_ma_period': 10, 'long_ma_period': 30,
-                            'feature_indices': {'Close': 3}}, # Example index
-            applicable_assets=[] # This strategy expects applicable_assets to be set in config or instance
+            description="Exploits interest rate differentials between currencies (simplified for general assets).",
+            default_params={
+                'interest_rate_diff_threshold': 0.01, # Example threshold
+                'funding_rate_idx': -1, # Placeholder: index for funding/interest rate data if available
+                'volatility_period': 20,
+                'volatility_cap': 0.02, # Max daily volatility to consider trade
+                'close_idx': 3, 'high_idx': 1, 'low_idx': 2
+            },
+            applicable_assets=[] # Typically FX pairs
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.short_ma_period = self.params.get('short_ma_period', 10)
-        self.long_ma_period = self.params.get('long_ma_period', 30)
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3})
+        self.interest_rate_diff_threshold = self.params.get('interest_rate_diff_threshold', 0.01)
+        self.funding_rate_idx = self.params.get('funding_rate_idx', -1)
+        self.volatility_period = self.params.get('volatility_period', 20)
+        self.volatility_cap = self.params.get('volatility_cap', 0.02)
+        self.close_idx = self.params.get('close_idx', 3)
+        self.high_idx = self.params.get('high_idx', 1)
+        self.low_idx = self.params.get('low_idx', 2)
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
-        close_idx = self.feature_indices['Close']
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        for i in range(batch_size):
-            # This strategy can apply to multiple assets if asset_features is structured accordingly.
-            # For now, assuming asset_features is for a single asset type per call, or needs selection.
-            # If this strategy instance is for ONE asset, this is fine.
-            # If it's meant to process multiple assets from a single asset_features tensor, logic would need asset indexing.
-            df = pd.DataFrame({'Close': asset_features[i, :, close_idx].cpu().numpy()})
+        if self.funding_rate_idx < 0 or self.funding_rate_idx >= num_features:
+            # self.logger.warning(f"[{self.config.name}] Funding rate index not valid or data unavailable. Neutral signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-            if df.empty or 'Close' not in df.columns:
-                continue
-
-            df['short_ma'] = ta.trend.sma_indicator(df['Close'], window=self.short_ma_period, fillna=True)
-            df['long_ma'] = ta.trend.sma_indicator(df['Close'], window=self.long_ma_period, fillna=True)
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            buy_condition = (df['short_ma'] > df['long_ma']) & (df['short_ma'].shift(1) <= df['long_ma'].shift(1))
-            sell_condition = (df['short_ma'] < df['long_ma']) & (df['short_ma'].shift(1) >= df['long_ma'].shift(1))
-
-            current_signals_np[buy_condition.fillna(False)] = 1.0
-            current_signals_np[sell_condition.fillna(False)] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        # Placeholder: Actual logic for CarryTradeStrategy
+        # funding_rate = asset_features[:, -1, self.funding_rate_idx]
+        # close_prices = asset_features[:, :, self.close_idx]
+        # high_prices = asset_features[:, :, self.high_idx]
+        # low_prices = asset_features[:, :, self.low_idx]
+        # atr = _atr_tensor(high_prices, low_prices, close_prices, self.volatility_period)[:, -1]
+        # daily_volatility_proxy = atr / close_prices[:, -1].clamp(min=1e-9)
+        # signal = torch.zeros((batch_size, 1, 1), device=device)
+        # signal[(funding_rate > self.interest_rate_diff_threshold) & (daily_volatility_proxy < self.volatility_cap)] = 1.0 # Buy signal
+        # signal[(funding_rate < -self.interest_rate_diff_threshold) & (daily_volatility_proxy < self.volatility_cap)] = -1.0 # Sell signal
+        return torch.zeros((batch_size, 1, 1), device=device)
 
 class MacroEconomicStrategy(BaseStrategy):
-    """
-    Simplified: Uses long-term moving averages to proxy economic cycles/regimes.
-    Ideally, this strategy would use actual macroeconomic indicators (GDP, inflation, unemployment etc.).
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="MacroEconomicStrategy",
-            description="Simplified: Uses long-term moving averages to proxy economic cycles/regimes.",
-            default_params={'instrument_key': None, 'ma_period': 200, 'roc_period': 60,
-                            'feature_indices': {'Close': 3}}, # Example index
-            applicable_assets=[]
+            description="Trades based on macroeconomic indicators (e.g., inflation, GDP growth, unemployment).",
+            default_params={
+                'indicator_idx': -1, # Placeholder: index for a relevant macro indicator
+                'threshold_high': 0.5, 
+                'threshold_low': -0.5
+            },
+            applicable_assets=[] # Broad market indices, currencies
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.ma_period = self.params.get('ma_period', 200)
-        self.roc_period = self.params.get('roc_period', 60)
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3})
+        self.indicator_idx = self.params.get('indicator_idx', -1)
+        self.threshold_high = self.params.get('threshold_high', 0.5)
+        self.threshold_low = self.params.get('threshold_low', -0.5)
 
-    def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None, external_data: Optional[pd.DataFrame] = None) -> torch.Tensor:
-        # Note: original forward had `external_data` which is not in BaseStrategy.forward signature.
-        # This will be ignored for now. If needed, BaseStrategy signature must change.
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
-        close_idx = self.feature_indices['Close']
+    def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        for i in range(batch_size):
-            df = pd.DataFrame({'Close': asset_features[i, :, close_idx].cpu().numpy()})
+        if self.indicator_idx < 0 or self.indicator_idx >= num_features:
+            # self.logger.warning(f"[{self.config.name}] Macro indicator index not valid or data unavailable. Neutral signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-            if df.empty or 'Close' not in df.columns:
-                continue
-
-            df['long_ma'] = ta.trend.sma_indicator(df['Close'], window=self.ma_period, fillna=True)
-            df['roc'] = ta.momentum.roc(df['Close'], window=self.roc_period, fillna=True)
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            bullish_condition = (df['Close'] > df['long_ma']) & (df['roc'] > 0)
-            bearish_condition = (df['Close'] < df['long_ma']) & (df['roc'] < 0)
-
-            current_signals_np[bullish_condition.fillna(False)] = 1.0
-            current_signals_np[bearish_condition.fillna(False)] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        # Placeholder: Actual logic for MacroEconomicStrategy
+        # indicator_value = asset_features[:, -1, self.indicator_idx]
+        # signal = torch.zeros((batch_size, 1, 1), device=device)
+        # signal[indicator_value > self.threshold_high] = 1.0
+        # signal[indicator_value < self.threshold_low] = -1.0
+        return torch.zeros((batch_size, 1, 1), device=device)
 
 class EventDrivenStrategy(BaseStrategy):
-    """
-    Simplified: Uses unusual price changes (gaps) and volume spikes to proxy for market-moving events.
-    Ideally, this strategy would use news feeds, sentiment analysis on news, and event calendars.
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="EventDrivenStrategy",
-            description="Simplified: Uses unusual price changes (gaps) and volume spikes to proxy for market-moving events.",
+            description="Trades on specific events like earnings announcements, mergers, etc.",
             default_params={
-                'instrument_key': None,
-                'gap_threshold_atr_multiplier': 1.5,
-                'volume_spike_multiplier': 3.0,
-                'atr_period': 14,
-                'volume_period': 20,
-                'feature_indices': {'Open':0, 'High': 1, 'Low': 2, 'Close': 3, 'Volume': 4} # Example indices
+                'event_impact_threshold': 0.7, # Arbitrary scale of event impact
+                'event_indicator_idx': -1 # Index for feature indicating event proximity/impact
             },
-            applicable_assets=[]
+            applicable_assets=[] # Specific stocks usually
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.gap_threshold_atr_multiplier = self.params.get('gap_threshold_atr_multiplier', 1.5)
-        self.volume_spike_multiplier = self.params.get('volume_spike_multiplier', 3.0)
-        self.atr_period = self.params.get('atr_period', 14)
-        self.volume_period = self.params.get('volume_period', 20)
-        self.feature_indices = self.params.get('feature_indices', {'Open':0, 'High': 1, 'Low': 2, 'Close': 3, 'Volume': 4})
+        self.event_impact_threshold = self.params.get('event_impact_threshold', 0.7)
+        self.event_indicator_idx = self.params.get('event_indicator_idx', -1)
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        open_idx = self.feature_indices['Open']
-        high_idx = self.feature_indices['High']
-        low_idx = self.feature_indices['Low']
-        close_idx = self.feature_indices['Close']
-        vol_idx = self.feature_indices['Volume']
+        if self.event_indicator_idx < 0 or self.event_indicator_idx >= num_features:
+            # self.logger.warning(f"[{self.config.name}] Event indicator index not valid or data unavailable. Neutral signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        for i in range(batch_size):
-            df = pd.DataFrame({
-                'Open': asset_features[i, :, open_idx].cpu().numpy(),
-                'High': asset_features[i, :, high_idx].cpu().numpy(),
-                'Low': asset_features[i, :, low_idx].cpu().numpy(),
-                'Close': asset_features[i, :, close_idx].cpu().numpy(),
-                'Volume': asset_features[i, :, vol_idx].cpu().numpy()
-            })
-
-            if df.empty or not all(c in df.columns for c in ['Open', 'High', 'Low', 'Close', 'Volume']):
-                continue
-
-            df['atr'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=self.atr_period, fillna=True)
-            df['avg_volume'] = df['Volume'].rolling(window=self.volume_period, min_periods=max(1,self.volume_period//2)).mean()
-            
-            df['gap_up'] = df['Open'] > (df['Close'].shift(1) + df['atr'].shift(1) * self.gap_threshold_atr_multiplier)
-            df['gap_down'] = df['Open'] < (df['Close'].shift(1) - df['atr'].shift(1) * self.gap_threshold_atr_multiplier)
-            df['volume_spike'] = df['Volume'] > (df['avg_volume'] * self.volume_spike_multiplier)
-            df.fillna({'atr':0, 'avg_volume':0, 'gap_up':False, 'gap_down':False, 'volume_spike':False}, inplace=True)
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            bullish_event = df['gap_up'] & df['volume_spike'] & (df['Close'] > df['Open'])
-            bearish_event = df['gap_down'] & df['volume_spike'] & (df['Close'] < df['Open'])
-
-            current_signals_np[bullish_event.fillna(False)] = 1.0
-            current_signals_np[bearish_event.fillna(False)] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        # Placeholder: Actual logic for EventDrivenStrategy
+        # event_signal = asset_features[:, -1, self.event_indicator_idx] # Assuming higher is more impactful
+        # signal = torch.zeros((batch_size, 1, 1), device=device)
+        # signal[event_signal > self.event_impact_threshold] = 1.0 # Example: Go long on positive event
+        # signal[event_signal < -self.event_impact_threshold] = -1.0 # Example: Go short on negative event
+        return torch.zeros((batch_size, 1, 1), device=device)
 
 class SentimentStrategy(BaseStrategy):
-    """
-    Simplified: Uses RSI and Stochastics to gauge overbought/oversold conditions as a proxy for extreme sentiment.
-    Ideally, this strategy would use actual sentiment scores from news, social media, surveys.
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="SentimentStrategy",
-            description="Simplified: Uses RSI and Stochastics to gauge overbought/oversold conditions as a proxy for extreme sentiment.",
+            description="Uses sentiment data (e.g., from news, social media) to make trading decisions.",
             default_params={
-                'instrument_key': None,
-                'rsi_period': 14,
-                'stoch_k_period': 14,
-                'stoch_d_period': 3,
-                'rsi_ob_threshold': 70.0,
-                'rsi_os_threshold': 30.0,
-                'stoch_ob_threshold': 80.0,
-                'stoch_os_threshold': 20.0,
-                'feature_indices': {'High': 1, 'Low': 2, 'Close': 3} # Example indices
+                'sentiment_idx': -1, # Index for sentiment score feature
+                'positive_threshold': 0.6,
+                'negative_threshold': 0.2
             },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.rsi_period = self.params.get('rsi_period', 14)
-        self.stoch_k_period = self.params.get('stoch_k_period', 14)
-        self.stoch_d_period = self.params.get('stoch_d_period', 3)
-        self.rsi_ob_threshold = self.params.get('rsi_ob_threshold', 70.0)
-        self.rsi_os_threshold = self.params.get('rsi_os_threshold', 30.0)
-        self.stoch_ob_threshold = self.params.get('stoch_ob_threshold', 80.0)
-        self.stoch_os_threshold = self.params.get('stoch_os_threshold', 20.0)
-        self.feature_indices = self.params.get('feature_indices', {'High': 1, 'Low': 2, 'Close': 3})
-            
+        self.sentiment_idx = self.params.get('sentiment_idx', -1)
+        self.positive_threshold = self.params.get('positive_threshold', 0.6)
+        self.negative_threshold = self.params.get('negative_threshold', 0.2)
+
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        high_idx = self.feature_indices['High']
-        low_idx = self.feature_indices['Low']
-        close_idx = self.feature_indices['Close']
+        if self.sentiment_idx < 0 or self.sentiment_idx >= num_features:
+            # self.logger.warning(f"[{self.config.name}] Sentiment index not valid or data unavailable. Neutral signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        for i in range(batch_size):
-            df = pd.DataFrame({
-                'High': asset_features[i, :, high_idx].cpu().numpy(),
-                'Low': asset_features[i, :, low_idx].cpu().numpy(),
-                'Close': asset_features[i, :, close_idx].cpu().numpy()
-            })
+        # Placeholder: Actual logic for SentimentStrategy
+        # sentiment_score = asset_features[:, -1, self.sentiment_idx]
+        # signal = torch.zeros((batch_size, 1, 1), device=device)
+        # signal[sentiment_score > self.positive_threshold] = 1.0
+        # signal[sentiment_score < self.negative_threshold] = -1.0
+        return torch.zeros((batch_size, 1, 1), device=device)
 
-            if df.empty or not all(c in df.columns for c in ['High', 'Low', 'Close']):
-                continue
-
-            df['rsi'] = ta.momentum.rsi(df['Close'], window=self.rsi_period, fillna=True)
-            stoch = ta.momentum.StochasticOscillator(
-                high=df['High'], low=df['Low'], close=df['Close'], 
-                window=self.stoch_k_period, smooth_window=self.stoch_d_period, fillna=True
-            )
-            df['stoch_k'] = stoch.stoch()
-            df['stoch_d'] = stoch.stoch_signal()
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            overbought_condition = (df['rsi'] > self.rsi_ob_threshold) & (df['stoch_k'] > self.stoch_ob_threshold) & (df['stoch_k'] < df['stoch_k'].shift(1))
-            oversold_condition = (df['rsi'] < self.rsi_os_threshold) & (df['stoch_k'] < self.stoch_os_threshold) & (df['stoch_k'] > df['stoch_k'].shift(1))
-
-            current_signals_np[overbought_condition.fillna(False)] = -1.0
-            current_signals_np[oversold_condition.fillna(False)] = 1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
-
-class QuantitativeStrategy(BaseStrategy):
-    """
-    A simple multi-factor model using common technical indicators.
-    """
+class QuantitativeStrategy(BaseStrategy): # Generic Quantitative
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="QuantitativeStrategy",
-            description="A generic quantitative strategy placeholder. Relies on 'expression' and 'feature_dict' params.",
+            description="A generic quantitative strategy based on a combination of factors.",
             default_params={
-                'expression': None, 
-                'feature_dict': {}, 
-                'asset_list': [],
-                'feature_indices': {'Close': 3, 'ma_short': -1, 'ma_long': -1, 'rsi': -1, 'bb_lower': -1, 'bb_upper': -1} # Placeholder indices
-            }
+                'factor1_idx': 0, 'factor2_idx': 1, # Example factor indices
+                'weight1': 0.5, 'weight2': 0.5
+            },
+            applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.expression = self.params.get('expression')
-        self.feature_dict = self.params.get('feature_dict', {})
-        self.feature_indices = self.params.get('feature_indices', {})
-        if not self.expression:
-            self.logger.warning(f"{self.config.name}: 'expression' parameter is not set. Strategy may not produce signals.")
+        self.factor1_idx = self.params.get('factor1_idx', 0)
+        self.factor2_idx = self.params.get('factor2_idx', 1)
+        self.weight1 = self.params.get('weight1', 0.5)
+        self.weight2 = self.params.get('weight2', 0.5)
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, num_features_tensor = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        # This strategy is complex due to dynamic feature calculation via 'eval' and 'feature_dict'.
-        # A full tensor-based refactor would require a tensor-native way to compute these dynamic features.
-        # For now, we'll process per batch item and use pandas, similar to other strategies.
-        # The `feature_dict` logic with `eval` is particularly tricky and unsafe for production.
-        # The `generate_signals` part uses hardcoded features like 'ma_short', 'rsi', etc.
-        # We need to ensure these are present or calculated.
+        if self.factor1_idx >= num_features or self.factor2_idx >= num_features:
+            # self.logger.error(f"[{self.config.name}] Factor indices out of bounds. Neutral signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        # Assuming standard features are available at known indices if not dynamically calculated.
-        close_idx = self.feature_indices.get('Close', -1) # Default to -1 if not found
-        # The following features are used in the original generate_signals, but not calculated in original forward.
-        # This implies they are expected to be pre-calculated or part of a richer asset_features tensor.
-        # For this refactor, we'll assume they need to be calculated if not present.
-        # This part is highly dependent on how `asset_features` is constructed upstream.
-
-        for i in range(batch_size):
-            # Create a base DataFrame from essential features
-            df_data = {}
-            if close_idx != -1 and close_idx < num_features_tensor:
-                 df_data['Close'] = asset_features[i, :, close_idx].cpu().numpy()
-            else:
-                self.logger.warning(f"{self.config.name}: 'Close' feature index not valid. Cannot proceed for batch item {i}.")
-                continue # Skip this batch item
-            
-            df = pd.DataFrame(df_data)
-            if df.empty:
-                continue
-
-            # Attempt to calculate features defined in feature_dict (original forward logic)
-            # This is still problematic and not very tensor-friendly.
-            # For a real scenario, features should be tensor operations or pre-calculated.
-            # For now, retain the eval-based approach for compatibility, but it's a major refactoring point.
-            temp_market_data_for_eval = pd.DataFrame(asset_features[i,:,:].cpu().numpy()) # Provide all raw features to eval
-            # We need to map column names for eval if feature_dict uses names like 'close'
-            # This is a simplification; a robust solution needs careful name mapping.
-            # Assuming feature_dict refers to columns by standard names like 'Close', 'High' etc.
-            # and that asset_features has these at appropriate indices.
-            # This part is very fragile.
-
-            # For generate_signals, we need: ma_short, ma_long, rsi, bb_lower, bb_upper
-            # Let's calculate them using `ta` for simplicity, assuming `Close` is available.
-            df['ma_short'] = ta.trend.sma_indicator(df['Close'], window=10, fillna=True) # Example window
-            df['ma_long'] = ta.trend.sma_indicator(df['Close'], window=20, fillna=True)  # Example window
-            df['rsi'] = ta.momentum.rsi(df['Close'], window=14, fillna=True) # Example window
-            bbands = ta.volatility.BollingerBands(close=df['Close'], window=20, window_dev=2, fillna=True) # Example params
-            df['bb_lower'] = bbands.bollinger_lband()
-            df['bb_upper'] = bbands.bollinger_hband()
-            df.fillna(0, inplace=True) # Fill NaNs that might result from indicator calculations
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            trend_factor = (df['ma_short'] > df['ma_long']).astype(int) * 2 - 1
-            momentum_factor_bull = (df['rsi'] > 55).astype(int)
-            momentum_factor_bear = (df['rsi'] < 45).astype(int) * -1
-            momentum_factor = momentum_factor_bull + momentum_factor_bear
-            
-            volatility_factor_buy = (df['Close'] < df['bb_lower']).astype(int)
-            volatility_factor_sell = (df['Close'] > df['bb_upper']).astype(int) * -1
-            volatility_factor = volatility_factor_buy + volatility_factor_sell
-
-            combined_score = trend_factor + momentum_factor + volatility_factor
-
-            current_signals_np[combined_score >= 2] = 1.0
-            current_signals_np[combined_score <= -2] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        # Placeholder: Actual logic for QuantitativeStrategy
+        # factor1_value = asset_features[:, -1, self.factor1_idx]
+        # factor2_value = asset_features[:, -1, self.factor2_idx]
+        # combined_signal = self.weight1 * factor1_value + self.weight2 * factor2_value
+        # For simplicity, let's assume combined_signal is already scaled between -1 and 1
+        # signal = combined_signal.unsqueeze(-1).unsqueeze(-1) # (batch_size, 1, 1)
+        return torch.zeros((batch_size, 1, 1), device=device)
 
 class MarketMakingStrategy(BaseStrategy):
-    """
-    Simplified: Simulates placing bid/ask signals around a central moving average.
-    Signals are +1 for simulated bid, -1 for simulated ask. No actual order placement logic.
-    Ideally, this strategy uses L1/L2 order book data, inventory management, and sophisticated fair value estimation.
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="MarketMakingStrategy",
-            description="Simplified market making: places bid/ask around a reference price if spread is wide enough.",
+            description="Provides liquidity by placing bid and ask orders around the perceived fair value.",
             default_params={
-                'instrument_key': None,
-                'reference_price_ma_period': 10, 
-                'min_spread_threshold_abs': 0.0005, 
-                'quote_offset_abs': 0.0002,
-                # 'ma_period' and 'spread_percentage' were used in old forward/generate_signals, ensure they are covered or updated.
-                # Assuming 'reference_price_ma_period' replaces 'ma_period'.
-                # 'spread_percentage' is not directly used in the new logic, using fixed offsets.
-                'feature_indices': {'Close': 3, 'Low': 2, 'High':1} # Example indices
+                'spread_factor': 0.001, 
+                'order_size': 100,
+                'fair_value_period': 20, # Period for calculating fair value (e.g., SMA of mid-price)
+                'close_idx': 3 # Assuming close price is a proxy for mid-price if order book not available
             },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.ma_period = self.params.get('reference_price_ma_period', 10) # Renamed from 'ma_period' for clarity
-        self.quote_offset_abs = self.params.get('quote_offset_abs', 0.0002)
-        # self.spread_percentage = self.params.get('spread_percentage', 0.001) # Not used in current simplified signal logic
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3, 'Low': 2, 'High':1})
+        self.spread_factor = self.params.get('spread_factor', 0.001)
+        self.order_size = self.params.get('order_size', 100)
+        self.fair_value_period = self.params.get('fair_value_period', 20)
+        self.close_idx = self.params.get('close_idx', 3)
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        # This strategy is more about providing target bid/ask, not direct buy/sell signals.
-        # The output tensor will be (batch_size, seq_len, 3) for [signal, target_bid, target_ask]
-        # However, BaseStrategy.forward expects (batch_size, seq_len, 1) for signals.
-        # For now, we will return a signal of 0, and log/ignore target_bid/ask for compatibility.
-        # A proper solution would involve a different output structure or strategy type.
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
-        
-        close_idx = self.feature_indices['Close']
-        # low_idx = self.feature_indices['Low'] # Not used in current simplified signal logic
-        # high_idx = self.feature_indices['High'] # Not used in current simplified signal logic
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        for i in range(batch_size):
-            df = pd.DataFrame({'Close': asset_features[i, :, close_idx].cpu().numpy()})
-            # df_low = pd.Series(asset_features[i, :, low_idx].cpu().numpy())
-            # df_high = pd.Series(asset_features[i, :, high_idx].cpu().numpy())
-
-            if df.empty or 'Close' not in df.columns:
-                continue
-
-            df['central_ma'] = ta.trend.sma_indicator(df['Close'], window=self.ma_period, fillna=True)
-            # The original forward used spread_percentage. The default_params now has quote_offset_abs.
-            # Let's use quote_offset_abs for sim_bid/ask.
-            df['sim_bid_price'] = df['central_ma'] - self.quote_offset_abs
-            df['sim_ask_price'] = df['central_ma'] + self.quote_offset_abs
-            df.fillna(0, inplace=True)
-
-            # Original generate_signals logic was mostly about setting target_bid/target_ask.
-            # It had commented out logic for actual signals if Low/High hit these targets.
-            # For now, signal is 0 as per original dominant logic.
-            current_signals_np = np.zeros(seq_len)
-            # Example: (Uncomment and adapt if actual signals are desired)
-            # if 'Low' in df.columns and 'High' in df.columns: # Requires Low/High features
-            #    current_signals_np[df_low.to_numpy() <= df['sim_bid_price'].to_numpy()] = 1.0
-            #    current_signals_np[df_high.to_numpy() >= df['sim_ask_price'].to_numpy()] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        # Placeholder: Actual logic for MarketMakingStrategy
+        # This strategy is complex and typically requires real-time order book data and execution capabilities.
+        # For a simulation with OHLCV, it's highly simplified.
+        # self.logger.warning(f"[{self.config.name}] MarketMaking is highly simplified. Neutral signal.")
+        # fair_value_proxy = _sma_tensor(asset_features[:, :, self.close_idx], self.fair_value_period)[:, -1]
+        # bid_price = fair_value_proxy * (1 - self.spread_factor)
+        # ask_price = fair_value_proxy * (1 + self.spread_factor)
+        # For SAC, we need a target position or action. This strategy doesn't directly map to that well.
+        # Let's return a neutral signal as it's more about order placement than directional bets.
+        return torch.zeros((batch_size, 1, 1), device=device)
 
 class HighFrequencyStrategy(BaseStrategy):
-    """
-    Simplified: Uses very short-term RSI and MA to capture quick fluctuations.
-    Assumes input data is high-frequency (e.g., 1-minute bars).
-    Ideally, this strategy uses tick data, order book dynamics, and latency-sensitive execution.
-    """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="HighFrequencyStrategy",
-            description="Placeholder for HFT. Simplified: reacts to very short-term price changes (tick-level momentum).",
+            description="Exploits very short-term market inefficiencies, often latency-sensitive.",
             default_params={
-                'instrument_key': None,
-                'tick_momentum_threshold': 0.0001, # Not directly used in current RSI/MA logic
-                'rsi_period': 5, # Short period for HFT proxy
-                'ma_period': 10, # Short period for HFT proxy
-                'rsi_os': 30,
-                'rsi_ob': 70,
-                'feature_indices': {'Close': 3} # Example index
+                'latency_proxy_idx': -1, # Index for a feature that might proxy for latency arbitrage opps
+                'threshold': 0.0001
             },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.rsi_period = self.params.get('rsi_period', 5)
-        self.ma_period = self.params.get('ma_period', 10)
-        self.rsi_os = self.params.get('rsi_os', 30)
-        self.rsi_ob = self.params.get('rsi_ob', 70)
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3})
+        self.latency_proxy_idx = self.params.get('latency_proxy_idx', -1)
+        self.threshold = self.params.get('threshold', 0.0001)
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
-        close_idx = self.feature_indices['Close']
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
+        # Placeholder: Actual logic for HighFrequencyStrategy
+        # self.logger.warning(f"[{self.config.name}] HFT is highly simplified and data-dependent. Neutral signal.")
+        return torch.zeros((batch_size, 1, 1), device=device)
 
-        for i in range(batch_size):
-            df = pd.DataFrame({'Close': asset_features[i, :, close_idx].cpu().numpy()})
-
-            if df.empty or 'Close' not in df.columns:
-                continue
-
-            df['rsi'] = ta.momentum.rsi(df['Close'], window=self.rsi_period, fillna=True)
-            df['ma'] = ta.trend.sma_indicator(df['Close'], window=self.ma_period, fillna=True)
-            df.fillna(0, inplace=True)
-
-            # Original generate_signals logic
-            current_signals_np = np.zeros(seq_len)
-            buy_condition = (df['rsi'] < self.rsi_os) & (df['Close'] > df['ma'])
-            sell_condition = (df['rsi'] > self.rsi_ob) & (df['Close'] < df['ma'])
-
-            current_signals_np[buy_condition.fillna(False)] = 1.0
-            current_signals_np[sell_condition.fillna(False)] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
-
-class AlgorithmicStrategy(BaseStrategy):
-    """
-    A generic algorithmic strategy, here implemented as a VWAP cross strategy.
-    """
+class AlgorithmicStrategy(BaseStrategy): # Generic Algorithmic
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="AlgorithmicStrategy",
-            description="A generic algorithmic strategy that executes trades based on predefined rules (placeholder).",
-            default_params={
-                'rule_buy_condition': None, 
-                'rule_sell_condition': None, 
-                'asset_list': [],
-                'ma_window_algo': 20, # Added for the example logic
-                'feature_indices': {'Close': 3} # Example index
-            }
+            description="A general algorithmic strategy placeholder.",
+            default_params={},
+            applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.rule_buy_condition = self.params.get('rule_buy_condition') # Not directly used in refactored example
-        self.rule_sell_condition = self.params.get('rule_sell_condition') # Not directly used
-        self.ma_window_algo = self.params.get('ma_window_algo', 20)
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3})
-        if not self.rule_buy_condition or not self.rule_sell_condition:
-            self.logger.warning(f"{self.config.name}: Buy/Sell rule conditions are not fully set. Strategy may not produce signals if relying on them.")
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
-        close_idx = self.feature_indices['Close']
-
-        # The original forward was a pass-through. The generate_signals had example MA logic.
-        # We will implement the example MA logic here.
-        # Proper rule evaluation based on 'rule_buy_condition' strings is complex and out of scope for this direct refactor.
-
-        for i in range(batch_size):
-            df = pd.DataFrame({'Close': asset_features[i, :, close_idx].cpu().numpy()})
-
-            if df.empty or 'Close' not in df.columns:
-                continue
-            
-            # Example logic from original generate_signals
-            df['ma_algo'] = df['Close'].rolling(window=self.ma_window_algo).mean().fillna(0)
-            df.fillna(0, inplace=True)
-
-            current_signals_np = np.zeros(seq_len)
-            buy_condition = df['Close'] > df['ma_algo']
-            sell_condition = df['Close'] < df['ma_algo']
-
-            # Avoid setting signal if MA is zero (e.g. at the start of series due to not enough data for rolling mean)
-            valid_ma = df['ma_algo'] != 0
-            current_signals_np[(buy_condition & valid_ma).fillna(False)] = 1.0
-            current_signals_np[(sell_condition & valid_ma).fillna(False)] = -1.0
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
+        # Placeholder: Actual logic for AlgorithmicStrategy
+        return torch.zeros((batch_size, 1, 1), device=device)

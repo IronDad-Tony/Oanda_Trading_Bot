@@ -2,11 +2,12 @@
 from .base_strategy import BaseStrategy, StrategyConfig
 import pandas as pd
 import numpy as np
-import ta # For DynamicHedgingStrategy
-from scipy.stats import norm # For VaRControlStrategy
+import ta
+from scipy.stats import norm
 from typing import Dict, Optional, List, Any
-import logging # Added for logger
-import torch # Added for PyTorch tensors
+import logging
+import torch
+import torch.nn.functional as F # For rolling operations if needed
 
 class DynamicHedgingStrategy(BaseStrategy):
 
@@ -15,288 +16,281 @@ class DynamicHedgingStrategy(BaseStrategy):
         return StrategyConfig(
             name="DynamicHedgingStrategy",
             description="Dynamically hedges based on price changes relative to ATR.",
-            default_params={'instrument_key': None, 'atr_period': 14, 'atr_multiplier_threshold': 2.0, 
-                            'feature_indices': {'High': 1, 'Low': 2, 'Close': 3}}, # Assuming H,L,C are at these indices
-            applicable_assets=[] # Should be set by 'instrument_key' or instance config
+            default_params={
+                'atr_period': 14, 
+                'atr_multiplier_threshold': 2.0, 
+                'high_idx': 1, # Default index for High prices in input_dim features
+                'low_idx': 2,  # Default index for Low prices
+                'close_idx': 3 # Default index for Close prices
+            },
+            applicable_assets=[] # This strategy is typically single-asset
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.instrument_key = self.params.get('instrument_key') # Get from merged params
-        
-        if self.instrument_key is None and self.config.applicable_assets:
-            self.instrument_key = self.config.applicable_assets[0]
-            self.logger.info(f"{self.config.name}: 'instrument_key' not in params, using first from config.applicable_assets: {self.instrument_key}")
-        
-        if self.instrument_key is None:
-            self.logger.error(f"{self.config.name} requires 'instrument_key' in params or config.applicable_assets to be non-empty.")
-            # Strategy might not function correctly, but allow init to complete to avoid hard crash during layer setup.
-            # Downstream methods (forward/generate_signals) should handle self.instrument_key being None.
-            # raise ValueError(f"{self.config.name} requires 'instrument_key' in params or config.applicable_assets.")
-        elif not self.config.applicable_assets: # If instrument_key is set, ensure it's in applicable_assets
-            self.config.applicable_assets = [self.instrument_key]
-
         self.atr_period = self.params.get('atr_period', 14)
         self.atr_multiplier_threshold = self.params.get('atr_multiplier_threshold', 2.0)
-        self.feature_indices = self.params.get('feature_indices', {'High': 1, 'Low': 2, 'Close': 3})
+        self.high_idx = self.params.get('high_idx', 1)
+        self.low_idx = self.params.get('low_idx', 2)
+        self.close_idx = self.params.get('close_idx', 3)
 
+        if self.config.input_dim is not None:
+            max_idx = max(self.high_idx, self.low_idx, self.close_idx)
+            if max_idx >= self.config.input_dim:
+                self.logger.error(f"[{self.config.name}] Feature indices ({self.high_idx}, {self.low_idx}, {self.close_idx}) are out of bounds for input_dim {self.config.input_dim}. Strategy may fail.")
+        else:
+            self.logger.warning(f"[{self.config.name}] input_dim not specified in config. Feature index validation skipped.")
+
+    def _calculate_atr(self, high: torch.Tensor, low: torch.Tensor, close: torch.Tensor, window: int) -> torch.Tensor:
+        # high, low, close are (batch_size, seq_len)
+        # True Range calculation
+        tr1 = high - low
+        tr2 = torch.abs(high - torch.cat((close[:, :1], close[:, :-1]), dim=1)) # high - close_prev
+        tr3 = torch.abs(low - torch.cat((close[:, :1], close[:, :-1]), dim=1))  # low - close_prev
+        
+        true_range = torch.max(torch.max(tr1, tr2), tr3) # (batch_size, seq_len)
+        
+        # ATR is Wilder's Smoothing of True Range
+        # Using simple moving average for ATR here for simplicity with conv1d
+        # A more accurate Wilder's MA would use EMA-like calculation.
+        if true_range.shape[1] < window:
+            padding = window - true_range.shape[1]
+            padded_tr = F.pad(true_range.unsqueeze(1), (padding,0), mode='replicate')
+        else:
+            padding = window -1
+            padded_tr = F.pad(true_range.unsqueeze(1), (padding,0), mode='replicate') # (B, 1, S_padded)
+
+        sma_weights = torch.full((1, 1, window), 1.0/window, device=true_range.device, dtype=true_range.dtype)
+        atr = F.conv1d(padded_tr, sma_weights, stride=1).squeeze(1) # (B, S)
+        return atr
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        # asset_features shape: (batch_size, sequence_length, num_features)
-        # Assuming num_features are: High, Low, Close at specified indices
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
+        if self.config.input_dim and max(self.high_idx, self.low_idx, self.close_idx) >= num_features:
+            self.logger.error(f"[{self.config.name}] Feature indices out of bounds for actual features {num_features}. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+        
+        if seq_len < self.atr_period or seq_len == 0:
+            self.logger.warning(f"[{self.config.name}] Sequence length ({seq_len}) insufficient for ATR period ({self.atr_period}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        if seq_len == 0:
-            return signals_batch
+        high_prices = asset_features[:, :, self.high_idx]
+        low_prices = asset_features[:, :, self.low_idx]
+        close_prices = asset_features[:, :, self.close_idx]
 
-        high_idx = self.feature_indices['High']
-        low_idx = self.feature_indices['Low']
-        close_idx = self.feature_indices['Close']
+        atr = self._calculate_atr(high_prices, low_prices, close_prices, self.atr_period)
 
-        for i in range(batch_size):
-            # Convert tensor slice to DataFrame for ta compatibility
-            df = pd.DataFrame({
-                'High': asset_features[i, :, high_idx].cpu().numpy(),
-                'Low': asset_features[i, :, low_idx].cpu().numpy(),
-                'Close': asset_features[i, :, close_idx].cpu().numpy()
-            })
+        # Price change: positive if price drops (Close_prev - Close_current)
+        price_change = torch.cat((close_prices[:, :1], close_prices[:, :-1]), dim=1) - close_prices
+        price_change[:, 0] = 0 # No change for the first element
 
-            if df.empty or not all(col in df.columns for col in ['High', 'Low', 'Close']):
-                # If data is insufficient, signals remain 0 (neutral)
-                continue
+        # Avoid division by zero for ATR
+        safe_atr = atr.clamp(min=1e-9)
+        price_change_vs_atr = price_change / safe_atr
+        
+        # Signal based on the last time step
+        last_price_change_vs_atr = price_change_vs_atr[:, -1]
+        
+        signal = torch.zeros(batch_size, device=device)
+        # Original logic: signal = -1 if price_change_vs_atr > threshold (i.e., large drop)
+        signal[last_price_change_vs_atr > self.atr_multiplier_threshold] = -1.0
             
-            # Handle cases where sequence length is less than ATR period
-            if seq_len < self.atr_period:
-                # Not enough data to calculate ATR, return neutral signals
-                # signals_batch[i, :, 0] is already zeros
-                continue
+        return signal.view(batch_size, 1, 1)
 
-            df['atr'] = ta.volatility.average_true_range(
-                high=df['High'],
-                low=df['Low'],
-                close=df['Close'],
-                window=self.atr_period,
-                fillna=True # fillna=True in ta.average_true_range handles initial NaNs by backfilling
-            )
-            # Price change: positive if price drops (Close.shift(1) - Close)
-            df['price_change'] = df['Close'].shift(1) - df['Close']
-            
-            # Ensure ATR is not zero to avoid division by zero; if ATR is zero, price_change_vs_atr is zero.
-            df['price_change_vs_atr'] = np.where(df['atr'] != 0, (df['price_change'] / df['atr']), 0)
-            df['price_change_vs_atr'] = df['price_change_vs_atr'].fillna(0) # Fill NaNs from price_change or initial ATR
-            
-            # Generate signals based on processed data
-            # Original generate_signals logic:
-            # signals['signal'] = np.where(processed_data['price_change_vs_atr'] > self.atr_multiplier_threshold, -1, 0)
-            current_signals = np.where(df['price_change_vs_atr'] > self.atr_multiplier_threshold, -1.0, 0.0)
-            signals_batch[i, :, 0] = torch.tensor(current_signals, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
-
-class RiskParityStrategy(BaseStrategy): # Simplified for single asset: volatility-based risk adjustment
-
+class RiskParityStrategy(BaseStrategy):
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="RiskParityStrategy",
             description="Adjusts risk based on asset volatility (simplified).",
-            default_params={'instrument_key': None, 'vol_window': 20, 
-                            'high_vol_threshold_pct': 0.02, 'low_vol_threshold_pct': 0.005,
-                            'feature_indices': {'Close': 3}}, # Assuming Close is at index 3
+            default_params={
+                'vol_window': 20, 
+                'high_vol_threshold_pct': 0.02, 
+                'low_vol_threshold_pct': 0.005,
+                'close_idx': 3 # Default index for Close prices
+            },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.instrument_key = self.params.get('instrument_key')
-        
-        if self.instrument_key is None and self.config.applicable_assets:
-            self.instrument_key = self.config.applicable_assets[0]
-            self.logger.info(f"{self.config.name}: 'instrument_key' not in params, using first from config.applicable_assets: {self.instrument_key}")
-
-        if self.instrument_key is None:
-            self.logger.error(f"{self.config.name} requires 'instrument_key' in params or config.applicable_assets to be non-empty.")
-        elif not self.config.applicable_assets:
-            self.config.applicable_assets = [self.instrument_key]
-
         self.vol_window = self.params.get('vol_window', 20)
         self.high_vol_threshold_pct = self.params.get('high_vol_threshold_pct', 0.02)
         self.low_vol_threshold_pct = self.params.get('low_vol_threshold_pct', 0.005)
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3})
+        self.close_idx = self.params.get('close_idx', 3)
+
+        if self.config.input_dim is not None and self.close_idx >= self.config.input_dim:
+            self.logger.error(f"[{self.config.name}] Close index {self.close_idx} is out of bounds for input_dim {self.config.input_dim}.")
+        elif self.config.input_dim is None:
+            self.logger.warning(f"[{self.config.name}] input_dim not specified in config. Feature index validation skipped.")
+
+    def _rolling_std(self, tensor: torch.Tensor, window_size: int) -> torch.Tensor:
+        # tensor is (batch, seq_len)
+        if tensor.shape[1] < window_size:
+            padding = window_size - tensor.shape[1]
+            tensor_padded_for_mean = F.pad(tensor.unsqueeze(1), (padding,0), mode='replicate')
+        else:
+            padding = window_size -1
+            tensor_padded_for_mean = F.pad(tensor.unsqueeze(1), (padding,0), mode='replicate')
+        
+        sma_weights = torch.full((1, 1, window_size), 1.0/window_size, device=tensor.device, dtype=tensor.dtype)
+        mean_x = F.conv1d(tensor_padded_for_mean, sma_weights, stride=1).squeeze(1)
+        
+        # For mean_x_sq, input tensor is tensor**2
+        tensor_sq = tensor**2
+        if tensor_sq.shape[1] < window_size:
+            padding_sq = window_size - tensor_sq.shape[1]
+            tensor_sq_padded = F.pad(tensor_sq.unsqueeze(1), (padding_sq,0), mode='replicate')
+        else:
+            padding_sq = window_size -1
+            tensor_sq_padded = F.pad(tensor_sq.unsqueeze(1), (padding_sq,0), mode='replicate')
+
+        mean_x_sq = F.conv1d(tensor_sq_padded, sma_weights, stride=1).squeeze(1)
+        
+        variance = (mean_x_sq - mean_x**2).clamp(min=1e-9)
+        return torch.sqrt(variance)
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        # asset_features shape: (batch_size, sequence_length, num_features)
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
+
+        if self.config.input_dim and self.close_idx >= num_features:
+            self.logger.error(f"[{self.config.name}] Close index {self.close_idx} OOB for actual features {num_features}. Zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        if seq_len < self.vol_window or seq_len == 0:
+            self.logger.warning(f"[{self.config.name}] Seq length ({seq_len}) < vol_window ({self.vol_window}). Zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        close_prices = asset_features[:, :, self.close_idx]
+        returns = torch.zeros_like(close_prices)
+        # pct_change: (current - previous) / previous
+        returns[:, 1:] = (close_prices[:, 1:] - close_prices[:, :-1]) / close_prices[:, :-1].clamp(min=1e-9)
+        returns[:, 0] = 0 # No return for the first element
+
+        volatility = self._rolling_std(returns, self.vol_window)
+        last_volatility = volatility[:, -1]
         
-        if seq_len == 0:
-            return signals_batch
+        signal = torch.zeros(batch_size, device=device)
+        signal[last_volatility > self.high_vol_threshold_pct] = -1.0 # Reduce risk
+        signal[last_volatility < self.low_vol_threshold_pct] = 1.0  # Increase risk appetite
             
-        close_idx = self.feature_indices['Close']
-
-        for i in range(batch_size):
-            df = pd.DataFrame({'Close': asset_features[i, :, close_idx].cpu().numpy()})
-
-            if df.empty or 'Close' not in df.columns:
-                continue
-
-            df['returns'] = df['Close'].pct_change()
-            # Calculate volatility only when enough data is available (min_periods = window)
-            # NaN will be present for initial periods where window is not full.
-            df['volatility'] = df['returns'].rolling(window=self.vol_window, min_periods=self.vol_window).std()
-            
-            current_signals_np = np.zeros(seq_len)
-            # Conditions should only apply where volatility is not NaN
-            high_vol_condition = pd.notna(df['volatility']) & (df['volatility'] > self.high_vol_threshold_pct)
-            low_vol_condition = pd.notna(df['volatility']) & (df['volatility'] < self.low_vol_threshold_pct) 
-            # Ensure that low_vol_condition also checks that volatility is not zero, if zero is not a valid low vol signal.
-            # However, if std can be legitimately zero (e.g. flat price), it might be considered very low volatility.
-            # The current thresholds should handle this. If low_vol_threshold_pct is > 0, then 0 vol will trigger it.
-            
-            current_signals_np[high_vol_condition] = -1.0 # Reduce risk
-            current_signals_np[low_vol_condition] = 1.0  # Increase risk appetite
-            
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        return signal.view(batch_size, 1, 1)
 
 class VaRControlStrategy(BaseStrategy):
-
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="VaRControlStrategy",
             description="Controls risk based on Value at Risk (VaR) estimates.",
-            default_params={'instrument_key': None, 'var_window': 20, 
-                            'var_confidence': 0.99, 'var_limit': 0.02,
-                            'feature_indices': {'Close': 3}}, # Assuming Close is at index 3
+            default_params={
+                'var_window': 20, 
+                'var_confidence': 0.99, 
+                'var_limit': 0.02,
+                'close_idx': 3 # Default index for Close prices
+            },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.instrument_key = self.params.get('instrument_key')
-
-        if self.instrument_key is None and self.config.applicable_assets:
-            self.instrument_key = self.config.applicable_assets[0]
-            self.logger.info(f"{self.config.name}: 'instrument_key' not in params, using first from config.applicable_assets: {self.instrument_key}")
-
-        if self.instrument_key is None:
-            self.logger.error(f"{self.config.name} requires 'instrument_key' in params or config.applicable_assets to be non-empty.")
-        elif not self.config.applicable_assets:
-            self.config.applicable_assets = [self.instrument_key]
-            
         self.var_window = self.params.get('var_window', 20)
         self.var_limit = self.params.get('var_limit', 0.02)
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3})
-        self.z_score = norm.ppf(self.params.get('var_confidence', 0.99))
+        self.close_idx = self.params.get('close_idx', 3)
+        self.z_score_val = norm.ppf(self.params.get('var_confidence', 0.99))
 
+        if self.config.input_dim is not None and self.close_idx >= self.config.input_dim:
+            self.logger.error(f"[{self.config.name}] Close index {self.close_idx} OOB for input_dim {self.config.input_dim}.")
+        elif self.config.input_dim is None:
+             self.logger.warning(f"[{self.config.name}] input_dim not specified. Index validation skipped.")
+
+    _rolling_std = RiskParityStrategy._rolling_std # Reuse from RiskParityStrategy
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        if seq_len == 0:
-            return signals_batch
+        if self.config.input_dim and self.close_idx >= num_features:
+            self.logger.error(f"[{self.config.name}] Close index {self.close_idx} OOB for actual features {num_features}. Zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        if seq_len < self.var_window or seq_len == 0:
+            self.logger.warning(f"[{self.config.name}] Seq length ({seq_len}) < var_window ({self.var_window}). Zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        close_prices = asset_features[:, :, self.close_idx]
+        returns = torch.zeros_like(close_prices)
+        returns[:, 1:] = (close_prices[:, 1:] - close_prices[:, :-1]) / close_prices[:, :-1].clamp(min=1e-9)
+        returns[:, 0] = 0
+
+        rolling_std_dev = self._rolling_std(self, returns, self.var_window) # Pass self for logger context
+        estimated_var = rolling_std_dev[:, -1] * self.z_score_val
+        
+        signal = torch.zeros(batch_size, device=device)
+        signal[estimated_var > self.var_limit] = -1.0 # Reduce risk
             
-        close_idx = self.feature_indices['Close']
-
-        for i in range(batch_size):
-            df = pd.DataFrame({'Close': asset_features[i, :, close_idx].cpu().numpy()})
-
-            if df.empty or 'Close' not in df.columns:
-                continue
-
-            df['returns'] = df['Close'].pct_change()
-            # Calculate rolling_std only when enough data is available (min_periods = window)
-            df['rolling_std'] = df['returns'].rolling(window=self.var_window, min_periods=self.var_window).std()
-            df['estimated_var'] = df['rolling_std'] * self.z_score # Parametric VaR
-            
-            current_signals_np = np.zeros(seq_len)
-            # Condition should only apply where estimated_var is not NaN
-            condition = pd.notna(df['estimated_var']) & (df['estimated_var'] > self.var_limit)
-            current_signals_np[condition] = -1.0 # -1 to reduce risk
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        return signal.view(batch_size, 1, 1)
 
 class MaxDrawdownControlStrategy(BaseStrategy):
-
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="MaxDrawdownControlStrategy",
             description="Controls risk by monitoring and reacting to maximum drawdown.",
-            default_params={'instrument_key': None, 'max_drawdown_limit': 0.10,
-                            'feature_indices': {'Close': 3}}, # Assuming Close is at index 3
+            default_params={
+                'max_drawdown_limit': 0.10,
+                'close_idx': 3 # Default index for Close prices
+            },
             applicable_assets=[]
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.instrument_key = self.params.get('instrument_key')
-
-        if self.instrument_key is None and self.config.applicable_assets:
-            self.instrument_key = self.config.applicable_assets[0]
-            self.logger.info(f"{self.config.name}: 'instrument_key' not in params, using first from config.applicable_assets: {self.instrument_key}")
-            
-        if self.instrument_key is None:
-            self.logger.error(f"{self.config.name} requires 'instrument_key' in params or config.applicable_assets to be non-empty.")
-        elif not self.config.applicable_assets:
-            self.config.applicable_assets = [self.instrument_key]
-            
         self.max_drawdown_limit = self.params.get('max_drawdown_limit', 0.10)
-        self.feature_indices = self.params.get('feature_indices', {'Close': 3})
-        # self.hwm_scalar is instance specific and needs careful handling with batched tensor inputs.
-        # For simplicity in this refactor, HWM will be calculated per batch item independently.
-        # A truly persistent HWM across batches for a learnable module would require state management
-        # outside the forward pass or as a non-differentiable buffer.
-        # For now, this strategy is likely not part of gradient-based learning.
-        self.hwm_per_batch_item = {} # Stores hwm for each item in batch if we need persistence across calls for same item
+        self.close_idx = self.params.get('close_idx', 3)
+        # HWM state is tricky with stateless forward passes. 
+        # This strategy, if stateful HWM is needed across calls, requires external state management or becomes non-batchable easily.
+        # For a batch, HWM is computed per item over its sequence length.
+        if self.config.input_dim is not None and self.close_idx >= self.config.input_dim:
+            self.logger.error(f"[{self.config.name}] Close index {self.close_idx} OOB for input_dim {self.config.input_dim}.")
+        elif self.config.input_dim is None:
+             self.logger.warning(f"[{self.config.name}] input_dim not specified. Index validation skipped.")
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        batch_size, seq_len, _ = asset_features.shape
-        signals_batch = torch.zeros(batch_size, seq_len, 1, device=asset_features.device)
-        close_idx = self.feature_indices['Close']
+        batch_size, seq_len, num_features = asset_features.shape
+        device = asset_features.device
 
-        for i in range(batch_size):
-            # For this strategy, HWM should ideally be persistent.
-            # The self.hwm_scalar was instance-level.
-            # With batches, we'd need one HWM per item in the batch if sequences are independent.
-            # Or a single HWM if the batch represents a single time series processed in segments.
-            # Assuming independent sequences in a batch for now.
-            # This means hwm is reset for each call to forward for each batch item, which is not ideal for true drawdown.
-            # A proper fix would involve managing state more carefully.
-            # For now, we calculate HWM within each sequence in the batch.
-            
-            current_batch_hwm_val = -float('inf') # Reset for each item in batch for this simplified version
+        if self.config.input_dim and self.close_idx >= num_features:
+            self.logger.error(f"[{self.config.name}] Close index {self.close_idx} OOB for actual features {num_features}. Zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-            close_prices_np = asset_features[i, :, close_idx].cpu().numpy()
-            df = pd.DataFrame({'Close': close_prices_np})
+        if seq_len == 0:
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-            if df.empty or 'Close' not in df.columns:
-                continue
+        close_prices = asset_features[:, :, self.close_idx] # (batch_size, seq_len)
+
+        # Calculate High Water Mark (HWM) and drawdown for each item in the batch
+        # HWM is computed as cumulative max over the sequence for each batch item.
+        hwm = torch.cummax(close_prices, dim=1).values # (batch_size, seq_len)
+        
+        # Drawdown = (HWM - Close) / HWM
+        # Clamp HWM to avoid division by zero if HWM is 0 or negative (though prices are usually positive)
+        drawdown = (hwm - close_prices) / hwm.clamp(min=1e-9)
+        drawdown[hwm <= 1e-9] = 0 # If HWM is effectively zero, drawdown is zero
+        
+        last_drawdown = drawdown[:, -1] # (batch_size)
+        
+        signal = torch.zeros(batch_size, device=device)
+        signal[last_drawdown > self.max_drawdown_limit] = -1.0 # Reduce risk
             
-            hwm_series = []
-            for price in df['Close']:
-                if pd.notna(price):
-                    current_batch_hwm_val = max(current_batch_hwm_val, price)
-                hwm_series.append(current_batch_hwm_val if current_batch_hwm_val != -float('inf') else np.nan)
-            
-            df['high_water_mark'] = hwm_series
-            
-            df['drawdown'] = np.where(
-                (pd.notna(df['high_water_mark'])) & (df['high_water_mark'] > 0),
-                (df['high_water_mark'] - df['Close']) / df['high_water_mark'],
-                0.0 
-            )
-            df['drawdown'] = df['drawdown'].fillna(0.0) # Modified line to address FutureWarning
-            
-            # Original generate_signals logic:
-            condition = df['drawdown'] > self.max_drawdown_limit
-            current_signals_np = np.where(condition, -1.0, 0.0) # -1 to reduce risk
-            signals_batch[i, :, 0] = torch.tensor(current_signals_np, device=asset_features.device, dtype=asset_features.dtype)
-            
-        return signals_batch
+        return signal.view(batch_size, 1, 1)
+
+# Ensure all strategies are registered if __init__.py uses a discovery mechanism
+# For explicit registration (if needed, though __init__.py should handle it):
+# from ..strategies import STRATEGY_REGISTRY
+# STRATEGY_REGISTRY[DynamicHedgingStrategy.default_config().name] = DynamicHedgingStrategy
+# STRATEGY_REGISTRY[RiskParityStrategy.default_config().name] = RiskParityStrategy
+# STRATEGY_REGISTRY[VaRControlStrategy.default_config().name] = VaRControlStrategy
+# STRATEGY_REGISTRY[MaxDrawdownControlStrategy.default_config().name] = MaxDrawdownControlStrategy

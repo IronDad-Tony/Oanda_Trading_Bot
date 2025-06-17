@@ -4,11 +4,21 @@ import numpy as np
 import ta
 from ta.utils import dropna
 from .base_strategy import BaseStrategy, StrategyConfig
-from typing import Dict, List, Optional, Any, Tuple # MODIFIED: Added Tuple
+from typing import Dict, List, Optional, Any, Tuple 
 import logging
 import sys
-import torch # ADDED: Import torch
-import torch.nn.functional as F # ADDED: Import F
+import torch
+import torch.nn.functional as F
+
+# Attempt to import STRATEGY_REGISTRY
+try:
+    from ..strategies import STRATEGY_REGISTRY
+except ImportError:
+    # Fallback for cases where the script might be run in a context where relative import fails
+    # This is less ideal and might indicate a structural issue if it happens during normal operation
+    STRATEGY_REGISTRY = {} 
+    logging.getLogger(__name__).warning("Failed to import STRATEGY_REGISTRY via relative import. StatisticalArbitrageStrategy may not find sub-strategies.")
+
 
 class MeanReversionStrategy(BaseStrategy):
 
@@ -17,27 +27,37 @@ class MeanReversionStrategy(BaseStrategy):
         return StrategyConfig(
             name="MeanReversionStrategy",
             description="Trades based on mean reversion principles using Bollinger Bands.",
-            default_params={'bb_period': 20, 'bb_std_dev': 2.0, 'asset_list': [], 'close_idx': 0} # Added close_idx
+            default_params={'bb_period': 20, 'bb_std_dev': 2.0, 'asset_list': [], 'close_idx': 0} 
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config=config, params=params, logger=logger)
         self.CLOSE_IDX = self.params.get('close_idx', 0)
-
+        if self.config.input_dim is not None:
+            self.logger.info(f"[{self.config.name}] Initialized with input_dim: {self.config.input_dim}. Close index used: {self.CLOSE_IDX}.")
+        else:
+            self.logger.info(f"[{self.config.name}] Initialized. Close index used: {self.CLOSE_IDX}. input_dim not specified in config.")
 
     def _rolling_mean(self, tensor: torch.Tensor, window_size: int) -> torch.Tensor:
-        """ Helper for rolling mean using avg_pool1d. Assumes tensor is (batch, seq_len). """
-        if tensor.ndim == 2:
+        """ Helper for rolling mean using conv1d. Assumes tensor is (batch, seq_len) or (batch, 1, seq_len). """
+        if tensor.ndim == 2: # (batch, seq_len)
             tensor_unsqueezed = tensor.unsqueeze(1) # (batch, 1, seq_len)
-        elif tensor.ndim == 3 and tensor.shape[1] == 1:
+        elif tensor.ndim == 3 and tensor.shape[1] == 1: # (batch, 1, seq_len)
             tensor_unsqueezed = tensor
         else:
-            self.logger.error(f"_rolling_mean expects 2D (batch, seq_len) or 3D (batch, 1, seq_len) tensor, got {tensor.shape}")
-            return torch.zeros_like(tensor) # Fallback
+            self.logger.error(f"[{self.config.name}] _rolling_mean expects 2D (batch, seq_len) or 3D (batch, 1, seq_len) tensor, got {tensor.shape}")
+            # Return a tensor of zeros that matches the expected output shape if input was (batch, seq_len)
+            return torch.zeros((tensor.shape[0], tensor.shape[-1]), device=tensor.device, dtype=tensor.dtype) if tensor.ndim == 2 else torch.zeros_like(tensor)
 
-        padding = window_size - 1
-        padded_tensor = F.pad(tensor_unsqueezed, (padding, 0), mode='replicate')
-        # Correct weights for conv1d as SMA: (out_channels, in_channels/groups, kernel_size)
+
+        if tensor_unsqueezed.shape[-1] < window_size: # sequence_length < window_size
+             # Pad with first value to effectively compute mean over available data for initial points
+            padding = window_size - tensor_unsqueezed.shape[-1]
+            padded_tensor = F.pad(tensor_unsqueezed, (padding, 0), mode='replicate') # Pad at the beginning
+        else:
+            padding = window_size - 1
+            padded_tensor = F.pad(tensor_unsqueezed, (padding, 0), mode='replicate')
+
         sma_weights = torch.full((1, 1, window_size), 1.0/window_size, device=tensor.device, dtype=tensor.dtype)
         pooled = F.conv1d(padded_tensor, sma_weights, stride=1)
         
@@ -46,16 +66,29 @@ class MeanReversionStrategy(BaseStrategy):
         return pooled # (batch, 1, seq_len)
 
     def _rolling_std(self, tensor: torch.Tensor, window_size: int) -> torch.Tensor:
-        """ Helper for rolling std. Assumes tensor is (batch, seq_len). """
+        """ Helper for rolling std. Assumes tensor is (batch, seq_len) or (batch, 1, seq_len). """
         mean_x = self._rolling_mean(tensor, window_size)
-        # For (tensor**2), ensure it's handled correctly if tensor was unsqueezed in _rolling_mean
-        if tensor.ndim == 2 and mean_x.ndim == 2: # if input was 2D and output of mean is 2D
-             mean_x_sq = self._rolling_mean(tensor**2, window_size)
-        elif tensor.ndim == 3 and mean_x.ndim == 3 : # if input was 3D (B,1,S) and output of mean is 3D
-             mean_x_sq = self._rolling_mean(tensor**2, window_size)
-        else: # Fallback or error
-            self.logger.error(f"Shape mismatch in _rolling_std. Tensor shape: {tensor.shape}, mean_x shape: {mean_x.shape}")
+        
+        # Handle tensor**2 correctly based on original tensor shape
+        if tensor.ndim == 2: # Input was (batch, seq_len)
+            mean_x_sq = self._rolling_mean(tensor**2, window_size) # tensor**2 is (batch, seq_len)
+        elif tensor.ndim == 3 and tensor.shape[1] == 1: # Input was (batch, 1, seq_len)
+            mean_x_sq = self._rolling_mean(tensor**2, window_size) # tensor**2 is (batch, 1, seq_len)
+        else: # Should not happen if _rolling_mean handled shapes correctly
+            self.logger.error(f"[{self.config.name}] Unexpected tensor shape in _rolling_std after mean_x calculation. Tensor shape: {tensor.shape}, mean_x shape: {mean_x.shape}")
             return torch.zeros_like(tensor)
+
+        # Ensure mean_x and mean_x_sq have compatible shapes for subtraction
+        if mean_x.shape != mean_x_sq.shape:
+            self.logger.error(f"[{self.config.name}] Shape mismatch between mean_x ({mean_x.shape}) and mean_x_sq ({mean_x_sq.shape}) in _rolling_std.")
+            # Attempt to align if one is (B,S) and other is (B,1,S) due to intermediate steps, though ideally _rolling_mean is consistent
+            if mean_x.ndim == 2 and mean_x_sq.ndim == 3 and mean_x_sq.shape[1] == 1:
+                mean_x = mean_x.unsqueeze(1)
+            elif mean_x_sq.ndim == 2 and mean_x.ndim == 3 and mean_x.shape[1] == 1:
+                mean_x_sq = mean_x_sq.unsqueeze(1)
+            else: # Fallback
+                 return torch.zeros_like(tensor)
+
 
         variance = (mean_x_sq - mean_x**2).clamp(min=1e-9) # clamp for numerical stability
         return torch.sqrt(variance)
@@ -74,41 +107,35 @@ class MeanReversionStrategy(BaseStrategy):
         bb_std_dev = self.params.get('bb_std_dev', 2.0)
 
         if self.CLOSE_IDX >= num_features:
-            self.logger.error(f"{self.config.name}: close_idx {self.CLOSE_IDX} is out of bounds for num_features {num_features}. Returning zero signal.")
+            self.logger.error(f"[{self.config.name}] close_idx {self.CLOSE_IDX} is out of bounds for num_features {num_features}. Input dim from config: {self.config.input_dim}. Returning zero signal.")
             return torch.zeros((batch_size, 1, 1), device=device)
 
         if sequence_length < bb_period:
-            self.logger.warning(f"{self.config.name}: Sequence length ({sequence_length}) is less than bb_period ({bb_period}). Returning zero signal.")
-            return torch.zeros((batch_size, 1, 1), device=device)
+            self.logger.warning(f"[{self.config.name}] Sequence length ({sequence_length}) is less than bb_period ({bb_period}). Bollinger Bands may be unreliable. Proceeding, but consider longer sequence or shorter period.")
+            # Fallback: if seq_len is too short for reliable BB, could return neutral or use simpler logic.
+            # For now, we let _rolling_mean/_rolling_std handle it (they might pad or produce NaNs/zeros if not careful)
+            # The current _rolling_mean pads, so it will produce values.
 
         close_prices = asset_features[:, :, self.CLOSE_IDX]  # (batch_size, sequence_length)
 
-        # Calculate Bollinger Bands
         sma_mid_band = self._rolling_mean(close_prices, bb_period) # (batch_size, sequence_length)
         rolling_std = self._rolling_std(close_prices, bb_period)   # (batch_size, sequence_length)
         
         upper_band = sma_mid_band + (rolling_std * bb_std_dev)
         lower_band = sma_mid_band - (rolling_std * bb_std_dev)
 
-        # We are interested in the signals for the most recent time step
         last_close = close_prices[:, -1]    # (batch_size)
         last_upper_band = upper_band[:, -1] # (batch_size)
         last_lower_band = lower_band[:, -1] # (batch_size)
         
         signal = torch.zeros(batch_size, device=device)
-        # Buy signal: close crosses below lower band (or is below)
         signal[last_close < last_lower_band] = 1.0
-        # Sell signal: close crosses above upper band (or is above)
         signal[last_close > last_upper_band] = -1.0
         
-        # Reshape to (batch_size, 1, 1)
         return signal.view(batch_size, 1, 1)
 
     def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-        self.logger.info(f"{self.config.name}: generate_signals called. This method is part of the legacy interface. "
-                         f"The primary signal generation is now in the tensor-based forward() method. "
-                         f"This implementation will return a neutral signal DataFrame based on input dict's index, if possible.")
-
+        self.logger.info(f"[{self.config.name}] generate_signals (legacy) called.")
         output_index = None
         if processed_data_dict:
             for key, df_val in processed_data_dict.items():
@@ -116,11 +143,9 @@ class MeanReversionStrategy(BaseStrategy):
                     output_index = df_val.index
                     self.logger.debug(f"Using index from processed_data_dict key '{key}' for generate_signals output.")
                     break
-
         if output_index is None:
-            self.logger.warning(f"{self.config.name}: No valid index found in processed_data_dict for generate_signals. Returning empty DataFrame with 'signal' column.")
+            self.logger.warning(f"[{self.config.name}] No valid index found in processed_data_dict for generate_signals. Returning empty DataFrame with 'signal' column.")
             return pd.DataFrame(columns=['signal'])
-
         signals_df = pd.DataFrame(0.0, index=output_index, columns=['signal'])
         return signals_df
 
@@ -131,250 +156,74 @@ class CointegrationStrategy(BaseStrategy):
         return StrategyConfig(
             name="CointegrationStrategy",
             description="Trades based on cointegration of an asset pair.",
-            # Ensure asset_pair is a list of two strings for this strategy to be valid
-            # asset_features tensor should be structured such that features for asset1 come first, then for asset2
-            # e.g., if each asset has F features, total features = 2*F.
-            # asset1_close_idx would be the index for close price within asset1's features (e.g., 0)
-            # asset2_close_idx would be the index for close price within asset2's features (e.g., F if asset1 has F features)
-            default_params={'asset_pair': [], 'window': 60, 'z_threshold': 2.0, 'asset1_close_idx': 0, 'asset2_close_idx': None} # MODIFIED
+            default_params={'asset_pair': [], 'window': 60, 'z_threshold': 2.0, 'asset1_close_idx': 0, 'asset2_close_idx': None} 
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config=config, params=params, logger=logger)
-        self.asset_pair = self.params.get('asset_pair', [])
+        self.asset_pair_names = self.params.get('asset_pair_names', self.params.get('asset_pair', [])) # Support both
         self.window = self.params.get('window', 60)
         self.z_threshold = self.params.get('z_threshold', 2.0)
         self.asset1_close_idx = self.params.get('asset1_close_idx', 0)
-        # asset2_close_idx needs to be set based on the number of features per asset.
-        # This is a bit tricky without knowing num_features_per_asset beforehand.
-        # For now, we'll assume it's passed or can be inferred if asset_features is (batch, seq, num_total_features)
-        # and num_total_features is known to be 2 * num_features_per_asset.
         self.asset2_close_idx = self.params.get('asset2_close_idx') 
         
-        if len(self.asset_pair) != 2 or not all(isinstance(p, str) for p in self.asset_pair):
-            self.logger.warning(f"{self.config.name} requires 'asset_pair' to be a list of two asset name strings. Current: {self.asset_pair}. Strategy may not function correctly with old methods.")
-            self.valid_pair_for_old_methods = False # Renamed for clarity
+        if self.config.input_dim is not None:
+            self.logger.info(f"[{self.config.name}] Initialized with input_dim (total features for pair): {self.config.input_dim}. Asset1 Close Idx: {self.asset1_close_idx}, Asset2 Close Idx: {self.asset2_close_idx}.")
+            if self.asset2_close_idx is None:
+                 self.logger.warning(f"[{self.config.name}] asset2_close_idx is None. This strategy requires it to be configured correctly based on concatenated pair features.")
+            elif self.asset1_close_idx >= self.config.input_dim or self.asset2_close_idx >= self.config.input_dim:
+                 self.logger.warning(f"[{self.config.name}] One or both close indices ({self.asset1_close_idx}, {self.asset2_close_idx}) might be out of bounds for input_dim {self.config.input_dim}.")
         else:
-            self.valid_pair_for_old_methods = True
-            if not self.config.applicable_assets and self.valid_pair_for_old_methods:
-                self.config.applicable_assets = list(self.asset_pair)
-        
-        if self.asset2_close_idx is None:
-            self.logger.warning(f"{self.config.name}: 'asset2_close_idx' is not set. This is crucial for the new tensor-based forward method. It should be the starting index of the second asset's close price in the concatenated feature tensor.")
+            self.logger.info(f"[{self.config.name}] Initialized. Asset1 Close Idx: {self.asset1_close_idx}, Asset2 Close Idx: {self.asset2_close_idx}. input_dim not specified in config.")
 
+        if len(self.asset_pair_names) != 2 or not all(isinstance(p, str) for p in self.asset_pair_names):
+            self.logger.warning(f"[{self.config.name}] Requires 'asset_pair_names' to be a list of two asset name strings. Current: {self.asset_pair_names}.")
+        # ... (rest of __init__ unchanged)
 
-    # Helper methods _rolling_mean and _rolling_std can be used from MeanReversionStrategy if they are in the same file
-    # or defined in a common utility, or copied here. For now, let's assume they are accessible if defined above.
-    # If not, they would need to be copied/imported.
-    # For simplicity, let's copy them here to make CointegrationStrategy self-contained with its tensor helpers.
-
+    # Using MeanReversionStrategy's rolling helpers by composition or re-implementation
+    # For simplicity, copied here. Ideally, these would be in a shared utility module.
     def _rolling_mean(self, tensor: torch.Tensor, window_size: int) -> torch.Tensor:
-        """ Helper for rolling mean. Assumes tensor is (batch, seq_len). """
-        if tensor.ndim == 2:
-            tensor_unsqueezed = tensor.unsqueeze(1) # (batch, 1, seq_len)
-        elif tensor.ndim == 3 and tensor.shape[1] == 1: # (batch, 1, seq_len)
-            tensor_unsqueezed = tensor
+        # (Identical to MeanReversionStrategy._rolling_mean)
+        if tensor.ndim == 2: tensor_unsqueezed = tensor.unsqueeze(1)
+        elif tensor.ndim == 3 and tensor.shape[1] == 1: tensor_unsqueezed = tensor
+        else: self.logger.error(f"[{self.config.name}] _rolling_mean error"); return torch.zeros_like(tensor)
+        if tensor_unsqueezed.shape[-1] < window_size:
+            padding = window_size - tensor_unsqueezed.shape[-1]
+            padded_tensor = F.pad(tensor_unsqueezed, (padding, 0), mode='replicate')
         else:
-            self.logger.error(f"_rolling_mean expects 2D (batch, seq_len) or 3D (batch, 1, seq_len) tensor, got {tensor.shape}")
-            return torch.zeros_like(tensor)
-
-        padding = window_size - 1
-        padded_tensor = F.pad(tensor_unsqueezed, (padding, 0), mode='replicate')
+            padding = window_size - 1
+            padded_tensor = F.pad(tensor_unsqueezed, (padding, 0), mode='replicate')
         sma_weights = torch.full((1, 1, window_size), 1.0/window_size, device=tensor.device, dtype=tensor.dtype)
         pooled = F.conv1d(padded_tensor, sma_weights, stride=1)
-        
-        if tensor.ndim == 2:
-            return pooled.squeeze(1) # (batch, seq_len)
-        return pooled # (batch, 1, seq_len)
+        return pooled.squeeze(1) if tensor.ndim == 2 else pooled
 
     def _rolling_std(self, tensor: torch.Tensor, window_size: int) -> torch.Tensor:
-        """ Helper for rolling std. Assumes tensor is (batch, seq_len). """
+        # (Identical to MeanReversionStrategy._rolling_std, with safety for shape)
         mean_x = self._rolling_mean(tensor, window_size)
-        if tensor.ndim == 2 and mean_x.ndim == 2:
-             mean_x_sq = self._rolling_mean(tensor**2, window_size)
-        elif tensor.ndim == 3 and mean_x.ndim == 3 and tensor.shape[1] == 1 and mean_x.shape[1] == 1: # Ensure it's (B,1,S)
-             mean_x_sq = self._rolling_mean(tensor**2, window_size) # tensor**2 will be (B,1,S)
-        else:
-            self.logger.error(f"Shape mismatch or unexpected dim in _rolling_std. Tensor shape: {tensor.shape}, mean_x shape: {mean_x.shape}")
-            return torch.zeros_like(tensor)
-
+        if tensor.ndim == 2: mean_x_sq = self._rolling_mean(tensor**2, window_size)
+        elif tensor.ndim == 3 and tensor.shape[1] == 1: mean_x_sq = self._rolling_mean(tensor**2, window_size)
+        else: self.logger.error(f"[{self.config.name}] _rolling_std error"); return torch.zeros_like(tensor)
+        if mean_x.shape != mean_x_sq.shape: # Ensure alignment
+            if mean_x.ndim == 2 and mean_x_sq.ndim == 3 and mean_x_sq.shape[1] == 1: mean_x = mean_x.unsqueeze(1)
+            elif mean_x_sq.ndim == 2 and mean_x.ndim == 3 and mean_x.shape[1] == 1: mean_x_sq = mean_x_sq.unsqueeze(1)
+            else: self.logger.error(f"[{self.config.name}] Shape mismatch in _rolling_std"); return torch.zeros_like(tensor)
         variance = (mean_x_sq - mean_x**2).clamp(min=1e-9)
         return torch.sqrt(variance)
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        """
-        Processes tensor features for a cointegrated pair of assets.
-        asset_features: (batch_size, sequence_length, num_total_features)
-                        It's assumed that features for asset1 are followed by features for asset2.
-                        e.g., if asset1 has F1 features and asset2 has F2 features, num_total_features = F1 + F2.
-                        asset1_close_idx is the index for asset1's close price within its F1 features.
-                        asset2_close_idx is the absolute index for asset2's close price in num_total_features.
-        Returns: (batch_size, 1, 1) signal tensor.
-        """
         batch_size, sequence_length, num_total_features = asset_features.shape
         device = asset_features.device
 
         if self.asset2_close_idx is None:
-            self.logger.error(f"{self.config.name}: asset2_close_idx is not configured. Cannot determine second asset's close price. Returning zero signal.")
+            self.logger.error(f"[{self.config.name}] asset2_close_idx is not configured. Returning zero signal.")
             return torch.zeros((batch_size, 1, 1), device=device)
 
-        if self.asset1_close_idx >= num_total_features or self.asset2_close_idx >= num_total_features:
-            self.logger.error(f"{self.config.name}: One or both close_idx ({self.asset1_close_idx}, {self.asset2_close_idx}) are out of bounds for num_total_features {num_total_features}. Returning zero signal.")
+        if not (0 <= self.asset1_close_idx < num_total_features and 0 <= self.asset2_close_idx < num_total_features):
+            self.logger.error(f"[{self.config.name}] One or both close_idx ({self.asset1_close_idx}, {self.asset2_close_idx}) are out of bounds for num_total_features {num_total_features}. Config input_dim: {self.config.input_dim}. Returning zero signal.")
             return torch.zeros((batch_size, 1, 1), device=device)
         
-        # It's crucial that asset1_close_idx refers to the column for the first asset's price
-        # and asset2_close_idx refers to the column for the second asset's price in the *combined* asset_features tensor.
-        # For example, if asset_features = [A1_feat1, A1_feat2, ..., A1_close, ..., A2_feat1, A2_feat2, ..., A2_close, ...]
-        # then asset1_close_idx would be the index of A1_close, and asset2_close_idx the index of A2_close.
-
         if sequence_length < self.window:
-            self.logger.warning(f"{self.config.name}: Sequence length ({sequence_length}) is less than window ({self.window}). Returning zero signal.")
-            return torch.zeros((batch_size, 1, 1), device=device)
-
-        close_prices_asset1 = asset_features[:, :, self.asset1_close_idx]  # (batch_size, sequence_length)
-        close_prices_asset2 = asset_features[:, :, self.asset2_close_idx]  # (batch_size, sequence_length)
-
-        spread = close_prices_asset1 - close_prices_asset2 # (batch_size, sequence_length)
-
-        spread_mean = self._rolling_mean(spread, self.window) # (batch_size, sequence_length)
-        spread_std = self._rolling_std(spread, self.window)   # (batch_size, sequence_length)
-        
-        # Avoid division by zero or NaN if spread_std is zero (e.g., constant spread)
-        # A small epsilon is added to std for numerical stability.
-        z_score = (spread - spread_mean) / (spread_std + 1e-9) # (batch_size, sequence_length)
-
-        # We are interested in the z-score for the most recent time step
-        last_z_score = z_score[:, -1]    # (batch_size)
-        
-        signal = torch.zeros(batch_size, device=device)
-        # Long spread (Buy asset1, Sell asset2) if z_score is too low
-        signal[last_z_score < -self.z_threshold] = 1.0
-        # Short spread (Sell asset1, Buy asset2) if z_score is too high
-        signal[last_z_score > self.z_threshold] = -1.0
-        
-        # Reshape to (batch_size, 1, 1)
-        return signal.view(batch_size, 1, 1)
-
-    def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-        self.logger.info(f"{self.config.name}: generate_signals called. This method is part of the legacy interface. "
-                         f"The primary signal generation is now in the tensor-based forward() method. "
-                         f"This implementation will return a neutral signal DataFrame based on input dict's index, if possible.")
-
-        output_index = None
-        if processed_data_dict:
-            for key, df_val in processed_data_dict.items():
-                if isinstance(df_val, pd.DataFrame) and not df_val.empty:
-                    output_index = df_val.index
-                    self.logger.debug(f"Using index from processed_data_dict key '{key}' for generate_signals output.")
-                    break
-
-        if output_index is None:
-            self.logger.warning(f"{self.config.name}: No valid index found in processed_data_dict for generate_signals. Returning empty DataFrame with 'signal' column.")
-            return pd.DataFrame(columns=['signal'])
-
-        signals_df = pd.DataFrame(0.0, index=output_index, columns=['signal'])
-        return signals_df
-
-class PairsTradeStrategy(BaseStrategy):
-    """Trades based on the z-score of a spread between two assets, with entry and exit thresholds.""" # MODIFIED
-
-    @staticmethod
-    def default_config() -> StrategyConfig:
-        return StrategyConfig(
-            name="PairsTradeStrategy",
-            description="Trades based on the spread of an asset pair using z-scores with entry/exit thresholds.", # MODIFIED
-            # Similar to CointegrationStrategy, asset_features tensor combines features for asset1 and asset2.
-            default_params={
-                'asset_pair': [], 
-                'window': 60, 
-                'entry_threshold': 2.0, 
-                'exit_threshold': 0.5,
-                'asset1_close_idx': 0, 
-                'asset2_close_idx': None # Must be configured based on feature layout
-            }
-        )
-
-    def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
-        super().__init__(config=config, params=params, logger=logger)
-        self.asset_pair = self.params.get('asset_pair', [])
-        self.window = self.params.get('window', 60)
-        self.entry_threshold = self.params.get('entry_threshold', 2.0)
-        self.exit_threshold = self.params.get('exit_threshold', 0.5)
-        self.asset1_close_idx = self.params.get('asset1_close_idx', 0)
-        self.asset2_close_idx = self.params.get('asset2_close_idx')
-
-        if len(self.asset_pair) != 2 or not all(isinstance(p, str) for p in self.asset_pair):
-            self.logger.warning(f"{self.config.name}: Requires 'asset_pair' of two asset name strings. Current: {self.asset_pair}. Strategy may not function correctly with old methods.")
-            self.valid_pair_for_old_methods = False # Renamed for clarity
-        else:
-            self.valid_pair_for_old_methods = True
-            if not self.config.applicable_assets and self.valid_pair_for_old_methods:
-                 self.config.applicable_assets = list(self.asset_pair)
-        
-        if self.asset2_close_idx is None:
-            self.logger.warning(f"{self.config.name}: 'asset2_close_idx' is not set. This is crucial for the new tensor-based forward method.")
-
-        # Internal state for tracking current position based on z-score logic (for tensor method)
-        # 0 = no position, 1 = long spread, -1 = short spread
-        # This needs to be managed per batch item if we want to handle stateful exits correctly across calls for the same batch item.
-        # For a stateless forward pass (typical in deep learning batch processing), this might be simplified or handled by `current_positions` input.
-        # Let's assume for now `current_positions` gives the necessary state if needed, or the strategy is mostly stateless for entry.
-        # The exit logic here will be based on current z-score vs exit_threshold, not requiring memory of *when* it entered.
-
-    # Copying _rolling_mean and _rolling_std from CointegrationStrategy for self-containment
-    def _rolling_mean(self, tensor: torch.Tensor, window_size: int) -> torch.Tensor:
-        """ Helper for rolling mean. Assumes tensor is (batch, seq_len). """
-        if tensor.ndim == 2:
-            tensor_unsqueezed = tensor.unsqueeze(1) # (batch, 1, seq_len)
-        elif tensor.ndim == 3 and tensor.shape[1] == 1: # (batch, 1, seq_len)
-            tensor_unsqueezed = tensor
-        else:
-            self.logger.error(f"_rolling_mean expects 2D (batch, seq_len) or 3D (batch, 1, seq_len) tensor, got {tensor.shape}")
-            return torch.zeros_like(tensor)
-
-        padding = window_size - 1
-        padded_tensor = F.pad(tensor_unsqueezed, (padding, 0), mode='replicate')
-        sma_weights = torch.full((1, 1, window_size), 1.0/window_size, device=tensor.device, dtype=tensor.dtype)
-        pooled = F.conv1d(padded_tensor, sma_weights, stride=1)
-        
-        if tensor.ndim == 2:
-            return pooled.squeeze(1) # (batch, seq_len)
-        return pooled # (batch, 1, seq_len)
-
-    def _rolling_std(self, tensor: torch.Tensor, window_size: int) -> torch.Tensor:
-        """ Helper for rolling std. Assumes tensor is (batch, seq_len). """
-        mean_x = self._rolling_mean(tensor, window_size)
-        if tensor.ndim == 2 and mean_x.ndim == 2:
-             mean_x_sq = self._rolling_mean(tensor**2, window_size)
-        elif tensor.ndim == 3 and mean_x.ndim == 3 and tensor.shape[1] == 1 and mean_x.shape[1] == 1:
-             mean_x_sq = self._rolling_mean(tensor**2, window_size)
-        else:
-            self.logger.error(f"Shape mismatch or unexpected dim in _rolling_std. Tensor shape: {tensor.shape}, mean_x shape: {mean_x.shape}")
-            return torch.zeros_like(tensor)
-
-        variance = (mean_x_sq - mean_x**2).clamp(min=1e-9)
-        return torch.sqrt(variance)
-
-    def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        """
-        Processes tensor features for a pair of assets to generate trading signals based on z-score thresholds.
-        asset_features: (batch_size, sequence_length, num_total_features) - combined features for asset1 and asset2.
-        current_positions: (batch_size, 1, 1) or (batch_size) - current position state for the pair (-1 short, 0 neutral, 1 long spread).
-        Returns: (batch_size, 1, 1) signal tensor (target position: -1, 0, 1).
-        """
-        batch_size, sequence_length, num_total_features = asset_features.shape
-        device = asset_features.device
-
-        if self.asset2_close_idx is None:
-            self.logger.error(f"{self.config.name}: asset2_close_idx is not configured. Returning zero signal.")
-            return torch.zeros((batch_size, 1, 1), device=device)
-
-        if self.asset1_close_idx >= num_total_features or self.asset2_close_idx >= num_total_features:
-            self.logger.error(f"{self.config.name}: Close indices out of bounds. Returning zero signal.")
-            return torch.zeros((batch_size, 1, 1), device=device)
-
-        if sequence_length < self.window:
-            self.logger.warning(f"{self.config.name}: Sequence length ({sequence_length}) < window ({self.window}). Returning zero signal.")
+            self.logger.warning(f"[{self.config.name}] Sequence length ({sequence_length}) < window ({self.window}). Results may be unreliable. Returning zero signal.")
             return torch.zeros((batch_size, 1, 1), device=device)
 
         close_prices_asset1 = asset_features[:, :, self.asset1_close_idx]
@@ -383,96 +232,137 @@ class PairsTradeStrategy(BaseStrategy):
 
         spread_mean = self._rolling_mean(spread, self.window)
         spread_std = self._rolling_std(spread, self.window)
-        z_score = (spread - spread_mean) / (spread_std + 1e-9)
-
-        last_z_score = z_score[:, -1] # (batch_size)
         
-        # Initialize target_position based on current_positions if provided, else assume neutral
-        # current_positions might be (batch_size, 1, 1) or (batch_size, 1) or (batch_size,)
-        if current_positions is not None:
-            current_pos_flat = current_positions.view(batch_size).clone() # Ensure it's (batch_size)
-        else:
-            current_pos_flat = torch.zeros(batch_size, device=device)
+        # Ensure spread_std is not zero to avoid division by zero
+        safe_spread_std = spread_std.clamp(min=1e-9)
+        z_score = (spread - spread_mean) / safe_spread_std
+
+        last_z_score = z_score[:, -1]
         
-        target_position = current_pos_flat.clone()
-
-        # Entry logic
-        # Try to enter long spread if neutral and z_score < -entry_threshold
-        can_enter_long = (current_pos_flat == 0) & (last_z_score < -self.entry_threshold)
-        target_position[can_enter_long] = 1.0
-
-        # Try to enter short spread if neutral and z_score > entry_threshold
-        can_enter_short = (current_pos_flat == 0) & (last_z_score > self.entry_threshold)
-        target_position[can_enter_short] = -1.0
-
-        # Exit logic
-        # Exit long spread if z_score >= -exit_threshold (or a more positive value like 0)
-        # The exit_threshold is typically closer to 0 than the entry_threshold.
-        should_exit_long = (current_pos_flat == 1.0) & (last_z_score >= -self.exit_threshold)
-        target_position[should_exit_long] = 0.0
-
-        # Exit short spread if z_score <= exit_threshold
-        should_exit_short = (current_pos_flat == -1.0) & (last_z_score <= self.exit_threshold)
-        target_position[should_exit_short] = 0.0
+        signal = torch.zeros(batch_size, device=device)
+        signal[last_z_score < -self.z_threshold] = 1.0
+        signal[last_z_score > self.z_threshold] = -1.0
         
-        return target_position.view(batch_size, 1, 1)
-
+        return signal.view(batch_size, 1, 1)
 
     def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-        self.logger.info(f"{self.config.name}: generate_signals called. This method is part of the legacy interface. "
-                         f"The primary signal generation is now in the tensor-based forward() method. "
-                         f"This implementation will return a neutral signal DataFrame based on input dict's index, if possible.")
-
+        self.logger.info(f"[{self.config.name}] generate_signals (legacy) called.")
         output_index = None
         if processed_data_dict:
             for key, df_val in processed_data_dict.items():
                 if isinstance(df_val, pd.DataFrame) and not df_val.empty:
                     output_index = df_val.index
-                    self.logger.debug(f"Using index from processed_data_dict key '{key}' for generate_signals output.")
                     break
+        if output_index is None: return pd.DataFrame(columns=['signal'])
+        return pd.DataFrame(0.0, index=output_index, columns=['signal'])
 
-        if output_index is None:
-            self.logger.warning(f"{self.config.name}: No valid index found in processed_data_dict for generate_signals. Returning empty DataFrame with 'signal' column.")
-            return pd.DataFrame(columns=['signal'])
+class PairsTradeStrategy(BaseStrategy):
+    @staticmethod
+    def default_config() -> StrategyConfig:
+        return StrategyConfig(
+            name="PairsTradeStrategy",
+            description="Trades based on the spread of an asset pair using z-scores with entry/exit thresholds.",
+            default_params={
+                'asset_pair': [], 'window': 60, 'entry_threshold': 2.0, 'exit_threshold': 0.5,
+                'asset1_close_idx': 0, 'asset2_close_idx': None
+            }
+        )
 
-        signals_df = pd.DataFrame(0.0, index=output_index, columns=['signal'])
-        return signals_df
+    def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
+        super().__init__(config=config, params=params, logger=logger)
+        self.asset_pair_names = self.params.get('asset_pair_names', self.params.get('asset_pair', [])) # Support both
+        self.window = self.params.get('window', 60)
+        self.entry_threshold = self.params.get('entry_threshold', 2.0)
+        self.exit_threshold = self.params.get('exit_threshold', 0.5)
+        self.asset1_close_idx = self.params.get('asset1_close_idx', 0)
+        self.asset2_close_idx = self.params.get('asset2_close_idx')
 
-class StatisticalArbitrageStrategy(BaseStrategy): # This is a composite strategy
+        if self.config.input_dim is not None:
+            self.logger.info(f"[{self.config.name}] Initialized with input_dim (total features for pair): {self.config.input_dim}. Asset1 Idx: {self.asset1_close_idx}, Asset2 Idx: {self.asset2_close_idx}.")
+            if self.asset2_close_idx is None:
+                 self.logger.warning(f"[{self.config.name}] asset2_close_idx is None.")
+            elif self.asset1_close_idx >= self.config.input_dim or self.asset2_close_idx >= self.config.input_dim:
+                 self.logger.warning(f"[{self.config.name}] Close indices ({self.asset1_close_idx}, {self.asset2_close_idx}) might be OOB for input_dim {self.config.input_dim}.")
+        else:
+            self.logger.info(f"[{self.config.name}] Initialized. Asset1 Idx: {self.asset1_close_idx}, Asset2 Idx: {self.asset2_close_idx}. input_dim not in config.")
+        # ... (rest of __init__ unchanged)
+
+    # Using MeanReversionStrategy's rolling helpers
+    _rolling_mean = MeanReversionStrategy._rolling_mean 
+    _rolling_std = MeanReversionStrategy._rolling_std
+    # Note: This direct assignment works if MeanReversionStrategy is defined above.
+    # If these were complex methods relying on MeanReversionStrategy's specific 'self', this could be an issue.
+    # However, _rolling_mean and _rolling_std are quite self-contained or use self.logger.
+    # To be fully robust, they should ideally be static methods or free functions if shared this way,
+    # or defined within a common base or utility. For now, this is a common pattern.
+
+    def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
+        batch_size, sequence_length, num_total_features = asset_features.shape
+        device = asset_features.device
+
+        if self.asset2_close_idx is None:
+            self.logger.error(f"[{self.config.name}] asset2_close_idx is not configured. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        if not (0 <= self.asset1_close_idx < num_total_features and 0 <= self.asset2_close_idx < num_total_features):
+            self.logger.error(f"[{self.config.name}] Close indices OOB. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        if sequence_length < self.window:
+            self.logger.warning(f"[{self.config.name}] Seq length ({sequence_length}) < window ({self.window}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        close_prices_asset1 = asset_features[:, :, self.asset1_close_idx]
+        close_prices_asset2 = asset_features[:, :, self.asset2_close_idx]
+        spread = close_prices_asset1 - close_prices_asset2
+
+        spread_mean = self._rolling_mean(self, spread, self.window) # Pass self for logger context
+        spread_std = self._rolling_std(self, spread, self.window)   # Pass self for logger context
+        safe_spread_std = spread_std.clamp(min=1e-9)
+        z_score = (spread - spread_mean) / safe_spread_std
+        last_z_score = z_score[:, -1]
+        
+        current_pos_flat = torch.zeros(batch_size, device=device)
+        if current_positions is not None:
+            current_pos_flat = current_positions.view(batch_size).clone()
+        
+        target_position = current_pos_flat.clone()
+
+        can_enter_long = (current_pos_flat == 0) & (last_z_score < -self.entry_threshold)
+        target_position[can_enter_long] = 1.0
+        can_enter_short = (current_pos_flat == 0) & (last_z_score > self.entry_threshold)
+        target_position[can_enter_short] = -1.0
+        should_exit_long = (current_pos_flat == 1.0) & (last_z_score >= -self.exit_threshold)
+        target_position[should_exit_long] = 0.0
+        should_exit_short = (current_pos_flat == -1.0) & (last_z_score <= self.exit_threshold)
+        target_position[should_exit_short] = 0.0
+        
+        return target_position.view(batch_size, 1, 1)
+
+    def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+        self.logger.info(f"[{self.config.name}] generate_signals (legacy) called.")
+        output_index = None
+        if processed_data_dict:
+            for key, df_val in processed_data_dict.items():
+                if isinstance(df_val, pd.DataFrame) and not df_val.empty:
+                    output_index = df_val.index
+                    break
+        if output_index is None: return pd.DataFrame(columns=['signal'])
+        return pd.DataFrame(0.0, index=output_index, columns=['signal'])
+
+class StatisticalArbitrageStrategy(BaseStrategy):
 
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
-            name="StatisticalArbitrageStrategy", # Name of this composite strategy itself
+            name="StatisticalArbitrageStrategy",
             description="A composite strategy that combines multiple statistical arbitrage sub-strategies.",
             default_params={
-                'base_strategies_config': [], # List of dicts, each defining a sub-strategy
-                                            # Example for base_strategies_config item:
-                                            # {
-                                            #     'strategy_class_name': 'MeanReversionStrategy',
-                                            #     'name': 'MR_EUR_USD', # Unique instance name
-                                            #     'params': { # Params for MeanReversionStrategy
-                                            #         'asset_name': 'EUR_USD', # Asset this instance applies to
-                                            #         'close_feature_idx': 0, # Index of close price in EUR_USD's feature block
-                                            #         'bb_period': 20, 
-                                            #         'bb_std_dev': 2.0
-                                            #     },
-                                            # },
-                                            # {
-                                            #     'strategy_class_name': 'CointegrationStrategy',
-                                            #     'name': 'Coint_GBPUSD_USDCHF', # Unique instance name
-                                            #     'params': { # Params for CointegrationStrategy
-                                            #         'asset_pair_names': ['GBP_USD', 'USD_CHF'], # Assets for the pair
-                                            #         'asset1_price_feature_idx': 0, # Index of price in GBP_USD's feature block
-                                            #         'asset2_price_feature_idx': 0, # Index of price in USD_CHF's feature block
-                                            #         'window': 60,
-                                            #         'z_threshold': 2.0
-                                            #     },
-                                            # }
-                'combination_logic': 'sum', # 'sum', 'average', 'majority_vote' (implemented as sign of sum)
-                'num_features_per_asset': None # Crucial: Number of features for each asset's data block
+                'base_strategies_config': [], 
+                'combination_logic': 'sum', 
+                # 'num_features_per_asset': None, # This will now come from self.config.input_dim
             },
-            applicable_assets=[] # Dynamically determined from sub-strategies
+            applicable_assets=[] 
         )
     
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
@@ -480,435 +370,224 @@ class StatisticalArbitrageStrategy(BaseStrategy): # This is a composite strategy
         
         self.base_strategy_configs_from_params = self.params.get('base_strategies_config', [])
         self.combination_logic = self.params.get('combination_logic', 'sum')
-        self.num_features_per_asset = self.params.get('num_features_per_asset')
-
+        
+        self.num_features_per_asset = self.config.input_dim # D_transformer_out
         if self.num_features_per_asset is None:
-            self.logger.critical(f"[{self.config.name}] 'num_features_per_asset' must be specified in params for the composite strategy. Sub-strategy tensor slicing will fail.")
-            # Consider raising an error or setting a flag to prevent forward pass
-            # For now, execution will likely fail later if this is not set.
+            self.logger.critical(f"[{self.config.name}] self.config.input_dim (num_features_per_asset) is NOT set. This is critical for sub-strategy configuration and feature slicing. Defaulting to 1, but this is likely incorrect.")
+            self.num_features_per_asset = 1 # A potentially unsafe default, but prevents None errors later.
 
-        self.strategies: List[BaseStrategy] = [] # Stores instantiated sub-strategies
-        self.sub_strategy_details = [] # Stores {instance, type, asset_names, asset_indices_in_composite}
+        # This map is crucial for slicing the composite strategy's input tensor in the forward pass.
+        # self.config.applicable_assets should be populated by EnhancedQuantumStrategyLayer
+        # with all unique assets this composite strategy instance will handle, in a defined order.
+        self.asset_to_composite_idx_map: Dict[str, int] = {
+            asset_name: i for i, asset_name in enumerate(self.config.applicable_assets or [])
+        }
+        if not self.asset_to_composite_idx_map and self.base_strategy_configs_from_params:
+            self.logger.warning(f"[{self.config.name}] 'applicable_assets' for composite strategy is empty or None, but sub-strategies are defined. Feature slicing in forward pass will likely fail if not all sub-strategy assets are covered or if map is empty.")
+        elif self.asset_to_composite_idx_map:
+             self.logger.info(f"[{self.config.name}] Asset to composite index map: {self.asset_to_composite_idx_map}")
+
+
+        self.sub_strategy_details: List[Dict[str, Any]] = []
         
-        all_asset_names_discovered = set()
+        # Ensure STRATEGY_REGISTRY is populated (it should be at import time)
+        if not STRATEGY_REGISTRY:
+             self.logger.error(f"[{self.config.name}] STRATEGY_REGISTRY is empty. Cannot initialize sub-strategies.")
+             return
 
-        current_package_module = None
-        try:
-            if __package__:
-                current_package_module = sys.modules[__package__]
-            elif __name__ != '__main__': # Try to get it via the class's module if not run as main
-                 # Assuming structure like project_root.src.agent.strategies
-                 # self.__class__.__module__ might be 'src.agent.strategies.statistical_arbitrage_strategies'
-                 # We want 'src.agent.strategies'
-                module_parts = self.__class__.__module__.split('.')
-                if len(module_parts) > 1: # Ensure there's a package part
-                    package_name_for_strategies = '.'.join(module_parts[:-1]) # e.g., 'src.agent.strategies'
-                    if package_name_for_strategies in sys.modules:
-                         current_package_module = sys.modules[package_name_for_strategies]
-                    else: # Try importing it if not already loaded under that exact name
-                        try:
-                            import importlib
-                            current_package_module = importlib.import_module(package_name_for_strategies)
-                            self.logger.info(f"Dynamically imported module {package_name_for_strategies} for sub-strategy loading.")
-                        except ImportError:
-                            self.logger.warning(f"Could not dynamically import {package_name_for_strategies}.")
+        for sub_config_item in self.base_strategy_configs_from_params:
+            strategy_class_name = sub_config_item.get('strategy_class_name')
+            sub_strategy_instance_name = sub_config_item.get('name', strategy_class_name) # Default name
+            sub_params = sub_config_item.get('params', {})
 
-        except KeyError: # Should not happen if __package__ or __module__ is valid
-            self.logger.error(f"[{self.config.name}] Error determining package for dynamic strategy loading.")
-        
-        if not current_package_module: # Fallback if running as a script or package context is tricky
-            try:
-                import src.agent.strategies as strategies_fallback_module
-                current_package_module = strategies_fallback_module
-                self.logger.info(f"[{self.config.name}] Fallback: Using 'src.agent.strategies' module directly for sub-strategy loading.")
-            except ImportError:
-                self.logger.error(f"[{self.config.name}] CRITICAL: Fallback import of 'src.agent.strategies' failed. Cannot load sub-strategies.")
-                # self.strategies will remain empty
+            if not strategy_class_name:
+                self.logger.error(f"[{self.config.name}] Sub-strategy config missing 'strategy_class_name': {sub_config_item}")
+                continue
 
-        if current_package_module:
-            for sub_conf_dict in self.base_strategy_configs_from_params:
-                if not isinstance(sub_conf_dict, dict):
-                    self.logger.warning(f"Sub-strategy config item is not a dict: {sub_conf_dict}. Skipping.")
+            StrategyClass = STRATEGY_REGISTRY.get(strategy_class_name)
+            if not StrategyClass:
+                self.logger.error(f"[{self.config.name}] Sub-strategy class '{strategy_class_name}' not found in STRATEGY_REGISTRY.")
+                continue
+
+            # Determine assets and input_dim for the sub-strategy
+            sub_asset_names: List[str] = []
+            sub_strat_input_dim: Optional[int] = None
+            final_sub_params = sub_params.copy() # Params to pass to sub-strategy constructor
+
+            # Heuristic to identify pair strategies (could be made more robust, e.g. by checking class inheritance or a property)
+            is_pair_strategy = "pair" in strategy_class_name.lower() or \
+                               "cointegration" in strategy_class_name.lower() or \
+                               hasattr(StrategyClass, 'asset_pair_names') or \
+                               ('asset_pair_names' in sub_params or 'asset_pair' in sub_params)
+
+
+            if is_pair_strategy:
+                sub_asset_names = final_sub_params.get('asset_pair_names', final_sub_params.get('asset_pair', []))
+                if len(sub_asset_names) != 2:
+                    self.logger.error(f"[{self.config.name}] Pair strategy '{sub_strategy_instance_name}' ({strategy_class_name}) requires 'asset_pair_names' with 2 assets. Got: {sub_asset_names}. Skipping.")
                     continue
+                if self.num_features_per_asset is not None:
+                    sub_strat_input_dim = 2 * self.num_features_per_asset
+                    # Adjust close indices for pair strategy:
+                    # asset1_close_idx is relative to its own block (0-indexed within its D features)
+                    # asset2_close_idx is relative to the start of the concatenated 2D block
+                    # (i.e., D + relative_idx_in_second_block)
+                    if 'asset1_price_feature_idx' in final_sub_params:
+                        final_sub_params['asset1_close_idx'] = final_sub_params.pop('asset1_price_feature_idx')
+                    if 'asset2_price_feature_idx' in final_sub_params and self.num_features_per_asset is not None:
+                        final_sub_params['asset2_close_idx'] = self.num_features_per_asset + final_sub_params.pop('asset2_price_feature_idx')
+                    # If asset1_close_idx or asset2_close_idx are already directly in final_sub_params, they are used as is.
+                else: # num_features_per_asset is None
+                    self.logger.error(f"[{self.config.name}] Cannot determine input_dim for pair sub-strategy '{sub_strategy_instance_name}' because num_features_per_asset is unknown.")
+                    continue # Cannot proceed with this sub-strategy
 
-                sub_strategy_class_name = sub_conf_dict.get('strategy_class_name')
-                sub_strategy_instance_name = sub_conf_dict.get('name', sub_strategy_class_name) 
-                sub_strategy_params_from_config = sub_conf_dict.get('params', {})
-                
-                # This was 'sub_strategy_applicable_assets' before, but now we derive from params
-                # sub_strategy_explicit_applicable_assets = sub_conf_dict.get('applicable_assets') 
-
-                if not sub_strategy_class_name:
-                    self.logger.warning(f"Sub-strategy config missing 'strategy_class_name': {sub_conf_dict}. Skipping.")
-                    continue
-
-                self.logger.info(f"Attempting to load sub-strategy: Name='{sub_strategy_instance_name}', Class='{sub_strategy_class_name}'")
-                
-                if hasattr(current_package_module, sub_strategy_class_name):
-                    SubStrategyClass = getattr(current_package_module, sub_strategy_class_name)
-                    
-                    # Prepare params and determine assets for this sub-strategy instance
-                    current_sub_asset_names = []
-                    current_strategy_type = None
-                    params_for_sub_instance = sub_strategy_params_from_config.copy()
-
-                    asset_name_param = params_for_sub_instance.get('asset_name')
-                    asset_pair_names_param = params_for_sub_instance.get('asset_pair_names')
-
-                    if asset_name_param and isinstance(asset_name_param, str): # Single asset strategy
-                        current_strategy_type = 'single'
-                        current_sub_asset_names = [asset_name_param]
-                        all_asset_names_discovered.add(asset_name_param)
-                        if 'close_feature_idx' in params_for_sub_instance:
-                            params_for_sub_instance['close_idx'] = params_for_sub_instance.pop('close_feature_idx')
-                        params_for_sub_instance.pop('asset_name', None) # Clean up
-
-                    elif asset_pair_names_param and isinstance(asset_pair_names_param, list) and len(asset_pair_names_param) == 2: # Pair asset strategy
-                        current_strategy_type = 'pair'
-                        current_sub_asset_names = asset_pair_names_param
-                        all_asset_names_discovered.update(current_sub_asset_names)
-                        
-                        params_for_sub_instance['asset_pair'] = asset_pair_names_param # Expected by pair strategies
-
-                        if 'asset1_price_feature_idx' in params_for_sub_instance:
-                            params_for_sub_instance['asset1_close_idx'] = params_for_sub_instance.pop('asset1_price_feature_idx')
-                        else:
-                            self.logger.warning(f"Missing 'asset1_price_feature_idx' for pair strategy {sub_strategy_instance_name}. Defaulting to 0 or sub-strategy default.")
-
-
-                        if 'asset2_price_feature_idx' in params_for_sub_instance:
-                            asset2_price_feature_idx_in_own_block = params_for_sub_instance.pop('asset2_price_feature_idx')
-                            if self.num_features_per_asset is not None:
-                                params_for_sub_instance['asset2_close_idx'] = self.num_features_per_asset + asset2_price_feature_idx_in_own_block
-                            else:
-                                self.logger.error(f"Cannot calculate 'asset2_close_idx' for {sub_strategy_instance_name} because 'num_features_per_asset' is not set for composite strategy. Sub-strategy might fail.")
-                        else:
-                             self.logger.warning(f"Missing 'asset2_price_feature_idx' for pair strategy {sub_strategy_instance_name}. Relying on sub-strategy default for 'asset2_close_idx' which might be incorrect for concatenated tensor.")
-                        
-                        params_for_sub_instance.pop('asset_pair_names', None) # Clean up
-                    
-                    else:
-                        self.logger.warning(f"Sub-strategy {sub_strategy_instance_name} ({sub_strategy_class_name}) has unclear/missing asset configuration ('asset_name' or 'asset_pair_names'). Skipping.")
-                        continue
-
-                    try:
-                        sub_default_config_obj: Optional[StrategyConfig] = None
-                        if hasattr(SubStrategyClass, 'default_config') and callable(SubStrategyClass.default_config):
-                            sub_default_config_obj = SubStrategyClass.default_config()
-                            sub_default_config_obj.name = sub_strategy_instance_name 
-                            sub_default_config_obj.applicable_assets = current_sub_asset_names # Set based on this instance
-                        else: # Create basic config if default_config is missing
-                             sub_default_config_obj = StrategyConfig(
-                                name=sub_strategy_instance_name,
-                                description=f"Sub-strategy of {self.config.name}",
-                                applicable_assets=current_sub_asset_names
-                            )
-                        
-                        strategy_instance = SubStrategyClass(
-                            config=sub_default_config_obj, 
-                            params=params_for_sub_instance, 
-                            logger=self.logger
-                        )
-                        self.strategies.append(strategy_instance)
-                        self.sub_strategy_details.append({
-                            'instance': strategy_instance,
-                            'type': current_strategy_type,
-                            'asset_names': current_sub_asset_names,
-                            'asset_indices_in_composite': [] # Will be filled after all assets are known
-                        })
-                        self.logger.info(f"Successfully instantiated sub-strategy: {sub_strategy_instance_name} ({sub_strategy_class_name}) for assets: {current_sub_asset_names}")
-                    except Exception as e_inst:
-                        self.logger.error(f"Error instantiating sub-strategy {sub_strategy_class_name} with name {sub_strategy_instance_name}: {e_inst}", exc_info=True)
+            else: # Single asset strategy
+                # Try to get asset name from common param names
+                asset_name_param = final_sub_params.get('asset_name', final_sub_params.get('asset', final_sub_params.get('instrument')))
+                if asset_name_param and isinstance(asset_name_param, str):
+                    sub_asset_names = [asset_name_param]
                 else:
-                    self.logger.warning(f"Sub-strategy class '{sub_strategy_class_name}' not found in module '{current_package_module.__name__ if current_package_module else 'N/A'}'. Skipping.")
-        
-        # Finalize composite applicable assets and map
-        self.composite_applicable_assets = sorted(list(all_asset_names_discovered))
-        self.asset_name_to_tensor_idx_map = {name: i for i, name in enumerate(self.composite_applicable_assets)}
-        
-        # Update self.config.applicable_assets for the composite strategy itself
-        self.config.applicable_assets = self.composite_applicable_assets
-        self.logger.info(f"Composite strategy '{self.config.name}' will manage assets: {self.composite_applicable_assets}")
-
-        # Populate asset_indices_in_composite for each sub_strategy_detail
-        for detail in self.sub_strategy_details:
+                    self.logger.error(f"[{self.config.name}] Single-asset strategy '{sub_strategy_instance_name}' ({strategy_class_name}) missing 'asset_name' or similar in params: {final_sub_params}. Skipping.")
+                    continue
+                sub_strat_input_dim = self.num_features_per_asset
+                if 'close_feature_idx' in final_sub_params: # Standardize param name
+                    final_sub_params['close_idx'] = final_sub_params.pop('close_feature_idx')
+            
+            # Create StrategyConfig for the sub-strategy
+            sub_strategy_config_obj = StrategyConfig(
+                name=sub_strategy_instance_name,
+                description=StrategyClass.default_config().description if hasattr(StrategyClass, 'default_config') else f"Instance of {strategy_class_name}",
+                default_params={}, # Default params of sub-strategy class are handled by its own init
+                applicable_assets=sub_asset_names, # Assets this specific instance works on
+                input_dim=sub_strat_input_dim
+            )
+            
             try:
-                detail['asset_indices_in_composite'] = [self.asset_name_to_tensor_idx_map[name] for name in detail['asset_names']]
-            except KeyError as e:
-                self.logger.error(f"Asset name {e} from sub-strategy {detail['instance'].config.name} not found in composite asset map. This should not happen.")
-                # This indicates a logic error in asset collection or mapping.
+                strategy_instance = StrategyClass(
+                    config=sub_strategy_config_obj, 
+                    params=final_sub_params, 
+                    logger=self.logger # Pass down the logger
+                )
+                self.sub_strategy_details.append({
+                    'instance': strategy_instance,
+                    'asset_names': sub_asset_names, # List of asset name(s)
+                    'is_pair': is_pair_strategy
+                })
+                self.logger.info(f"[{self.config.name}] Successfully initialized sub-strategy: '{sub_strategy_instance_name}' ({strategy_class_name}) for assets: {sub_asset_names} with input_dim: {sub_strat_input_dim}")
+            except Exception as e:
+                self.logger.error(f"[{self.config.name}] Failed to initialize sub-strategy '{sub_strategy_instance_name}' ({strategy_class_name}): {e}", exc_info=True)
 
-        self.logger.info(f"StatisticalArbitrageStrategy '{self.config.name}' initialized with {len(self.strategies)} sub-strategies, covering {len(self.composite_applicable_assets)} unique assets.")
+        if not self.sub_strategy_details:
+            self.logger.warning(f"[{self.config.name}] No sub-strategies were successfully initialized.")
 
 
     def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
-        """
-        Processes tensor features for all applicable assets and combines signals from sub-strategies.
-        Args:
-            asset_features (torch.Tensor): Shape (batch_size, num_composite_assets, sequence_length, num_features_per_asset)
-            current_positions (Optional[torch.Tensor]): Shape (batch_size, num_composite_assets, 1)
-            timestamp (Optional[pd.Timestamp]): Current timestamp.
-        Returns:
-            torch.Tensor: Target positions for each composite asset. Shape (batch_size, num_composite_assets, 1)
-        """
-        batch_size = asset_features.shape[0]
-        num_composite_assets_in_tensor = asset_features.shape[1]
-        sequence_length = asset_features.shape[2]
-        num_features_per_asset_in_tensor = asset_features.shape[3]
+        batch_size, sequence_length, total_composite_features = asset_features.shape
         device = asset_features.device
-
-        expected_num_composite_assets = len(self.composite_applicable_assets)
-
-        if self.num_features_per_asset is None:
-            self.logger.error(f"[{self.config.name}] 'num_features_per_asset' is not configured for the composite strategy. Cannot proceed.")
-            return torch.zeros((batch_size, expected_num_composite_assets, 1), device=device)
         
-        if num_features_per_asset_in_tensor != self.num_features_per_asset:
-            self.logger.error(f"[{self.config.name}] Mismatch in 'num_features_per_asset'. Expected {self.num_features_per_asset}, got {num_features_per_asset_in_tensor} from input tensor.")
-            return torch.zeros((batch_size, expected_num_composite_assets, 1), device=device)
+        if not self.sub_strategy_details:
+            self.logger.warning(f"[{self.config.name}] No sub-strategies initialized. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        if num_composite_assets_in_tensor != expected_num_composite_assets:
-            self.logger.error(f"[{self.config.name}] Mismatch in number of assets in 'asset_features' tensor. Expected {expected_num_composite_assets} (for {self.composite_applicable_assets}), got {num_composite_assets_in_tensor}.")
-            return torch.zeros((batch_size, expected_num_composite_assets, 1), device=device)
+        if self.num_features_per_asset is None or self.num_features_per_asset == 0:
+            self.logger.error(f"[{self.config.name}] num_features_per_asset is invalid ({self.num_features_per_asset}). Cannot slice features. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        if current_positions is not None and current_positions.shape[1] != expected_num_composite_assets:
-            self.logger.error(f"[{self.config.name}] Mismatch in number of assets in 'current_positions' tensor. Expected {expected_num_composite_assets}, got {current_positions.shape[1]}. Discarding current_positions for this pass.")
-            current_positions = None
-        
-        # Initialize tensor to store aggregated signals/target positions from sub-strategies
-        sub_strategy_signal_contributions = torch.zeros((batch_size, expected_num_composite_assets, 1), device=device)
+        expected_total_features = len(self.asset_to_composite_idx_map) * self.num_features_per_asset
+        if total_composite_features != expected_total_features:
+            self.logger.error(f"[{self.config.name}] Input asset_features dimension mismatch. Expected {expected_total_features} features, got {total_composite_features}. (Num mapped assets: {len(self.asset_to_composite_idx_map)}, Features per asset: {self.num_features_per_asset}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        for detail in self.sub_strategy_details:
-            sub_strategy_instance = detail['instance']
-            strategy_type = detail['type']
-            # Indices of the sub-strategy's asset(s) in the composite strategy's tensor order
-            asset_indices_in_composite_tensor = detail['asset_indices_in_composite']
+        all_sub_signals = []
 
-            sub_asset_features_feed = None
-            sub_current_positions_feed = None
+        for sub_detail in self.sub_strategy_details:
+            sub_strat_instance = sub_detail['instance']
+            sub_asset_names = sub_detail['asset_names']
+            is_pair = sub_detail['is_pair']
+            
+            sub_input_features: Optional[torch.Tensor] = None
+            D = self.num_features_per_asset
 
             try:
-                if strategy_type == 'single':
-                    if not asset_indices_in_composite_tensor: continue # Should not happen if init is correct
-                    asset_idx = asset_indices_in_composite_tensor[0]
+                if is_pair:
+                    if len(sub_asset_names) != 2: # Should have been caught in init
+                        self.logger.error(f"[{self.config.name}] Sub-strategy '{sub_strat_instance.config.name}' is pair type but has {len(sub_asset_names)} assets. Skipping.")
+                        continue
                     
-                    # Shape: (batch_size, sequence_length, num_features_per_asset)
-                    sub_asset_features_feed = asset_features[:, asset_idx, :, :]
-                    
-                    if current_positions is not None:
-                        # Shape: (batch_size, 1, 1) for sub-strategy
-                        sub_current_positions_feed = current_positions[:, asset_idx, :].unsqueeze(1) 
-
-                elif strategy_type == 'pair':
-                    if len(asset_indices_in_composite_tensor) < 2: continue # Should not happen
-                    asset1_idx_comp = asset_indices_in_composite_tensor[0]
-                    asset2_idx_comp = asset_indices_in_composite_tensor[1]
-
-                    features_asset1 = asset_features[:, asset1_idx_comp, :, :] # (B, S, F)
-                    features_asset2 = asset_features[:, asset2_idx_comp, :, :] # (B, S, F)
-                    
-                    # Concatenate along the feature dimension for the pair strategy
-                    # Shape: (batch_size, sequence_length, 2 * num_features_per_asset)
-                    sub_asset_features_feed = torch.cat((features_asset1, features_asset2), dim=2)
-
-                    # Derive pair's current position if sub-strategy is PairsTradeStrategy
-                    if current_positions is not None and isinstance(sub_strategy_instance, PairsTradeStrategy):
-                        pos_asset1 = current_positions[:, asset1_idx_comp, 0] # (batch_size)
-                        pos_asset2 = current_positions[:, asset2_idx_comp, 0] # (batch_size)
+                    asset1_name, asset2_name = sub_asset_names[0], sub_asset_names[1]
+                    if asset1_name not in self.asset_to_composite_idx_map or \
+                       asset2_name not in self.asset_to_composite_idx_map:
+                        self.logger.error(f"[{self.config.name}] Assets '{asset1_name}' or '{asset2_name}' for sub-strategy '{sub_strat_instance.config.name}' not found in composite's asset map: {list(self.asset_to_composite_idx_map.keys())}. Skipping.")
+                        continue
                         
-                        pair_pos_state = torch.zeros(batch_size, device=device)
-                        # Long spread: asset1 long (>0), asset2 short (<0)
-                        pair_pos_state[(pos_asset1 > 1e-6) & (pos_asset2 < -1e-6)] = 1.0
-                        # Short spread: asset1 short (<0), asset2 long (>0)
-                        pair_pos_state[(pos_asset1 < -1e-6) & (pos_asset2 > 1e-6)] = -1.0
-                        
-                        sub_current_positions_feed = pair_pos_state.view(batch_size, 1, 1)
-                
-                if sub_asset_features_feed is not None:
-                    # Sub-strategy signal is expected to be (batch_size, 1, 1)
-                    # representing target position for its entity (single asset or pair)
-                    sub_target_position_signal = sub_strategy_instance.forward(
-                        sub_asset_features_feed, 
-                        sub_current_positions_feed, 
-                        timestamp
-                    )
+                    idx1 = self.asset_to_composite_idx_map[asset1_name]
+                    idx2 = self.asset_to_composite_idx_map[asset2_name]
 
-                    if not (sub_target_position_signal.ndim == 3 and sub_target_position_signal.shape[0] == batch_size and sub_target_position_signal.shape[1:] == (1,1)):
-                        self.logger.warning(f"Sub-strategy {sub_strategy_instance.config.name} returned signal with unexpected shape {sub_target_position_signal.shape}. Expected ({batch_size}, 1, 1). Skipping its contribution.")
+                    features1 = asset_features[:, :, idx1*D : (idx1+1)*D]
+                    features2 = asset_features[:, :, idx2*D : (idx2+1)*D]
+                    sub_input_features = torch.cat((features1, features2), dim=2)
+                else: # Single asset
+                    if len(sub_asset_names) != 1: # Should have been caught in init
+                        self.logger.error(f"[{self.config.name}] Sub-strategy '{sub_strat_instance.config.name}' is single-asset type but has {len(sub_asset_names)} assets. Skipping.")
                         continue
 
-                    # Distribute this signal to the affected assets in the composite's contribution tensor
-                    if strategy_type == 'single':
-                        asset_idx = asset_indices_in_composite_tensor[0]
-                        sub_strategy_signal_contributions[:, asset_idx, :] += sub_target_position_signal.squeeze(-1) # (B,1)
+                    asset_name = sub_asset_names[0]
+                    if asset_name not in self.asset_to_composite_idx_map:
+                        self.logger.error(f"[{self.config.name}] Asset '{asset_name}' for sub-strategy '{sub_strat_instance.config.name}' not found in composite's asset map: {list(self.asset_to_composite_idx_map.keys())}. Skipping.")
+                        continue
                     
-                    elif strategy_type == 'pair':
-                        asset1_idx_comp = asset_indices_in_composite_tensor[0]
-                        asset2_idx_comp = asset_indices_in_composite_tensor[1]
-                        
-                        # If sub_target_position_signal is +1, it means long asset1 / short asset2
-                        # If sub_target_position_signal is -1, it means short asset1 / long asset2
-                        sub_strategy_signal_contributions[:, asset1_idx_comp, :] += sub_target_position_signal.squeeze(-1)
-                        sub_strategy_signal_contributions[:, asset2_idx_comp, :] -= sub_target_position_signal.squeeze(-1)
-            
+                    idx = self.asset_to_composite_idx_map[asset_name]
+                    sub_input_features = asset_features[:, :, idx*D : (idx+1)*D]
+                
+                if sub_input_features is not None:
+                    # Pass current_positions relevant to this sub-strategy if applicable (complex, for now pass None or global)
+                    # This composite strategy itself might have a notion of position, or sub-strategies are stateless for this call.
+                    signal = sub_strat_instance.forward(sub_input_features, current_positions=None, timestamp=timestamp)
+                    all_sub_signals.append(signal)
+                else:
+                    self.logger.warning(f"[{self.config.name}] sub_input_features was None for sub-strategy '{sub_strat_instance.config.name}'. This should not happen.")
+
             except Exception as e:
-                self.logger.error(f"Error during forward pass of sub-strategy {sub_strategy_instance.config.name}: {e}", exc_info=True)
+                self.logger.error(f"[{self.config.name}] Error processing sub-strategy '{sub_strat_instance.config.name}': {e}", exc_info=True)
+                # Add a neutral signal for this failing sub-strategy to maintain batch size consistency
+                all_sub_signals.append(torch.zeros((batch_size, 1, 1), device=device))
 
-        # Apply final combination logic to the aggregated contributions
-        final_target_positions = None
+
+        if not all_sub_signals:
+            self.logger.warning(f"[{self.config.name}] No signals generated from sub-strategies. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        # Stack signals: (num_sub_strategies, batch_size, 1, 1)
+        signals_tensor = torch.stack(all_sub_signals, dim=0)
+
+        combined_signal: torch.Tensor
         if self.combination_logic == 'sum':
-            final_target_positions = sub_strategy_signal_contributions
+            combined_signal = torch.sum(signals_tensor, dim=0)
         elif self.combination_logic == 'average':
-            # Proper averaging requires counting contributions per asset.
-            # This is a simplified placeholder; true averaging needs more logic if strategies don't always contribute.
-            # For now, if all strategies contribute to all their assets, this is like sum with a later global division.
-            # A more robust average would divide each asset's sum of signals by the number of strategies targeting it.
-            # This is non-trivial to implement here without more state/tracking during accumulation.
-            self.logger.warning("Combination logic 'average' is complex for tensor aggregation with variable contributions; using 'sum' as a fallback for now. Consider implementing precise counting if 'average' is critical.")
-            final_target_positions = sub_strategy_signal_contributions # Fallback to sum
-        elif self.combination_logic == 'majority_vote': # Interpreted as taking the sign of the sum
-            final_target_positions = torch.sign(sub_strategy_signal_contributions)
-        else: 
-            self.logger.warning(f"Unknown combination_logic '{self.combination_logic}', defaulting to 'sum'.")
-            final_target_positions = sub_strategy_signal_contributions
-            
-        return final_target_positions.view(batch_size, expected_num_composite_assets, 1)
-
-
-    def generate_signals(self, market_data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Generates trading signals based on the combined logic of its sub-strategies.
-        This method should aggregate signals from MeanReversion, Cointegration, and PairsTrade.
-        For now, it will return an empty DataFrame, assuming sub-strategies handle their own signal generation
-        or that a more sophisticated aggregation logic will be implemented later.
-        """
-        # Placeholder: In a real scenario, this would involve complex aggregation.
-        # For now, let's assume signals are generated and acted upon by sub-strategies
-        # or a higher-level mechanism.
-        # Returning an empty DataFrame with expected columns if necessary.
-        # Example: return pd.DataFrame(columns=['signal', 'confidence'], index=market_data.index)
-        if market_data.empty:
-            return pd.DataFrame()
+            combined_signal = torch.mean(signals_tensor, dim=0)
+        elif self.combination_logic == 'majority_vote':
+            # Sum signals and take the sign. If sum is 0, sign is 0.
+            combined_signal = torch.sign(torch.sum(signals_tensor, dim=0))
+        else: # Default to sum
+            self.logger.warning(f"[{self.config.name}] Unknown combination_logic '{self.combination_logic}'. Defaulting to 'sum'.")
+            combined_signal = torch.sum(signals_tensor, dim=0)
         
-        signals_list = []
-        for strategy_name, strategy_instance in self.sub_strategies.items():
-            if hasattr(strategy_instance, 'generate_signals') and callable(strategy_instance.generate_signals):
-                # Assuming sub-strategies' generate_signals take market_data and return a DataFrame
-                # with a 'signal' column.
-                # This part needs to be adapted based on actual sub-strategy signal generation.
-                # For this placeholder, we'll just call it and expect it to work.
-                # sub_signals = strategy_instance.generate_signals(market_data)
-                # signals_list.append(sub_signals)
-                pass # Actual aggregation logic would go here.
+        return combined_signal.view(batch_size, 1, 1) # Ensure final shape
 
-        # This is a simplified placeholder.
-        # A real implementation would need to define how signals from different strategies are combined.
-        # For example, averaging, voting, or a more complex model.
-        # For now, returning a DataFrame with a neutral signal.
-        neutral_signals = pd.DataFrame(index=market_data.index)
-        neutral_signals['signal'] = 0 # Neutral signal
-        if 'price' in market_data.columns: # Or a relevant column for signal alignment
-            neutral_signals['price'] = market_data['price']
-
-        # If sub-strategies directly produce actions or are managed by SAC,
-        # this composite signal might be more for logging or high-level decision making.
-        return neutral_signals
-
-    def forward(self, market_data_tensor: torch.Tensor, observation: Optional[Dict[str, torch.Tensor]] = None) -> torch.Tensor:
-        """
-        Forward pass for the statistical arbitrage strategy composite.
-        This aggregates the processed tensor features of all applicable assets and computes
-        the target positions based on the combined signals of the sub-strategies.
-        """
-        # Placeholder for composite forward logic.
-        # This would typically involve:
-        # 1. Processing the market_data_tensor to extract features for each asset.
-        # 2. Passing these features through each sub-strategy's forward method.
-        # 3. Aggregating the signals/positions from each sub-strategy according to the combination_logic.
-        # 4. Returning the final target positions for the portfolio.
-
-        # For now, let's just log the call and return a tensor of zeros (neutral positions).
-        self.logger.info(f"{self.config.name}: forward called for composite strategy.")
-        batch_size = market_data_tensor.shape[0]
-        expected_num_composite_assets = len(self.composite_applicable_assets)
-        device = market_data_tensor.device
-
-        # Returning neutral positions
-        return torch.zeros((batch_size, expected_num_composite_assets, 1), device=device)
-
-    # def forward(self, market_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> Dict[str, pd.DataFrame]:
-    #     self.logger.debug(f"{self.config.name}: forward called.")
-    #     processed_data = {}
-    #     if len(self.asset_pair) == 2 and self.asset_pair[0] in market_data_dict and self.asset_pair[1] in market_data_dict: # MODIFIED: valid_pair_for_old_methods
-    #         df1_orig = market_data_dict[self.asset_pair[0]]
-    #         df2_orig = market_data_dict[self.asset_pair[1]]
-
-    #         df1_close_col = 'Close' if 'Close' in df1_orig.columns else 'close'
-    #         df2_close_col = 'Close' if 'Close' in df2_orig.columns else 'close'
-
-    #         if df1_close_col not in df1_orig.columns or df2_close_col not in df2_orig.columns:
-    #             self.logger.warning(f"{self.config.name}: Close column missing for one or both assets in pair {self.asset_pair}")
-    #             return processed_data
-
-    #         df1 = df1_orig[[df1_close_col]].copy().rename(columns={df1_close_col: self.asset_pair[0]})
-    #         df2 = df2_orig[[df2_close_col]].copy().rename(columns={df2_close_col: self.asset_pair[1]})
-            
-    #         pair_key = "pair_" + "_".join(self.asset_pair) # Ensure self.asset_pair is used if valid_pair
-    #         merged_df = pd.merge(df1, df2, left_index=True, right_index=True, how='inner')
-
-    #         if not merged_df.empty and len(merged_df) >= self.params['window']:
-    #             merged_df['spread'] = merged_df[self.asset_pair[0]] - merged_df[self.asset_pair[1]]
-    #             spread_mean = merged_df['spread'].rolling(window=self.params['window']).mean()
-    #             spread_std = merged_df['spread'].rolling(window=self.params['window']).std()
-    #             merged_df['z_score'] = (merged_df['spread'] - spread_mean) / spread_std.replace(0, np.nan)
-    #             processed_data[pair_key] = merged_df # Keep NaNs
-    #         elif not merged_df.empty:
-    #              merged_df['spread'] = np.nan
-    #              merged_df['z_score'] = np.nan
-    #              processed_data[pair_key] = merged_df
-    #         else:
-    #             self.logger.debug(f"{self.config.name}: Merged DataFrame for pair {self.asset_pair} is empty.")
-    #             processed_data[pair_key] = pd.DataFrame()
-    #     else:
-    #         self.logger.warning(f"{self.config.name}: Invalid pair or missing data for {self.asset_pair} (old method).") # MODIFIED
-    #     return processed_data
-
-    # def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    #     self.logger.debug(f"{self.config.name}: generate_signals called.")
-    #     output_index = None
-    #     pair_key = None
-
-    #     if len(self.asset_pair) == 2: # MODIFIED: valid_pair_for_old_methods
-    #         pair_key = "pair_" + "_".join(self.asset_pair)
-    #         if pair_key in processed_data_dict and not processed_data_dict[pair_key].empty:
-    #             output_index = processed_data_dict[pair_key].index
+    def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+        self.logger.info(f"[{self.config.name}] generate_signals (legacy) called. This composite strategy primarily uses the tensor-based forward() method.")
+        output_index = None
+        if processed_data_dict:
+            for key, df_val in processed_data_dict.items():
+                if isinstance(df_val, pd.DataFrame) and not df_val.empty:
+                    output_index = df_val.index
+                    break
+        if output_index is None:
+            self.logger.warning(f"[{self.config.name}] No valid index found in processed_data_dict for legacy generate_signals.")
+            return pd.DataFrame(columns=['signal'])
         
-    #     if output_index is None: # Fallback
-    #         if processed_data_dict:
-    #             for key, df_val in processed_data_dict.items():
-    #                 if not df_val.empty:
-    #                     output_index = df_val.index
-    #                     break
-    #         if output_index is None:
-    #             self.logger.warning(f"{self.config.name}: Could not determine output index for signals.")
-    #             return pd.DataFrame(columns=['signal'])
-        
-    #     signals_df = pd.DataFrame(0.0, index=output_index, columns=['signal'])
-
-    #     if len(self.asset_pair) == 2 and pair_key and pair_key in processed_data_dict: # MODIFIED: valid_pair_for_old_methods
-    #         df = processed_data_dict[pair_key]
-    #         if not df.empty and 'z_score' in df.columns and not df['z_score'].isnull().all():
-    #             signals_df.loc[df['z_score'] < -self.params['entry_threshold'], 'signal'] = 1.0
-    #             signals_df.loc[df['z_score'] > self.params['entry_threshold'], 'signal'] = -1.0
-    #             # Exit condition (simplified) - This old logic was problematic and incomplete for stateful exits.
-    #             # The new tensor forward method handles exits based on current_positions and z-score vs exit_threshold.
-    #             # exiting_long = (df['z_score'] >= -self.params['exit_threshold']) & (df['z_score'].shift(1) < -self.params['exit_threshold']) 
-    #             # exiting_short = (df['z_score'] <= self.params['exit_threshold']) & (df['z_score'].shift(1) > self.params['exit_threshold']) 
-    #             # signals_df.loc[exiting_long | exiting_short, 'signal'] = 0.0 
-    #         else:
-    #             self.logger.debug(f"{self.config.name}: z_score not available or all NaN for pair {pair_key} (old method).") # MODIFIED
-        
-    #     return signals_df.fillna(0.0)
+        self.logger.warning(f"[{self.config.name}] Legacy generate_signals for composite strategy is not fully implemented to combine sub-signals. Returning neutral.")
+        return pd.DataFrame(0.0, index=output_index, columns=['signal'])
 
 class VolatilityBreakoutStrategy(BaseStrategy):
     """
@@ -1059,3 +738,244 @@ class VolatilityBreakoutStrategy(BaseStrategy):
 
         signals_df = pd.DataFrame(0.0, index=output_index, columns=['signal'])
         return signals_df
+
+class StatisticalArbitrageStrategy(BaseStrategy):
+
+    @staticmethod
+    def default_config() -> StrategyConfig:
+        return StrategyConfig(
+            name="StatisticalArbitrageStrategy",
+            description="A composite strategy that combines multiple statistical arbitrage sub-strategies.",
+            default_params={
+                'base_strategies_config': [], 
+                'combination_logic': 'sum', 
+                # 'num_features_per_asset': None, # This will now come from self.config.input_dim
+            },
+            applicable_assets=[] 
+        )
+    
+    def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
+        super().__init__(config=config, params=params, logger=logger)
+        
+        self.base_strategy_configs_from_params = self.params.get('base_strategies_config', [])
+        self.combination_logic = self.params.get('combination_logic', 'sum')
+        
+        self.num_features_per_asset = self.config.input_dim # D_transformer_out
+        if self.num_features_per_asset is None:
+            self.logger.critical(f"[{self.config.name}] self.config.input_dim (num_features_per_asset) is NOT set. This is critical for sub-strategy configuration and feature slicing. Defaulting to 1, but this is likely incorrect.")
+            self.num_features_per_asset = 1 # A potentially unsafe default, but prevents None errors later.
+
+        # This map is crucial for slicing the composite strategy's input tensor in the forward pass.
+        # self.config.applicable_assets should be populated by EnhancedQuantumStrategyLayer
+        # with all unique assets this composite strategy instance will handle, in a defined order.
+        self.asset_to_composite_idx_map: Dict[str, int] = {
+            asset_name: i for i, asset_name in enumerate(self.config.applicable_assets or [])
+        }
+        if not self.asset_to_composite_idx_map and self.base_strategy_configs_from_params:
+            self.logger.warning(f"[{self.config.name}] 'applicable_assets' for composite strategy is empty or None, but sub-strategies are defined. Feature slicing in forward pass will likely fail if not all sub-strategy assets are covered or if map is empty.")
+        elif self.asset_to_composite_idx_map:
+             self.logger.info(f"[{self.config.name}] Asset to composite index map: {self.asset_to_composite_idx_map}")
+
+
+        self.sub_strategy_details: List[Dict[str, Any]] = []
+        
+        # Ensure STRATEGY_REGISTRY is populated (it should be at import time)
+        if not STRATEGY_REGISTRY:
+             self.logger.error(f"[{self.config.name}] STRATEGY_REGISTRY is empty. Cannot initialize sub-strategies.")
+             return
+
+        for sub_config_item in self.base_strategy_configs_from_params:
+            strategy_class_name = sub_config_item.get('strategy_class_name')
+            sub_strategy_instance_name = sub_config_item.get('name', strategy_class_name) # Default name
+            sub_params = sub_config_item.get('params', {})
+
+            if not strategy_class_name:
+                self.logger.error(f"[{self.config.name}] Sub-strategy config missing 'strategy_class_name': {sub_config_item}")
+                continue
+
+            StrategyClass = STRATEGY_REGISTRY.get(strategy_class_name)
+            if not StrategyClass:
+                self.logger.error(f"[{self.config.name}] Sub-strategy class '{strategy_class_name}' not found in STRATEGY_REGISTRY.")
+                continue
+
+            # Determine assets and input_dim for the sub-strategy
+            sub_asset_names: List[str] = []
+            sub_strat_input_dim: Optional[int] = None
+            final_sub_params = sub_params.copy() # Params to pass to sub-strategy constructor
+
+            # Heuristic to identify pair strategies (could be made more robust, e.g. by checking class inheritance or a property)
+            is_pair_strategy = "pair" in strategy_class_name.lower() or \
+                               "cointegration" in strategy_class_name.lower() or \
+                               hasattr(StrategyClass, 'asset_pair_names') or \
+                               ('asset_pair_names' in sub_params or 'asset_pair' in sub_params)
+
+
+            if is_pair_strategy:
+                sub_asset_names = final_sub_params.get('asset_pair_names', final_sub_params.get('asset_pair', []))
+                if len(sub_asset_names) != 2:
+                    self.logger.error(f"[{self.config.name}] Pair strategy '{sub_strategy_instance_name}' ({strategy_class_name}) requires 'asset_pair_names' with 2 assets. Got: {sub_asset_names}. Skipping.")
+                    continue
+                if self.num_features_per_asset is not None:
+                    sub_strat_input_dim = 2 * self.num_features_per_asset
+                    # Adjust close indices for pair strategy:
+                    # asset1_close_idx is relative to its own block (0-indexed within its D features)
+                    # asset2_close_idx is relative to the start of the concatenated 2D block
+                    # (i.e., D + relative_idx_in_second_block)
+                    if 'asset1_price_feature_idx' in final_sub_params:
+                        final_sub_params['asset1_close_idx'] = final_sub_params.pop('asset1_price_feature_idx')
+                    if 'asset2_price_feature_idx' in final_sub_params and self.num_features_per_asset is not None:
+                        final_sub_params['asset2_close_idx'] = self.num_features_per_asset + final_sub_params.pop('asset2_price_feature_idx')
+                    # If asset1_close_idx or asset2_close_idx are already directly in final_sub_params, they are used as is.
+                else: # num_features_per_asset is None
+                    self.logger.error(f"[{self.config.name}] Cannot determine input_dim for pair sub-strategy '{sub_strategy_instance_name}' because num_features_per_asset is unknown.")
+                    continue # Cannot proceed with this sub-strategy
+
+            else: # Single asset strategy
+                # Try to get asset name from common param names
+                asset_name_param = final_sub_params.get('asset_name', final_sub_params.get('asset', final_sub_params.get('instrument')))
+                if asset_name_param and isinstance(asset_name_param, str):
+                    sub_asset_names = [asset_name_param]
+                else:
+                    self.logger.error(f"[{self.config.name}] Single-asset strategy '{sub_strategy_instance_name}' ({strategy_class_name}) missing 'asset_name' or similar in params: {final_sub_params}. Skipping.")
+                    continue
+                sub_strat_input_dim = self.num_features_per_asset
+                if 'close_feature_idx' in final_sub_params: # Standardize param name
+                    final_sub_params['close_idx'] = final_sub_params.pop('close_feature_idx')
+            
+            # Create StrategyConfig for the sub-strategy
+            sub_strategy_config_obj = StrategyConfig(
+                name=sub_strategy_instance_name,
+                description=StrategyClass.default_config().description if hasattr(StrategyClass, 'default_config') else f"Instance of {strategy_class_name}",
+                default_params={}, # Default params of sub-strategy class are handled by its own init
+                applicable_assets=sub_asset_names, # Assets this specific instance works on
+                input_dim=sub_strat_input_dim
+            )
+            
+            try:
+                strategy_instance = StrategyClass(
+                    config=sub_strategy_config_obj, 
+                    params=final_sub_params, 
+                    logger=self.logger # Pass down the logger
+                )
+                self.sub_strategy_details.append({
+                    'instance': strategy_instance,
+                    'asset_names': sub_asset_names, # List of asset name(s)
+                    'is_pair': is_pair_strategy
+                })
+                self.logger.info(f"[{self.config.name}] Successfully initialized sub-strategy: '{sub_strategy_instance_name}' ({strategy_class_name}) for assets: {sub_asset_names} with input_dim: {sub_strat_input_dim}")
+            except Exception as e:
+                self.logger.error(f"[{self.config.name}] Failed to initialize sub-strategy '{sub_strategy_instance_name}' ({strategy_class_name}): {e}", exc_info=True)
+
+        if not self.sub_strategy_details:
+            self.logger.warning(f"[{self.config.name}] No sub-strategies were successfully initialized.")
+
+
+    def forward(self, asset_features: torch.Tensor, current_positions: Optional[torch.Tensor] = None, timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
+        batch_size, sequence_length, total_composite_features = asset_features.shape
+        device = asset_features.device
+        
+        if not self.sub_strategy_details:
+            self.logger.warning(f"[{self.config.name}] No sub-strategies initialized. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        if self.num_features_per_asset is None or self.num_features_per_asset == 0:
+            self.logger.error(f"[{self.config.name}] num_features_per_asset is invalid ({self.num_features_per_asset}). Cannot slice features. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        expected_total_features = len(self.asset_to_composite_idx_map) * self.num_features_per_asset
+        if total_composite_features != expected_total_features:
+            self.logger.error(f"[{self.config.name}] Input asset_features dimension mismatch. Expected {expected_total_features} features, got {total_composite_features}. (Num mapped assets: {len(self.asset_to_composite_idx_map)}, Features per asset: {self.num_features_per_asset}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        all_sub_signals = []
+
+        for sub_detail in self.sub_strategy_details:
+            sub_strat_instance = sub_detail['instance']
+            sub_asset_names = sub_detail['asset_names']
+            is_pair = sub_detail['is_pair']
+            
+            sub_input_features: Optional[torch.Tensor] = None
+            D = self.num_features_per_asset
+
+            try:
+                if is_pair:
+                    if len(sub_asset_names) != 2: # Should have been caught in init
+                        self.logger.error(f"[{self.config.name}] Sub-strategy '{sub_strat_instance.config.name}' is pair type but has {len(sub_asset_names)} assets. Skipping.")
+                        continue
+                    
+                    asset1_name, asset2_name = sub_asset_names[0], sub_asset_names[1]
+                    if asset1_name not in self.asset_to_composite_idx_map or \
+                       asset2_name not in self.asset_to_composite_idx_map:
+                        self.logger.error(f"[{self.config.name}] Assets '{asset1_name}' or '{asset2_name}' for sub-strategy '{sub_strat_instance.config.name}' not found in composite's asset map: {list(self.asset_to_composite_idx_map.keys())}. Skipping.")
+                        continue
+                        
+                    idx1 = self.asset_to_composite_idx_map[asset1_name]
+                    idx2 = self.asset_to_composite_idx_map[asset2_name]
+
+                    features1 = asset_features[:, :, idx1*D : (idx1+1)*D]
+                    features2 = asset_features[:, :, idx2*D : (idx2+1)*D]
+                    sub_input_features = torch.cat((features1, features2), dim=2)
+                else: # Single asset
+                    if len(sub_asset_names) != 1: # Should have been caught in init
+                        self.logger.error(f"[{self.config.name}] Sub-strategy '{sub_strat_instance.config.name}' is single-asset type but has {len(sub_asset_names)} assets. Skipping.")
+                        continue
+
+                    asset_name = sub_asset_names[0]
+                    if asset_name not in self.asset_to_composite_idx_map:
+                        self.logger.error(f"[{self.config.name}] Asset '{asset_name}' for sub-strategy '{sub_strat_instance.config.name}' not found in composite's asset map: {list(self.asset_to_composite_idx_map.keys())}. Skipping.")
+                        continue
+                    
+                    idx = self.asset_to_composite_idx_map[asset_name]
+                    sub_input_features = asset_features[:, :, idx*D : (idx+1)*D]
+                
+                if sub_input_features is not None:
+                    # Pass current_positions relevant to this sub-strategy if applicable (complex, for now pass None or global)
+                    # This composite strategy itself might have a notion of position, or sub-strategies are stateless for this call.
+                    signal = sub_strat_instance.forward(sub_input_features, current_positions=None, timestamp=timestamp)
+                    all_sub_signals.append(signal)
+                else:
+                    self.logger.warning(f"[{self.config.name}] sub_input_features was None for sub-strategy '{sub_strat_instance.config.name}'. This should not happen.")
+
+            except Exception as e:
+                self.logger.error(f"[{self.config.name}] Error processing sub-strategy '{sub_strat_instance.config.name}': {e}", exc_info=True)
+                # Add a neutral signal for this failing sub-strategy to maintain batch size consistency
+                all_sub_signals.append(torch.zeros((batch_size, 1, 1), device=device))
+
+
+        if not all_sub_signals:
+            self.logger.warning(f"[{self.config.name}] No signals generated from sub-strategies. Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        # Stack signals: (num_sub_strategies, batch_size, 1, 1)
+        signals_tensor = torch.stack(all_sub_signals, dim=0)
+
+        combined_signal: torch.Tensor
+        if self.combination_logic == 'sum':
+            combined_signal = torch.sum(signals_tensor, dim=0)
+        elif self.combination_logic == 'average':
+            combined_signal = torch.mean(signals_tensor, dim=0)
+        elif self.combination_logic == 'majority_vote':
+            # Sum signals and take the sign. If sum is 0, sign is 0.
+            combined_signal = torch.sign(torch.sum(signals_tensor, dim=0))
+        else: # Default to sum
+            self.logger.warning(f"[{self.config.name}] Unknown combination_logic '{self.combination_logic}'. Defaulting to 'sum'.")
+            combined_signal = torch.sum(signals_tensor, dim=0)
+        
+        return combined_signal.view(batch_size, 1, 1) # Ensure final shape
+
+    def generate_signals(self, processed_data_dict: Dict[str, pd.DataFrame], portfolio_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+        self.logger.info(f"[{self.config.name}] generate_signals (legacy) called. This composite strategy primarily uses the tensor-based forward() method.")
+        output_index = None
+        if processed_data_dict:
+            for key, df_val in processed_data_dict.items():
+                if isinstance(df_val, pd.DataFrame) and not df_val.empty:
+                    output_index = df_val.index
+                    break
+        if output_index is None:
+            self.logger.warning(f"[{self.config.name}] No valid index found in processed_data_dict for legacy generate_signals.")
+            return pd.DataFrame(columns=['signal'])
+        
+        # This part is tricky: how to combine legacy signals?
+        # For now, just return neutral. A full legacy implementation would be extensive.
+        self.logger.warning(f"[{self.config.name}] Legacy generate_signals for composite strategy is not fully implemented to combine sub-signals. Returning neutral.")
+        return pd.DataFrame(0.0, index=output_index, columns=['signal'])

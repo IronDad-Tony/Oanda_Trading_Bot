@@ -133,166 +133,170 @@ class EnhancedStrategySuperposition(nn.Module):
                                explicit_strategies: Optional[List[Type[BaseStrategy]]], 
                                default_strategy_input_dim: int, 
                                dynamic_loading_enabled: bool):
-        # self.strategies is already initialized as nn.ModuleList() - don't reassign
-        # self.strategy_names is already initialized as List[str] - don't reassign
+        # self.strategies is already initialized as nn.ModuleList()
+        # self.strategy_names is already initialized as List[str]
+        # Ensure they are empty before starting initialization if this method can be called multiple times (though unlikely for __init__)
+        # MODIFIED: Re-initialize nn.ModuleList instead of calling .clear()
+        self.strategies = nn.ModuleList()
+        # MODIFIED: Re-initialize list instead of calling .clear() for consistency
+        self.strategy_names = []
+        
         processed_strategy_names: Set[str] = set()
-        STRATEGY_REGISTRY_LOCAL = self._get_strategy_registry() # Use local copy
+        STRATEGY_REGISTRY_LOCAL = self._get_strategy_registry()
 
+        self.logger.info(f"Initializing strategies. Default strategy input_dim: {default_strategy_input_dim}. Dynamic loading: {dynamic_loading_enabled}.")
+
+        # 1. Process strategies from provided configurations (JSON or direct constructor arg)
         if processed_strategy_configs:
+            self.logger.info(f"Processing {len(processed_strategy_configs)} strategy configurations.")
             for cfg_item_idx, cfg_item in enumerate(processed_strategy_configs):
                 strategy_class: Optional[Type[BaseStrategy]] = None
-                final_config: Optional[StrategyConfig] = None
+                final_config_obj: Optional[StrategyConfig] = None
+                strategy_name_from_cfg: Optional[str] = None
 
-                if isinstance(cfg_item, type) and issubclass(cfg_item, BaseStrategy):
+                if isinstance(cfg_item, type) and issubclass(cfg_item, BaseStrategy): # If a class type is passed in config list
                     strategy_class = cfg_item
+                    strategy_name_from_cfg = strategy_class.__name__
+                    # Try to find a matching config dict/StrategyConfig object for this class if provided
                     explicit_config_for_class = None
-                    for next_item in processed_strategy_configs[cfg_item_idx+1:]: # Look ahead
-                        if isinstance(next_item, StrategyConfig) and next_item.name == strategy_class.__name__:
-                            explicit_config_for_class = next_item
-                            break
-                        if isinstance(next_item, dict) and next_item.get('name') == strategy_class.__name__:
-                            explicit_config_for_class = StrategyConfig(**next_item)
-                            break
-                    
-                    default_cfg = strategy_class.default_config()
-                    if not isinstance(default_cfg, StrategyConfig):
-                        self.logger.warning(f"{strategy_class.__name__}.default_config() did not return StrategyConfig (got {type(default_cfg)}). Using minimal.")
-                        default_cfg = StrategyConfig(name=strategy_class.__name__)
-                    
-                    if explicit_config_for_class:
-                        final_config = StrategyConfig.merge_configs(default_cfg, explicit_config_for_class)
-                    else:
-                        final_config = default_cfg
+                    # This lookahead is complex; better to pre-process configs if this pattern is common.
+                    # For now, assume if a class is in this list, it uses its default or a separate config object.
+                    base_default_cfg = strategy_class.default_config()
+                    if not isinstance(base_default_cfg, StrategyConfig):
+                        self.logger.warning(f"Default config for {strategy_name_from_cfg} is not StrategyConfig. Using minimal.")
+                        base_default_cfg = StrategyConfig(name=strategy_name_from_cfg)
+                    final_config_obj = base_default_cfg # Start with default
 
                 elif isinstance(cfg_item, StrategyConfig):
-                    if cfg_item.name in STRATEGY_REGISTRY:
-                        strategy_class = STRATEGY_REGISTRY[cfg_item.name]
-                        default_cfg = strategy_class.default_config()
-                        if not isinstance(default_cfg, StrategyConfig):
-                            self.logger.warning(f"{strategy_class.__name__}.default_config() did not return StrategyConfig (got {type(default_cfg)}). Using minimal.")
-                            default_cfg = StrategyConfig(name=strategy_class.__name__)
-                        final_config = StrategyConfig.merge_configs(default_cfg, cfg_item)
+                    strategy_name_from_cfg = cfg_item.name
+                    if strategy_name_from_cfg in STRATEGY_REGISTRY_LOCAL:
+                        strategy_class = STRATEGY_REGISTRY_LOCAL[strategy_name_from_cfg]
+                        base_default_cfg = strategy_class.default_config()
+                        if not isinstance(base_default_cfg, StrategyConfig):
+                             self.logger.warning(f"Default config for {strategy_name_from_cfg} is not StrategyConfig. Using minimal.")
+                             base_default_cfg = StrategyConfig(name=strategy_name_from_cfg)
+                        final_config_obj = StrategyConfig.merge_configs(base_default_cfg, cfg_item)
                     else:
-                        self.logger.warning(f"Strategy name '{cfg_item.name}' from StrategyConfig not in STRATEGY_REGISTRY. Skipping.")
+                        self.logger.warning(f"Strategy name '{strategy_name_from_cfg}' from StrategyConfig not in STRATEGY_REGISTRY. Skipping.")
                         continue
                 
                 elif isinstance(cfg_item, dict):
-                    name = cfg_item.get("name")
-                    params_from_dict = cfg_item.get("params", {})
-                    input_dim_from_dict = cfg_item.get("input_dim")
-
-                    if name and name in STRATEGY_REGISTRY:
-                        strategy_class = STRATEGY_REGISTRY[name]
-                        try:
-                            # Create a base StrategyConfig from the dict, primarily for name and any other direct attrs
-                            # Then merge with default_config and explicit params from the dict.
-                            # We need to be careful not to pass 'params' itself as a direct argument to StrategyConfig constructor
-                            # if StrategyConfig doesn't expect it.
-                            
-                            # Start with the strategy's default config
-                            default_cfg = strategy_class.default_config()
-                            if not isinstance(default_cfg, StrategyConfig):
-                                self.logger.warning(f"{strategy_class.__name__}.default_config() did not return StrategyConfig (got {type(default_cfg)}). Using minimal.")
-                                default_cfg = StrategyConfig(name=name)
-                            
-
-                            dict_config_args = {k: v for k, v in cfg_item.items() if k not in ['name', 'params']}
-                            explicit_cfg_from_dict = StrategyConfig(name=name, **dict_config_args)
-                            
-                            # Merge the default_params from the file into this explicit_cfg_from_dict
-                            if params_from_dict:
-                                if explicit_cfg_from_dict.default_params is None:
-                                    explicit_cfg_from_dict.default_params = {}
-                                explicit_cfg_from_dict.default_params.update(params_from_dict)
-                            
-
-                            # If input_dim was in the dict, set it on explicit_cfg_from_dict
-                            if input_dim_from_dict is not None:
-                                explicit_cfg_from_dict.input_dim = input_dim_from_dict
-
-                            # Merge this constructed explicit config with the class's default config
-                            final_config = StrategyConfig.merge_configs(default_cfg, explicit_cfg_from_dict)
-
-                        except Exception as e:
-                            self.logger.error(f"Error creating StrategyConfig from dict for {name}: {e}. Skipping.")
-                            continue
+                    strategy_name_from_cfg = cfg_item.get("name")
+                    if not strategy_name_from_cfg:
+                        self.logger.warning(f"Strategy config dict item at index {cfg_item_idx} missing 'name'. Skipping: {cfg_item}")
+                        continue
+                    
+                    if strategy_name_from_cfg in STRATEGY_REGISTRY_LOCAL:
+                        strategy_class = STRATEGY_REGISTRY_LOCAL[strategy_name_from_cfg]
+                        base_default_cfg = strategy_class.default_config()
+                        if not isinstance(base_default_cfg, StrategyConfig):
+                             self.logger.warning(f"Default config for {strategy_name_from_cfg} is not StrategyConfig. Using minimal.")
+                             base_default_cfg = StrategyConfig(name=strategy_name_from_cfg)
+                        
+                        # Create a StrategyConfig from the dict, then merge with default
+                        dict_based_cfg = StrategyConfig(**cfg_item) # Assumes dict keys match StrategyConfig fields
+                        final_config_obj = StrategyConfig.merge_configs(base_default_cfg, dict_based_cfg)
                     else:
-                        self.logger.warning(f"Strategy name '{name}' from dict not in STRATEGY_REGISTRY or name missing. Skipping.")
+                        self.logger.warning(f"Strategy name '{strategy_name_from_cfg}' from dict config not in STRATEGY_REGISTRY. Skipping.")
                         continue
                 else:
-                    self.logger.warning(f"Unsupported configuration item type: {type(cfg_item)}. Skipping.")
+                    self.logger.warning(f"Unsupported item type in strategy_configs at index {cfg_item_idx}: {type(cfg_item)}. Skipping.")
                     continue
 
-                # ... (rest of the strategy initialization logic for the current cfg_item) ...
-                # This part should correctly instantiate the strategy if strategy_class and final_config are set
-                if strategy_class and final_config:
-                    if final_config.name in processed_strategy_names: # Check by final_config.name
-                        self.logger.info(f"Strategy {final_config.name} already processed. Skipping duplicate.")
+                if strategy_class and final_config_obj and strategy_name_from_cfg:
+                    if strategy_name_from_cfg in processed_strategy_names:
+                        self.logger.warning(f"Strategy '{strategy_name_from_cfg}' already processed. Skipping duplicate from config list.")
                         continue
 
-                    # Determine input_dim for the strategy
-                    # Priority: final_config.input_dim > default_strategy_input_dim > layer_input_dim
-                    strat_input_dim = final_config.input_dim
-                    if strat_input_dim is None:
-                        strat_input_dim = default_strategy_input_dim
-                    if strat_input_dim is None: # Should not happen if default_strategy_input_dim has a value
-                         strat_input_dim = layer_input_dim 
-                         self.logger.debug(f"Strategy {final_config.name} input_dim fell back to layer_input_dim: {layer_input_dim}")
+                    # Ensure input_dim is set correctly
+                    if final_config_obj.input_dim is None:
+                        final_config_obj.input_dim = default_strategy_input_dim
+                    elif final_config_obj.input_dim != default_strategy_input_dim:
+                        self.logger.info(f"Strategy '{strategy_name_from_cfg}' config specifies input_dim {final_config_obj.input_dim}, "
+                                         f"overriding layer's default_strategy_input_dim {default_strategy_input_dim}.")
                     
-                    final_config.input_dim = strat_input_dim # Ensure it's set in the config object
-
-                    self.logger.debug(f"Initializing strategy {final_config.name} with config: {asdict(final_config)} and input_dim: {strat_input_dim}") # Use asdict for logging
                     try:
-                        # MODIFIED: Remove explicit input_dim from constructor call
-                        self.strategies.append(strategy_class(config=final_config))
-                        self.strategy_names.append(final_config.name) # Use final_config.name
-                        processed_strategy_names.add(final_config.name) # Add final_config.name
-                    except Exception as e:
-                        self.logger.error(f"Error instantiating strategy {final_config.name} with config {asdict(final_config)}: {e}", exc_info=True) # Use asdict
-        
+                        instance = strategy_class(config=final_config_obj)
+                        self.strategies.append(instance)
+                        self.strategy_names.append(strategy_name_from_cfg)
+                        processed_strategy_names.add(strategy_name_from_cfg)
+                        self.logger.info(f"Loaded strategy '{strategy_name_from_cfg}' from config with input_dim {final_config_obj.input_dim}.")
+                    except Exception as e_load_cfg:
+                        self.logger.error(f"Error loading strategy '{strategy_name_from_cfg}' from config: {e_load_cfg}", exc_info=True)
+                else:
+                    self.logger.debug(f"Could not fully resolve strategy from cfg_item: {cfg_item}")
+
+
+        # 2. Process strategies from explicit_strategies (direct class types passed to constructor)
         if explicit_strategies:
-            for strat_class_explicit in explicit_strategies:
-                # MODIFIED: Check processed_strategy_names using strat_class_explicit.__name__
-                if strat_class_explicit.__name__ not in processed_strategy_names:
-                    default_cfg = strat_class_explicit.default_config()
-                    if not isinstance(default_cfg, StrategyConfig):
-                        self.logger.warning(f"{strat_class_explicit.__name__}.default_config() did not return StrategyConfig. Using minimal.")
-                        default_cfg = StrategyConfig(name=strat_class_explicit.__name__)
-                    
-                    # MODIFIED: Ensure default_cfg.name is used for logging and adding to processed_strategy_names
-                    # Also, ensure params are correctly handled if they come from default_cfg
-                    # For explicit strategies, params usually come from their default_config().
-                    # If a strategy with the same name was already loaded from strategy_configs (file or arg),
-                    # it should have been caught by `if strat_class_explicit.__name__ not in processed_strategy_names`.
-                    # If we are here, it means this explicit strategy is new.
-
-                    strat_input_dim = default_cfg.input_dim
-                    if strat_input_dim is None:
-                        strat_input_dim = default_strategy_input_dim
-                    if strat_input_dim is None: # Should not happen if default_strategy_input_dim has a value
-                         strat_input_dim = layer_input_dim
-                    default_cfg.input_dim = strat_input_dim
-
-                    # Ensure default_params from default_cfg are used if not None
-                    # The StrategyConfig.merge_configs is not used here as we are directly using the default_cfg
-                    # or a minimally created one.
-                    # The `params` attribute of the strategy instance will be populated from `default_cfg.default_params`
-                    # inside the BaseStrategy.__init__ if `params` argument to strategy_class is None.
-
-                    self.logger.debug(f"Initializing explicit strategy {default_cfg.name} with default config: {asdict(default_cfg)} and input_dim: {strat_input_dim}")
+            self.logger.info(f"Processing {len(explicit_strategies)} explicit strategies provided to constructor.")
+            for explicit_class in explicit_strategies:
+                name = explicit_class.__name__
+                if name not in processed_strategy_names:
+                    self.logger.info(f"Loading explicit strategy '{name}'.")
                     try:
-                        # Pass the full default_cfg object to the strategy constructor
-                        self.strategies.append(strat_class_explicit(config=default_cfg))
-                        self.strategy_names.append(default_cfg.name)
-                        processed_strategy_names.add(default_cfg.name)
-                    except Exception as e:
-                        self.logger.error(f"Error instantiating explicit strategy {default_cfg.name} with default config: {e}", exc_info=True)
+                        default_cfg_obj = explicit_class.default_config()
+                        if not isinstance(default_cfg_obj, StrategyConfig):
+                             self.logger.warning(f"Default config for explicit strategy {name} is not a StrategyConfig instance. Using minimal.")
+                             default_cfg_obj = StrategyConfig(name=name)
+                        
+                        # Set/override input_dim
+                        if default_cfg_obj.input_dim is None:
+                            default_cfg_obj.input_dim = default_strategy_input_dim
+                        elif default_cfg_obj.input_dim != default_strategy_input_dim:
+                             self.logger.info(f"Explicit strategy '{name}' default_config.input_dim ({default_cfg_obj.input_dim}) "
+                                                f"differs from layer's default_strategy_input_dim ({default_strategy_input_dim}). Using strategy's default.")
+                        # To make layer's default always win for explicit strategies if their default is different:
+                        # default_cfg_obj.input_dim = default_strategy_input_dim
 
+                        instance = explicit_class(config=default_cfg_obj)
+                        self.strategies.append(instance)
+                        self.strategy_names.append(name)
+                        processed_strategy_names.add(name)
+                        self.logger.info(f"Successfully loaded and added explicit strategy '{name}' with input_dim {default_cfg_obj.input_dim}.")
+                    except Exception as e_expl_load:
+                        self.logger.error(f"Error loading explicit strategy '{name}': {e_expl_load}", exc_info=True)
+                else:
+                    self.logger.info(f"Explicit strategy '{name}' was already loaded via configuration. Skipping duplicate.")
+
+        # 3. Dynamically load remaining strategies from STRATEGY_REGISTRY if enabled
+        if dynamic_loading_enabled:
+            self.logger.info(f"Dynamic loading enabled. Checking STRATEGY_REGISTRY for additional strategies.")
+            for name, strategy_class_from_registry in STRATEGY_REGISTRY_LOCAL.items():
+                if name not in processed_strategy_names: # Ensure strategy wasn't already loaded
+                    self.logger.info(f"Dynamically loading strategy '{name}' from registry.")
+                    try:
+                        default_cfg_obj = strategy_class_from_registry.default_config()
+                        if not isinstance(default_cfg_obj, StrategyConfig):
+                             self.logger.warning(f"Default config for {name} from registry is not a StrategyConfig instance. Using minimal.")
+                             default_cfg_obj = StrategyConfig(name=name)
+
+                        # Set/override input_dim. Layer's default_strategy_input_dim takes precedence if not set in strategy's default.
+                        if default_cfg_obj.input_dim is None:
+                            default_cfg_obj.input_dim = default_strategy_input_dim
+                        elif default_cfg_obj.input_dim != default_strategy_input_dim:
+                            self.logger.info(f"Dynamically loaded strategy '{name}' default_config.input_dim ({default_cfg_obj.input_dim}) "
+                                                f"differs from layer's default_strategy_input_dim ({default_strategy_input_dim}). Using strategy's default.")
+                        # To make layer's default always win for dynamically loaded strategies:
+                        # default_cfg_obj.input_dim = default_strategy_input_dim
+                        
+                        instance = strategy_class_from_registry(config=default_cfg_obj)
+                        self.strategies.append(instance)
+                        self.strategy_names.append(name)
+                        processed_strategy_names.add(name)
+                        self.logger.info(f"Successfully loaded and added strategy '{name}' from registry with input_dim {default_cfg_obj.input_dim}.")
+                    except Exception as e_dyn_load:
+                        self.logger.error(f"Error dynamically loading strategy '{name}' from registry: {e_dyn_load}", exc_info=True)
+        
         self.num_actual_strategies = len(self.strategies)
-        if self.num_actual_strategies == 0:
-            self.logger.warning("EnhancedStrategySuperposition: No strategies were successfully initialized.")
+        if self.num_actual_strategies > 0:
+            self.logger.info(f"Total strategies initialized: {self.num_actual_strategies}. Names: {self.strategy_names}")
+            # Ensure target_num_strategies is not less than actual, though it's more of a hint for generation.
+            if self.target_num_strategies < self.num_actual_strategies:
+                self.logger.info(f"Actual number of strategies ({self.num_actual_strategies}) exceeds target_num_strategies ({self.target_num_strategies}). Updating target to actual.")
+                self.target_num_strategies = self.num_actual_strategies
         else:
-            self.logger.info(f"EnhancedStrategySuperposition initialized with {self.num_actual_strategies} strategies: {self.strategy_names}")
+            self.logger.warning("No strategies were loaded after all initialization attempts.")
 
     def forward(self, 
                 asset_features_batch: torch.Tensor, 

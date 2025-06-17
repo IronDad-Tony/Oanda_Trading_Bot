@@ -18,6 +18,23 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 # print(f"BASE_DIR in config.py: {BASE_DIR}") # 調試時使用
 
+# 新增：指向 enhanced_transformer_config.json 的路徑
+ENHANCED_TRANSFORMER_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_transformer_config.json"
+
+# 新增：指向 quantum_strategy_config.json 的路徑
+QUANTUM_STRATEGY_CONFIG_PATH = BASE_DIR / "configs" / "quantum_strategy_config.json"
+
+# 新增：指向 enhanced_model_config.py 的路徑
+ENHANCED_MODEL_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_model_config.py"
+
+# --- Quantum Strategy 配置 ---
+QUANTUM_STRATEGY_NUM_STRATEGIES = 28  # 總策略數量，根據 strategies/__init__.py 自動更新或手動確認
+QUANTUM_STRATEGY_DROPOUT_RATE = 0.1 # Dropout rate for quantum strategy layer
+QUANTUM_STRATEGY_INITIAL_TEMPERATURE = 1.0 # Initial temperature for Gumbel-Softmax
+QUANTUM_STRATEGY_USE_GUMBEL_SOFTMAX = True # Whether to use Gumbel-Softmax for strategy selection
+QUANTUM_ADAPTIVE_LR = 0.0001 # Learning rate for the quantum strategy layer's adaptive weights
+QUANTUM_PERFORMANCE_EMA_ALPHA = 0.1 # EMA alpha for tracking strategy performance
+
 # 加載 .env 文件中的環境變量
 # load_dotenv 會自動尋找專案根目錄下的 .env 文件
 dotenv_path = BASE_DIR / ".env"
@@ -67,10 +84,10 @@ PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
 # --- 模型與訓練參數 ---
 # Large Transformer 配置 - Phase 4 升級
 TIMESTEPS = 128             # 輸入Transformer的時間步長 (序列長度)
-TRANSFORMER_MODEL_DIM = 768 # Large Transformer維度 (從512提升到768)
-TRANSFORMER_NUM_LAYERS = 16  # Large模型層數 (從12提升到16)
-TRANSFORMER_NUM_HEADS = 24   # Large模型注意力頭數 (從16提升到24)
-TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 4  # FFN維度 (3072)
+TRANSFORMER_MODEL_DIM = 512 # Large Transformer維度 (從512提升到768)
+TRANSFORMER_NUM_LAYERS = 12  # Large模型層數 (從12提升到16)
+TRANSFORMER_NUM_HEADS = 16   # Large模型注意力頭數 (從16提升到24)
+TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 2  # FFN維度 (3072)
 TRANSFORMER_DROPOUT_RATE = 0.1
 TRANSFORMER_LAYER_NORM_EPS = 1e-5
 TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING = 5000 # PositionalEncoding 的 max_len
@@ -140,9 +157,9 @@ SAC_TAU = 0.005              # Target network 軟更新系數
 
 # 訓練流程相關
 INITIAL_CAPITAL = 100000.0              # 初始模擬資金 (以ACCOUNT_CURRENCY計價)
-MAX_EPISODE_STEPS_DEFAULT = 20000       # 每個訓練episode的最大步數 (可調整)
-TOTAL_TRAINING_TIMESTEPS_TARGET = 1_000_000 # 總訓練目標步數 (可根據需要調整)
-SAVE_MODEL_INTERVAL_STEPS = 50000       # 模型保存間隔 (按總訓練steps)
+MAX_EPISODE_STEPS_DEFAULT = 100000       # 每個訓練episode的最大步數 (可調整)
+TOTAL_TRAINING_TIMESTEPS_TARGET = 10_000_000 # 總訓練目標步數 (可根據需要調整)
+SAVE_MODEL_INTERVAL_STEPS = 2000       # 模型保存間隔 (按總訓練steps)
 
 # --- GPU優化配置 ---
 def setup_gpu_optimization():
@@ -227,7 +244,7 @@ PLOT_REFRESH_INTERVAL_SECONDS = 5 # UI圖表刷新間隔
 MAX_TRADE_LOG_DISPLAY = 100     # UI中顯示最近交易的條數
 
 # --- 貨幣轉換相關 ---
-# 假設基礎匯率對，用於將非USD計價的symbol盈虧轉換為USD，再轉換為ACCOUNT_CURRENCY
+# 假設基礎匯率對，用於將非USD計價的symbol盈虧轉换為USD，再轉換為ACCOUNT_CURRENCY
 # 這些會在 LiveTrader 中嘗試從OANDA獲取實時匯率，這裡僅作結構示例
 # KEY_FOREX_PAIRS_FOR_CONVERSION = ["AUD/USD", "EUR/USD", "GBP/USD", "USD/JPY", "USD/CAD", "USD/CHF"]
 

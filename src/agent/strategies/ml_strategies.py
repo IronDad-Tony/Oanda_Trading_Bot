@@ -25,24 +25,36 @@ class ReinforcementLearningStrategy(BaseStrategy):
     """
     Reinforcement Learning Strategy.
     The forward method now processes a tensor and directly outputs a signal tensor.
+    Conforms to BaseStrategy.forward signature.
     """
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="ReinforcementLearningStrategy",
             description="Uses a pre-trained RL policy model for signals.",
-            default_params={'input_dim': 10, 'action_dim': 3, 'close_idx': 3} # Example dimensions, added close_idx
+            # input_dim will be set by EnhancedStrategySuperposition based on its config.
+            # This default_params['input_dim'] is a fallback if not set at a higher level,
+            # but self.config.input_dim should be the source of truth.
+            default_params={'action_dim': 3} 
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        self.input_dim = int(self.params.get('input_dim', 10)) # Default from original simple model
-        self.action_dim = int(self.params.get('action_dim', 3)) # Default from original simple model
-        self.feature_indices = self.params.get('feature_indices', []) # Use specific feature indices
+        
+        # self.config.input_dim is the number of features per time step for this strategy.
+        # This is provided by EnhancedStrategySuperposition.
+        if self.config.input_dim is None:
+            self.logger.error(f"{self.config.name}: self.config.input_dim is None. Cannot initialize model. Defaulting to a dummy input_dim of 10.")
+            model_feature_input_dim = 10
+        else:
+            model_feature_input_dim = self.config.input_dim
+
+        self.action_dim = int(self.params.get('action_dim', 3))
 
         # Define a simple model if no model_path is provided or loading fails
+        # This model operates on the last time step of features.
         self.model = nn.Sequential(
-            nn.Linear(len(self.feature_indices) if self.feature_indices else self.input_dim, 64),
+            nn.Linear(model_feature_input_dim, 64),
             nn.ReLU(),
             nn.Linear(64, self.action_dim)
         )
@@ -50,86 +62,78 @@ class ReinforcementLearningStrategy(BaseStrategy):
         model_path = self.params.get('model_path')
         if model_path:
             try:
-                # Attempt to load a pre-trained model (e.g., from stable-baselines3 or joblib)
-                # This part is highly dependent on the RL library used for training
                 loaded_model = joblib.load(model_path)
-                # Assuming loaded_model is compatible or provides a policy network
                 if hasattr(loaded_model, 'policy') and isinstance(loaded_model.policy, nn.Module):
-                    self.model = loaded_model.policy
+                    # Check if the loaded policy's input layer matches model_feature_input_dim
+                    first_layer = next(loaded_model.policy.modules())
+                    while not isinstance(first_layer, nn.Linear) and list(first_layer.children()):
+                        first_layer = next(first_layer.children().__iter__(), None) # Basic way to find first linear
+                    
+                    if isinstance(first_layer, nn.Linear) and first_layer.in_features == model_feature_input_dim:
+                        self.model = loaded_model.policy
+                        self.logger.info(f"{self.config.name}: Successfully loaded RL policy model from {model_path} with matching input_dim {model_feature_input_dim}.")
+                    else:
+                        self.logger.warning(f"{self.config.name}: Loaded RL policy model from {model_path} has input_dim {first_layer.in_features if isinstance(first_layer, nn.Linear) else 'Unknown'}, expected {model_feature_input_dim}. Using default model.")
                 elif isinstance(loaded_model, nn.Module):
-                    self.model = loaded_model
+                    # Similar check for a raw nn.Module
+                    first_layer = next(loaded_model.modules())
+                    while not isinstance(first_layer, nn.Linear) and list(first_layer.children()):
+                         first_layer = next(first_layer.children().__iter__(), None)
+
+                    if isinstance(first_layer, nn.Linear) and first_layer.in_features == model_feature_input_dim:
+                        self.model = loaded_model
+                        self.logger.info(f"{self.config.name}: Successfully loaded nn.Module model from {model_path} with matching input_dim {model_feature_input_dim}.")
+                    else:
+                        self.logger.warning(f"{self.config.name}: Loaded nn.Module model from {model_path} has input_dim {first_layer.in_features if isinstance(first_layer, nn.Linear) else 'Unknown'}, expected {model_feature_input_dim}. Using default model.")
                 else:
                     self.logger.warning(f"{self.config.name}: Loaded model from {model_path} is not an nn.Module or has no policy attribute. Using default model.")
-                self.model.to(self.params.get('device', 'cpu')) # Ensure model is on correct device
+                
             except Exception as e:
                 self.logger.error(f"{self.config.name}: Failed to load model from {model_path}: {e}. Using default model.")
         
-        self.logger.info(f"{self.config.name}: Initialized. Model input based on {len(self.feature_indices) if self.feature_indices else self.input_dim} features. Action dim: {self.action_dim}.")
+        self.model.to(self.params.get('device', 'cpu'))
+        self.logger.info(f"{self.config.name}: Initialized. Model input dim: {model_feature_input_dim}. Action dim: {self.action_dim}.")
 
-    def forward(self, price_data_batch: torch.Tensor, 
-                feature_data_batch: torch.Tensor, 
-                portfolio_composition_batch: Optional[torch.Tensor] = None, 
-                market_state_batch: Optional[torch.Tensor] = None, 
-                current_positions_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, asset_features: torch.Tensor, 
+                current_positions: Optional[torch.Tensor] = None, 
+                timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
         """
-        Processes feature_data_batch to generate signals for each asset in the batch.
-        Args:
-            price_data_batch: Tensor of shape (batch_size, num_assets, seq_len, num_ohlcv_features)
-            feature_data_batch: Tensor of shape (batch_size, num_assets, seq_len, num_input_features)
-            portfolio_composition_batch: Optional tensor of shape (batch_size, num_assets)
-            market_state_batch: Optional tensor of shape (batch_size,)
-            current_positions_batch: Optional tensor of shape (batch_size, num_assets)
-
+        Processes asset_features to generate signals.
+        asset_features: Tensor of shape (batch_size, sequence_length, num_input_features)
+                        where num_input_features == self.config.input_dim.
+        current_positions: Optional tensor of shape (batch_size, 1) or (batch_size,)
         Returns:
-            A tensor of signals, shape (batch_size, num_assets).
+            A tensor of signals, shape (batch_size, 1, 1) representing action (-1, 0, or 1).
         """
-        batch_size, num_assets, seq_len, num_input_features = feature_data_batch.shape
-        
-        # Use the latest features from the sequence for each asset
-        # If specific feature_indices are provided, select them. Otherwise, use all features up to self.input_dim.
-        if self.feature_indices:
-            if not all(idx < num_input_features for idx in self.feature_indices):
-                self.logger.warning(f"{self.config.name}: One or more feature_indices are out of bounds. Max index: {num_input_features-1}. Using all features up to input_dim or num_input_features.")
-                selected_features = feature_data_batch[:, :, -1, :min(self.input_dim, num_input_features)] # (batch_size, num_assets, selected_features)
-            else:
-                selected_features = feature_data_batch[:, :, -1, self.feature_indices] # (batch_size, num_assets, len(feature_indices))
-        else:
-            # Use the first self.input_dim features if no specific indices are given
-            selected_features = feature_data_batch[:, :, -1, :min(self.input_dim, num_input_features)] # (batch_size, num_assets, selected_features)
+        batch_size, sequence_length, num_input_features = asset_features.shape
+        device = asset_features.device
 
-        if selected_features.shape[-1] == 0:
-            self.logger.warning(f"{self.config.name}: No features selected. Returning zero signals.")
-            return torch.zeros(batch_size, num_assets, device=feature_data_batch.device)
+        if num_input_features != self.model[0].in_features:
+            self.logger.error(f"{self.config.name}: Mismatch between asset_features dim ({num_input_features}) and model input dim ({self.model[0].in_features}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        # Reshape for model: (batch_size * num_assets, num_selected_features)
-        model_input = selected_features.reshape(batch_size * num_assets, -1)
+        # Use the latest features from the sequence
+        latest_features = asset_features[:, -1, :]  # Shape: (batch_size, num_input_features)
 
-        if model_input.shape[-1] != self.model[0].in_features:
-             self.logger.warning(f"{self.config.name}: Model expected {self.model[0].in_features} input features, but got {model_input.shape[-1]}. Re-initializing a new default model or returning zeros.")
-             # Option 1: Re-initialize model (if allowed and makes sense)
-             # self.model[0] = nn.Linear(model_input.shape[-1], self.model[0].out_features).to(model_input.device)
-             # self.model.to(model_input.device) # Ensure whole model is on device
-             # Option 2: Return zeros
-             return torch.zeros(batch_size, num_assets, device=feature_data_batch.device)
-
-
-        signals_flat = torch.zeros(batch_size * num_assets, device=feature_data_batch.device)
+        signals_flat = torch.zeros(batch_size, device=device)
         try:
-            with torch.no_grad():
-                action_logits = self.model(model_input) # (batch_size * num_assets, action_dim)
-                action_indices = torch.argmax(action_logits, dim=1) # (batch_size * num_assets,)
+            with torch.no_grad(): # Typically, strategies don't train themselves during inference
+                self.model.eval() # Ensure model is in eval mode
+                action_logits = self.model(latest_features) # (batch_size, action_dim)
+                action_indices = torch.argmax(action_logits, dim=1) # (batch_size,)
 
-                if self.action_dim == 3: # Sell, Hold, Buy
+                if self.action_dim == 3: # Sell (-1), Hold (0), Buy (1)
                     signals_flat = action_indices.float() - 1.0
-                elif self.action_dim == 2: # Sell, Buy
+                elif self.action_dim == 2: # Sell (-1), Buy (1)
                     signals_flat = (action_indices.float() * 2.0) - 1.0
-                else: # Default to hold
+                else: # Default to hold if action_dim is not 2 or 3
+                    self.logger.warning(f"{self.config.name}: action_dim is {self.action_dim}, which is not 2 or 3. Defaulting to hold signal.")
                     signals_flat = torch.zeros_like(action_indices, dtype=torch.float)
         except Exception as e:
-            self.logger.error(f"{self.config.name}: Error during model forward pass: {e}. Returning zero signals.")
-            return torch.zeros(batch_size, num_assets, device=feature_data_batch.device)
+            self.logger.error(f"{self.config.name}: Error during model forward pass: {e}. Returning zero signals.", exc_info=True)
+            return torch.zeros((batch_size, 1, 1), device=device)
             
-        return signals_flat.reshape(batch_size, num_assets)
+        return signals_flat.reshape(batch_size, 1, 1) # Reshape to (batch_size, num_assets=1, signal_dim=1)
 
 class DeepLearningPredictionStrategy(BaseStrategy):
     @staticmethod
@@ -139,11 +143,13 @@ class DeepLearningPredictionStrategy(BaseStrategy):
             description="Uses a deep learning model for prediction and signal generation from features.",
             default_params={
                 'lookback_window': 20, 
-                'output_dim': 1, # Can be 1 for regression (e.g. price change) or N for classification (e.g. N action classes)
-                'model_class_str': None, # e.g., 'mymodule.MyCustomModel'
-                'model_path': None, # Path to pre-trained model state_dict
-                'feature_indices': [] # List of feature indices to use from feature_data_batch
+                'output_dim': 1, # Can be 1 for regression or N for classification
+                'model_class_str': None, 
+                'model_path': None,
+                'threshold_buy': 0.01, # Example threshold for regression output
+                'threshold_sell': -0.01 # Example threshold for regression output
             }
+            # self.config.input_dim will be set by EnhancedStrategySuperposition
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
@@ -152,43 +158,48 @@ class DeepLearningPredictionStrategy(BaseStrategy):
         self.output_dim = int(self.params.get('output_dim', 1))
         self.model_class_str = self.params.get('model_class_str')
         self.model_path = self.params.get('model_path')
-        self.feature_indices = self.params.get('feature_indices', [])
         
-        num_selected_features = len(self.feature_indices) if self.feature_indices else self.params.get('input_features_dim', 10) # Fallback if not using feature_indices
+        if self.config.input_dim is None:
+            self.logger.error(f"{self.config.name}: self.config.input_dim is None. Cannot initialize model. Defaulting to dummy input_dim_per_step of 10.")
+            self.input_dim_per_step = 10
+        else:
+            self.input_dim_per_step = self.config.input_dim # Features per time step
+
+        self.model_internal_input_dim = self.input_dim_per_step * self.lookback_window
 
         self.model: nn.Module
-        if self.model_class_str and self.model_path:
+        loaded_successfully = False
+        if self.model_class_str and self.model_path and os.path.exists(self.model_path): # Check path exists
             try:
                 module_path, class_name = self.model_class_str.rsplit('.', 1)
                 module = importlib.import_module(module_path)
                 ModelClass = getattr(module, class_name)
-                # Instantiate model - assumes ModelClass constructor takes relevant dims
-                # This part needs to be flexible based on how ModelClass is defined
-                # Example: self.model = ModelClass(input_dim=num_selected_features * self.lookback_window, output_dim=self.output_dim)
-                self.model = ModelClass(input_dim=num_selected_features * self.lookback_window, output_dim=self.output_dim) # Adjust as per actual model constructor
+                
+                # Instantiate model - This part needs to be flexible
+                # Assuming ModelClass constructor takes input_dim and output_dim
+                self.model = ModelClass(input_dim=self.model_internal_input_dim, output_dim=self.output_dim)
                 
                 state_dict = torch.load(self.model_path, map_location=self.params.get('device', 'cpu'))
-                if 'state_dict' in state_dict: # Common practice to save optimizer state too
+                if 'state_dict' in state_dict: 
                     self.model.load_state_dict(state_dict['state_dict'])
                 else:
                     self.model.load_state_dict(state_dict)
+                
                 self.model.to(self.params.get('device', 'cpu'))
                 self.model.eval()
-                self.logger.info(f"{self.config.name}: Loaded model {self.model_class_str} from {self.model_path}.")
+                self.logger.info(f"{self.config.name}: Loaded model {self.model_class_str} from {self.model_path} with model_internal_input_dim {self.model_internal_input_dim}.")
+                loaded_successfully = True
             except Exception as e:
-                self.logger.error(f"{self.config.name}: Error loading model {self.model_class_str} from {self.model_path}: {e}. Using default model.")
-                self._create_default_model(num_selected_features)
-        else:
-            self._create_default_model(num_selected_features)
+                self.logger.error(f"{self.config.name}: Error loading model {self.model_class_str} from {self.model_path}: {e}. Using default model.", exc_info=True)
+        
+        if not loaded_successfully:
+            self._create_default_model()
             
-        self.logger.info(f"{self.config.name}: Initialized. Lookback: {self.lookback_window}, Output Dim: {self.output_dim}, Num Selected Features: {num_selected_features}")
+        self.logger.info(f"{self.config.name}: Initialized. Lookback: {self.lookback_window}, Output Dim: {self.output_dim}, Features per step: {self.input_dim_per_step}, Model internal input dim: {self.model_internal_input_dim}")
 
-    def _create_default_model(self, num_input_features_per_step: int):
-        # Default model: Simple MLP operating on flattened lookback window of selected features
-        # Input to MLP will be (num_input_features_per_step * self.lookback_window)
-        mlp_input_dim = num_input_features_per_step * self.lookback_window
+    def _create_default_model(self):
         self.model = nn.Sequential(
-            nn.Linear(mlp_input_dim, 128),
+            nn.Linear(self.model_internal_input_dim, 128),
             Mish(),
             nn.Linear(128, 64),
             Swish(),
@@ -196,507 +207,350 @@ class DeepLearningPredictionStrategy(BaseStrategy):
         )
         self.model.to(self.params.get('device', 'cpu'))
         self.model.eval()
-        self.logger.info(f"{self.config.name}: Created default MLP model with input_dim={mlp_input_dim}.")
+        self.logger.info(f"{self.config.name}: Created default MLP model with input_dim={self.model_internal_input_dim}.")
 
-    def forward(self, price_data_batch: torch.Tensor, 
-                feature_data_batch: torch.Tensor, 
-                portfolio_composition_batch: Optional[torch.Tensor] = None, 
-                market_state_batch: Optional[torch.Tensor] = None, 
-                current_positions_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, asset_features: torch.Tensor, 
+                current_positions: Optional[torch.Tensor] = None, 
+                timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
         """
-        Processes feature_data_batch to generate signals.
-        Args:
-            price_data_batch: (batch_size, num_assets, seq_len, num_ohlcv_features)
-            feature_data_batch: (batch_size, num_assets, seq_len, num_input_features)
-            ... other args
-        Returns:
-            Signals tensor of shape (batch_size, num_assets).
+        asset_features: (batch_size, sequence_length, self.input_dim_per_step)
+        Returns: (batch_size, 1, 1) signal tensor
         """
-        batch_size, num_assets, seq_len, num_input_features = feature_data_batch.shape
-        device = feature_data_batch.device
+        batch_size, sequence_length, features_per_step = asset_features.shape
+        device = asset_features.device
 
-        if seq_len < self.lookback_window:
-            self.logger.debug(f"{self.config.name}: Insufficient data ({seq_len} points) for lookback {self.lookback_window}. Returning zero signals.")
-            return torch.zeros(batch_size, num_assets, device=device)
+        if features_per_step != self.input_dim_per_step:
+            self.logger.error(f"{self.config.name}: Mismatch asset_features dim ({features_per_step}) and expected features_per_step ({self.input_dim_per_step}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        # Select features based on self.feature_indices or use all if empty
-        if self.feature_indices:
-            if not all(idx < num_input_features for idx in self.feature_indices):
-                self.logger.warning(f"{self.config.name}: Feature indices out of bounds. Returning zero signals.")
-                return torch.zeros(batch_size, num_assets, device=device)
-            current_features = feature_data_batch[:, :, :, self.feature_indices] # (B, A, S, F_selected)
-        else:
-            # If no indices, use all features. The model's input_dim should match this.
-            current_features = feature_data_batch # (B, A, S, F_all)
-        
-        num_selected_features = current_features.shape[-1]
-        
-        # We need the last 'lookback_window' steps for each asset
-        # Input to model: (batch_size * num_assets, lookback_window * num_selected_features)
-        # current_features is (B, A, S, F_selected)
-        # We take last lookback_window steps: current_features[:, :, -self.lookback_window:, :]
-        # This gives (B, A, L, F_selected)
-        lookback_features = current_features[:, :, -self.lookback_window:, :]
-        
-        # Flatten the lookback_window and num_selected_features dimensions
-        # (B, A, L * F_selected)
-        model_input_flat_per_asset = lookback_features.reshape(batch_size, num_assets, -1)
-        
-        # Reshape for batch processing by the MLP: (B * A, L * F_selected)
-        model_input_batched = model_input_flat_per_asset.reshape(batch_size * num_assets, -1)
+        if sequence_length < self.lookback_window:
+            self.logger.warning(f"{self.config.name}: Sequence length ({sequence_length}) is less than lookback window ({self.lookback_window}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        if model_input_batched.shape[-1] != self.model[0].in_features:
-            self.logger.warning(f"{self.config.name}: Model input dim mismatch. Expected {self.model[0].in_features}, got {model_input_batched.shape[-1]}. Re-creating default model or returning zeros.")
-            # Potentially re-create model or return zeros
-            # self._create_default_model(num_selected_features) # This would re-init the model
-            # if model_input_batched.shape[-1] != self.model[0].in_features: # Check again after potential re-init
-            return torch.zeros(batch_size, num_assets, device=device)
+        # Take the most recent 'lookback_window' timesteps
+        model_input_sequence = asset_features[:, -self.lookback_window:, :]
+        # Flatten: (batch_size, self.lookback_window * self.input_dim_per_step)
+        model_input_flat = model_input_sequence.reshape(batch_size, -1)
 
+        if model_input_flat.shape[1] != self.model_internal_input_dim:
+             self.logger.error(f"{self.config.name}: Mismatch between flattened input dim ({model_input_flat.shape[1]}) and model internal input dim ({self.model_internal_input_dim}). Returning zero signal.")
+             return torch.zeros((batch_size, 1, 1), device=device)
 
-        predictions_flat = torch.zeros(batch_size * num_assets, self.output_dim, device=device)
+        signal = torch.zeros(batch_size, device=device)
         try:
             with torch.no_grad():
-                predictions_flat = self.model(model_input_batched) # (B * A, output_dim)
-        except Exception as e:
-            self.logger.error(f"{self.config.name}: Error during model forward pass: {e}. Returning zero signals.")
-            return torch.zeros(batch_size, num_assets, device=device)
+                self.model.eval()
+                prediction = self.model(model_input_flat) # (batch_size, output_dim)
 
-        signals_flat: torch.Tensor
-        if self.output_dim == 1: # Regression
-            signals_flat = torch.sign(predictions_flat.squeeze(-1)) # (B * A,)
-        elif self.output_dim == 3: # Classification: [sell, hold, buy]
-            action_indices = torch.argmax(predictions_flat, dim=1) # (B * A,)
-            signals_flat = action_indices.float() - 1.0
-        else:
-            signals_flat = torch.zeros(predictions_flat.shape[0], device=device)
+            if self.output_dim == 1: # Regression: predict price change or similar
+                threshold_buy = self.params.get('threshold_buy', 0.01)
+                threshold_sell = self.params.get('threshold_sell', -0.01)
+                signal[prediction[:, 0] > threshold_buy] = 1.0
+                signal[prediction[:, 0] < threshold_sell] = -1.0
+            elif self.output_dim == 3: # Classification: Sell, Hold, Buy
+                action_indices = torch.argmax(prediction, dim=1)
+                signal = action_indices.float() - 1.0
+            elif self.output_dim == 2: # Classification: Sell, Buy
+                 action_indices = torch.argmax(prediction, dim=1)
+                 signal = (action_indices.float() * 2.0) - 1.0
+            else:
+                self.logger.warning(f"{self.config.name}: output_dim is {self.output_dim}. Signal generation logic not defined for this. Defaulting to hold.")
         
-        return signals_flat.reshape(batch_size, num_assets)
-
+        except Exception as e:
+            self.logger.error(f"{self.config.name}: Error during model forward pass or signal generation: {e}. Returning zero signals.", exc_info=True)
+            return torch.zeros((batch_size, 1, 1), device=device)
+            
+        return signal.reshape(batch_size, 1, 1)
 
 class EnsembleLearningStrategy(BaseStrategy):
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="EnsembleLearningStrategy",
-            description="Combines signals from multiple base strategies using PyTorch.",
+            description="Combines predictions from multiple models.",
             default_params={
-                'base_strategy_configs': [], 
-                'combination_logic': 'sum', # 'sum', 'average', 'majority_vote'
-                'close_idx': 3 # Default for sub-strategies if not specified by them
-            },
-            applicable_assets=[]
+                'model_configs': [], # List of dicts, each with 'model_path', 'model_class_str', 'input_dim_model' (optional, if different from strategy's input_dim)
+                'aggregation_method': 'majority_vote', # or 'average' for regression
+                # 'strategy_input_dim' is now self.config.input_dim for the features this ensemble strategy receives.
+                # Individual models within the ensemble can have their own input_dim specified in model_configs.
+            }
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
-        
-        self.base_strategy_configs_from_params: List[Dict[str, Any]] = self.params.get('base_strategy_configs', [])
-        self.combination_logic = self.params.get('combination_logic', 'average') # Changed default to 'average'
-        self.weights: Optional[torch.Tensor] = None # Store weights as a tensor if applicable
-        
-        # Extract weights if provided in config, matching the order of base_strategies_modules
-        # This assumes weights are provided in the 'params' of the EnsembleLearningStrategy config
-        strategy_weights_list = self.params.get('strategy_weights', [])
+        self.models = nn.ModuleList()
+        self.model_configs_params = self.params.get('model_configs', []) # Renamed to avoid clash with self.config
+        self.aggregation_method = self.params.get('aggregation_method', 'majority_vote')
 
-        self.base_strategies_modules = nn.ModuleList()
-        
-        self.logger.info(f"[{self.config.name}] Initializing. Found {len(self.base_strategy_configs_from_params)} base strategy configurations. Combination: {self.combination_logic}")
+        if self.config.input_dim is None:
+            self.logger.warning(f"{self.config.name}: self.config.input_dim is None. This is the expected input dim for the ensemble strategy itself. Sub-models might use this or their own configured input_dim.")
+            # Defaulting strategy_feature_input_dim for sub-models if self.config.input_dim is None AND sub-model doesn't specify its own.
+            default_sub_model_input_dim_fallback = 10 
+        else:
+            default_sub_model_input_dim_fallback = self.config.input_dim
 
-        # Simplified sub-strategy loading logic (assuming strategy classes are accessible)
-        # For a robust solution, a strategy registry or more sophisticated dynamic import is needed.
-        import importlib # Ensure importlib is available
-
-        loaded_strategies_count = 0
-        temp_weights = []
-
-        for i, bs_conf_item in enumerate(self.base_strategy_configs_from_params):
-            if not isinstance(bs_conf_item, dict):
-                self.logger.warning(f"Base strategy config item #{i} is not a dict: {bs_conf_item}. Skipping.")
-                continue
-
-            strategy_class_path = bs_conf_item.get('class_path') # Expecting 'module.submodule.ClassName'
-            strategy_instance_name = bs_conf_item.get('name', f"SubStrategy_{i}")
-            sub_strategy_init_params = bs_conf_item.get('params', {})
+        for i, model_conf_dict in enumerate(self.model_configs_params):
+            model_class_str = model_conf_dict.get('model_class_str')
+            model_path = model_conf_dict.get('model_path')
             
-            # Get weight for this strategy
-            current_strategy_weight = 1.0 # Default weight if not specified
-            if strategy_weights_list and i < len(strategy_weights_list):
-                current_strategy_weight = strategy_weights_list[i]
-            elif 'weight' in bs_conf_item: # Fallback to weight in sub_strategy_config item itself
-                current_strategy_weight = bs_conf_item['weight']
+            # Sub-model input_dim: use model_conf_dict['input_dim_model'], fallback to strategy's input_dim (self.config.input_dim), then to default_sub_model_input_dim_fallback.
+            sub_model_input_dim = model_conf_dict.get('input_dim_model', default_sub_model_input_dim_fallback)
+            sub_model_output_dim = model_conf_dict.get('output_dim_model', 3 if self.aggregation_method == 'majority_vote' else 1)
 
-
-            if not strategy_class_path:
-                self.logger.warning(f"Base strategy config item #{i} missing 'class_path': {bs_conf_item}. Skipping.")
-                continue
-
-            try:
-                module_path, class_name = strategy_class_path.rsplit('.', 1)
-                module = importlib.import_module(module_path)
-                SubStrategyClass = getattr(module, class_name)
-
-                # Create config for sub-strategy
-                # Sub-strategy's default_config provides the base
-                sub_default_config: StrategyConfig = SubStrategyClass.default_config()
-                # Override name
-                sub_default_config.name = strategy_instance_name 
-                # Sub-strategies inherit applicable_assets from ensemble if not specified by them
-                if not sub_default_config.applicable_assets and self.config.applicable_assets:
-                    sub_default_config.applicable_assets = self.config.applicable_assets
-                
-                # The sub_strategy_init_params will be passed to the SubStrategyClass constructor,
-                # which via BaseStrategy.__init__ will merge them with sub_default_config.default_params.
-
-                sub_strategy_instance = SubStrategyClass(
-                    config=sub_default_config,
-                    params=sub_strategy_init_params, # These are the overrides for the sub-strategy
-                    logger=self.logger
-                )
-                self.base_strategies_modules.append(sub_strategy_instance)
-                temp_weights.append(current_strategy_weight)
-                loaded_strategies_count += 1
-                self.logger.info(f"Successfully loaded and added sub-strategy: {strategy_instance_name} ({strategy_class_path}) with weight {current_strategy_weight}")
-
-            except Exception as e:
-                self.logger.error(f"Error loading sub-strategy {strategy_instance_name} ({strategy_class_path}): {e}", exc_info=True)
-
-        if loaded_strategies_count > 0 and temp_weights:
-            self.weights = torch.tensor(temp_weights, dtype=torch.float, device=self.params.get('device', 'cpu'))
-            if self.combination_logic == 'average' or self.combination_logic == 'weighted_average':
-                self.weights = self.weights / self.weights.sum() # Normalize for average
-            self.logger.info(f"Finalized strategy weights: {self.weights.tolist()}")
-        elif loaded_strategies_count == 0:
-             self.logger.warning(f"{self.config.name}: No sub-strategies were loaded.")
-
-
-    def forward(self, price_data_batch: torch.Tensor, 
-                feature_data_batch: torch.Tensor, 
-                portfolio_composition_batch: Optional[torch.Tensor] = None, 
-                market_state_batch: Optional[torch.Tensor] = None, 
-                current_positions_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Combines signals from base strategies.
-        All input tensors are (batch_size, num_assets, ...).
-        Output signals should be (batch_size, num_assets).
-        """
-        batch_size, num_assets, _, _ = feature_data_batch.shape # Assuming feature_data_batch is always provided
-        device = feature_data_batch.device
-
-        if not self.base_strategies_modules:
-            self.logger.warning(f"{self.config.name}: No base strategies loaded. Returning zero signals.")
-            return torch.zeros(batch_size, num_assets, device=device)
-
-        all_signals = []
-        for strategy_module in self.base_strategies_modules:
-            try:
-                # Each sub-strategy should also conform to the 5-argument forward pass
-                sub_signal = strategy_module.forward(
-                    price_data_batch, 
-                    feature_data_batch, 
-                    portfolio_composition_batch, 
-                    market_state_batch, 
-                    current_positions_batch
-                )
-                # Ensure sub_signal is (batch_size, num_assets)
-                if sub_signal.shape != (batch_size, num_assets):
-                    self.logger.warning(f"Sub-strategy {strategy_module.config.name} produced signal of shape {sub_signal.shape}, expected {(batch_size, num_assets)}. Attempting to adapt or skipping.")
-                    # Simple adaptation: if it's (B*A,), try to reshape. This is risky.
-                    if sub_signal.ndim == 1 and sub_signal.numel() == batch_size * num_assets:
-                        sub_signal = sub_signal.reshape(batch_size, num_assets)
-                    else: # If not adaptable, use zeros for this sub-strategy
-                         sub_signal = torch.zeros(batch_size, num_assets, device=device)
-                all_signals.append(sub_signal)
-            except Exception as e:
-                self.logger.error(f"Error in sub-strategy {strategy_module.config.name} forward pass: {e}. Using zero signals for this sub-strategy.", exc_info=True)
-                all_signals.append(torch.zeros(batch_size, num_assets, device=device))
-        
-        if not all_signals:
-            return torch.zeros(batch_size, num_assets, device=device)
-
-        # Stack signals: (num_strategies, batch_size, num_assets)
-        stacked_signals = torch.stack(all_signals, dim=0)
-
-        if self.combination_logic == 'sum':
-            combined_signals = torch.sum(stacked_signals, dim=0)
-        elif self.combination_logic == 'average':
-            combined_signals = torch.mean(stacked_signals, dim=0)
-        elif self.combination_logic == 'weighted_average' or self.combination_logic == 'weighted_sum':
-            if self.weights is not None and self.weights.shape[0] == stacked_signals.shape[0]:
-                # Reshape weights for broadcasting: (num_strategies, 1, 1)
-                w = self.weights.reshape(-1, 1, 1).to(device)
-                combined_signals = torch.sum(stacked_signals * w, dim=0)
-                if self.combination_logic == 'weighted_average': # Already normalized if sum of weights is 1
-                    pass # Weights should be pre-normalized if true weighted average is desired.
-                         # If weights don't sum to 1, this is a weighted sum.
+            model_instance: Optional[nn.Module] = None
+            if model_class_str and model_path and os.path.exists(model_path):
+                try:
+                    module_path, class_name = model_class_str.rsplit('.', 1)
+                    module = importlib.import_module(module_path)
+                    ModelClass = getattr(module, class_name)
+                    model_instance = ModelClass(input_dim=sub_model_input_dim, output_dim=sub_model_output_dim)
+                    
+                    state_dict = torch.load(model_path, map_location=self.params.get('device', 'cpu'))
+                    model_instance.load_state_dict(state_dict.get('state_dict', state_dict))
+                    model_instance.to(self.params.get('device', 'cpu'))
+                    model_instance.eval()
+                    self.models.append(model_instance)
+                    self.logger.info(f"{self.config.name}: Loaded sub-model {i+1} ({model_class_str}) from {model_path} with input_dim {sub_model_input_dim}.")
+                except Exception as e:
+                    self.logger.error(f"{self.config.name}: Error loading sub-model {i+1} ({model_class_str}) from {model_path}: {e}. Skipping.", exc_info=True)
+            elif model_class_str: # Create default if path not found but class is specified
+                try:
+                    module_path, class_name = model_class_str.rsplit('.', 1)
+                    module = importlib.import_module(module_path)
+                    ModelClass = getattr(module, class_name)
+                    model_instance = ModelClass(input_dim=sub_model_input_dim, output_dim=sub_model_output_dim)
+                    model_instance.to(self.params.get('device', 'cpu'))
+                    model_instance.eval()
+                    self.models.append(model_instance)
+                    self.logger.warning(f"{self.config.name}: Path for sub-model {i+1} ({model_class_str}) not found or invalid. Created default instance with input_dim {sub_model_input_dim}.")
+                except Exception as e:
+                    self.logger.error(f"{self.config.name}: Error creating default instance for sub-model {i+1} ({model_class_str}): {e}. Skipping.", exc_info=True)
             else:
-                self.logger.warning(f"{self.config.name}: Weights not properly configured for weighted combination. Falling back to simple average.")
-                combined_signals = torch.mean(stacked_signals, dim=0)
-        elif self.combination_logic == 'majority_vote':
-            # Sign of sum: +1 if sum > 0, -1 if sum < 0, 0 if sum == 0
-            combined_signals = torch.sign(torch.sum(torch.sign(stacked_signals), dim=0))
-        else: # Default to average
-            combined_signals = torch.mean(stacked_signals, dim=0)
+                self.logger.warning(f"{self.config.name}: Sub-model config {i+1} is missing model_class_str. Skipping.")
+        
+        if not self.models:
+            self.logger.warning(f"{self.config.name}: No sub-models were loaded. This strategy will produce zero signals.")
+        else:
+            self.logger.info(f"{self.config.name}: Initialized with {len(self.models)} sub-models.")
+
+    def forward(self, asset_features: torch.Tensor, 
+                current_positions: Optional[torch.Tensor] = None, 
+                timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
+        batch_size, sequence_length, num_strategy_features = asset_features.shape
+        device = asset_features.device
+
+        if not self.models:
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        # The ensemble strategy receives asset_features with num_strategy_features (== self.config.input_dim).
+        # Each sub-model might expect a different input_dim, as configured in self.model_configs_params.
+        # If a sub-model expects a different dim, it's an issue unless feature selection/transformation is done here.
+        # For now, assume sub-models are compatible with num_strategy_features or their config handles it.
+        
+        latest_features = asset_features[:, -1, :] # (batch_size, num_strategy_features)
+        
+        all_predictions = []
+        for i, model in enumerate(self.models):
+            sub_model_conf = self.model_configs_params[i]
+            sub_model_expected_input_dim = sub_model_conf.get('input_dim_model', self.config.input_dim if self.config.input_dim is not None else 10)
+
+            if num_strategy_features != sub_model_expected_input_dim:
+                self.logger.warning(f"{self.config.name}, sub-model {i} ({sub_model_conf.get('model_class_str')}): Feature mismatch. Strategy provides {num_strategy_features}, model expects {sub_model_expected_input_dim}. Skipping this model.")
+                # Create a dummy prediction that won't skew aggregation if possible
+                output_dim_model = sub_model_conf.get('output_dim_model', 3 if self.aggregation_method == 'majority_vote' else 1)
+                dummy_pred = torch.zeros((batch_size, output_dim_model), device=device)
+                if self.aggregation_method == 'majority_vote' and output_dim_model == 3: # sell, hold, buy
+                    dummy_pred[:, 1] = 1 # Vote for hold
+                all_predictions.append(dummy_pred)
+                continue
             
-        return combined_signals.clamp_(-1, 1) # Ensure signals are within [-1, 1]
+            try:
+                with torch.no_grad():
+                    model.eval()
+                    prediction = model(latest_features) # (batch_size, sub_model_output_dim)
+                    all_predictions.append(prediction)
+            except Exception as e:
+                self.logger.error(f"{self.config.name}: Error in sub-model {i} forward pass: {e}. Using neutral prediction.", exc_info=True)
+                output_dim_model = sub_model_conf.get('output_dim_model', 3 if self.aggregation_method == 'majority_vote' else 1)
+                error_pred = torch.zeros((batch_size, output_dim_model), device=device)
+                if self.aggregation_method == 'majority_vote' and output_dim_model == 3:
+                    error_pred[:, 1] = 1 # Vote for hold on error
+                all_predictions.append(error_pred)
+
+        if not all_predictions:
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        stacked_predictions = torch.stack(all_predictions, dim=0) # (num_models, batch_size, sub_model_output_dim)
+        final_signal = torch.zeros(batch_size, device=device)
+
+        if self.aggregation_method == 'majority_vote':
+            # Assumes sub_model_output_dim is 3 (sell, hold, buy) for each model
+            if stacked_predictions.shape[-1] != 3:
+                self.logger.warning(f"{self.config.name}: Majority vote expects output_dim=3 from sub-models, but got {stacked_predictions.shape[-1]}. Returning zero signal.")
+                return torch.zeros((batch_size, 1, 1), device=device)
+            action_indices = torch.argmax(stacked_predictions, dim=2) # (num_models, batch_size)
+            voted_actions, _ = torch.mode(action_indices, dim=0) # (batch_size,)
+            final_signal = voted_actions.float() - 1.0 # Convert 0,1,2 to -1,0,1
+        elif self.aggregation_method == 'average':
+            if stacked_predictions.shape[-1] != 1:
+                self.logger.warning(f"{self.config.name}: Average aggregation expects output_dim=1 (regression) from sub-models, but got {stacked_predictions.shape[-1]}. Returning zero signal.")
+                return torch.zeros((batch_size, 1, 1), device=device)
+            averaged_predictions = torch.mean(stacked_predictions, dim=0) # (batch_size, 1)
+            threshold_buy = self.params.get('threshold_buy', 0.01)
+            threshold_sell = self.params.get('threshold_sell', -0.01)
+            final_signal[averaged_predictions[:, 0] > threshold_buy] = 1.0
+            final_signal[averaged_predictions[:, 0] < threshold_sell] = -1.0
+        else:
+            self.logger.warning(f"{self.config.name}: Unknown aggregation method '{self.aggregation_method}'. Defaulting to hold.")
+
+        return final_signal.reshape(batch_size, 1, 1)
 
 class TransferLearningStrategy(BaseStrategy):
     @staticmethod
     def default_config() -> StrategyConfig:
         return StrategyConfig(
             name="TransferLearningStrategy",
-            description="Uses a pre-trained model and fine-tunes it or uses its features.",
+            description="Uses a pre-trained base model and fine-tunes a new head.",
             default_params={
                 'base_model_path': None,
-                'model_class_str': None, # e.g., 'mymodule.MyCustomModel'
-                # 'num_ft_layers_to_unfreeze': 0, # Original name
-                'n_layers_to_freeze': 0, # Matches test usage, interpreted as layers to unfreeze from end
-                'new_output_dim': None, # Matches test usage for the final output dimension
-                'output_dim': 1, # Original output_dim if new_output_dim not specified
-                'lookback_window': 20,
-                'feature_indices': [],
-                'model_input_dim': 10 # Added to align with test params for num_selected_features fallback
+                'base_model_class_str': None, 
+                'base_model_output_features': 128, 
+                'new_head_output_dim': 3, 
+                'freeze_base_model': True,
+                'new_head_hidden_layers': [64],
+                'lookback_window': 1 # Default to 1, meaning use last time step features for base model
             }
+            # self.config.input_dim (features per step) will be used for the base model's input layer.
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
         super().__init__(config, params=params, logger=logger)
+        
         self.base_model_path = self.params.get('base_model_path')
-        self.model_class_str = self.params.get('model_class_str')
-        
-        self.device = torch.device(self.params.get('device', 'cpu'))
+        self.base_model_class_str = self.params.get('base_model_class_str')
+        self.base_model_output_features = int(self.params.get('base_model_output_features', 128))
+        self.new_head_output_dim = int(self.params.get('new_head_output_dim', 3))
+        self.freeze_base_model = self.params.get('freeze_base_model', True)
+        self.new_head_hidden_layers_config = self.params.get('new_head_hidden_layers', [64])
+        self.lookback_window = int(self.params.get('lookback_window', 1))
 
-        # Number of final layers to unfreeze/modify. Test uses 'n_layers_to_freeze'.
-        # Default config had 'num_ft_layers_to_unfreeze'. Prioritize 'n_layers_to_freeze'.
-        self.layers_to_unfreeze_count = int(self.params.get('n_layers_to_freeze', self.params.get('num_ft_layers_to_unfreeze', 0)))
-        
-        # Final output dimension for the modified model. Test uses 'new_output_dim'.
-        # Fallback to 'output_dim' if 'new_output_dim' is not present or None.
-        _new_output_dim_param = self.params.get('new_output_dim')
-        if _new_output_dim_param is not None:
-            self.final_output_dim = int(_new_output_dim_param)
+        if self.config.input_dim is None:
+            self.logger.error(f"{self.config.name}: self.config.input_dim is None. Cannot initialize base model. Defaulting to dummy input_dim_per_step of 10.")
+            self.input_dim_per_step = 10
         else:
-            self.final_output_dim = int(self.params.get('output_dim', 1))
+            self.input_dim_per_step = self.config.input_dim
 
-        self.lookback_window = int(self.params.get('lookback_window', 20))
-        self.feature_indices = self.params.get('feature_indices', [])
-        
-        # Determine num_selected_features for model constructor if applicable
-        if self.feature_indices:
-            num_selected_features = len(self.feature_indices)
-        else:
-            # Fallback: 'input_features_dim' or 'model_input_dim' (from test) or default
-            num_selected_features = self.params.get('input_features_dim', self.params.get('model_input_dim', 10))
+        # Input to the base_model will be (self.input_dim_per_step * self.lookback_window)
+        self.base_model_internal_input_dim = self.input_dim_per_step * self.lookback_window
 
-        self.model: nn.Module
-        if self.model_class_str and self.base_model_path:
+        self.base_model_instance: Optional[nn.Module] = None # Renamed to avoid clash with self.model
+        self.new_head_instance: Optional[nn.Module] = None # Renamed
+        self.model: Optional[nn.Module] = None # This will be the combined model
+
+        loaded_successfully = False
+        if self.base_model_class_str and self.base_model_path and os.path.exists(self.base_model_path):
             try:
-                module_path, class_name = self.model_class_str.rsplit('.', 1)
+                module_path, class_name = self.base_model_class_str.rsplit('.', 1)
                 module = importlib.import_module(module_path)
-                ModelClass = getattr(module, class_name)
+                BaseModelClass = getattr(module, class_name)
+                # Base model constructor should take its expected input_dim
+                self.base_model_instance = BaseModelClass(input_dim=self.base_model_internal_input_dim) 
                 
-                # The ModelClass constructor signature might vary.
-                # For transfer learning, often the base model structure is loaded, then adapted.
-                # The input_dim for ModelClass here might be for the original model structure.
-                # Or, if ModelClass is a wrapper, it might take new head params.
-                # The test mock for ModelClass returns mock_dl_model, bypassing these constructor args' direct effect on mock_dl_model.
-                constructor_input_dim = num_selected_features * self.lookback_window
-                
-                # This call in the test will be mocked to return mock_dl_model
-                self.model = ModelClass(input_dim=constructor_input_dim, output_dim=self.final_output_dim) 
-                
-                state_dict_path = self.base_model_path
-                if not os.path.exists(state_dict_path): # Check if path exists
-                    raise FileNotFoundError(f"Model state_dict not found at {state_dict_path}")
-
-                # Ensure map_location is a string 'cpu' or 'cuda:x' as expected by torch.load sometimes
-                map_location_str = self.device.type 
-                if self.device.type == 'cuda' and self.device.index is not None:
-                    map_location_str = f'cuda:{self.device.index}'
-
-                state_dict = torch.load(state_dict_path, map_location=map_location_str) # MODIFIED
-                if 'state_dict' in state_dict:
-                    self.model.load_state_dict(state_dict['state_dict'], strict=False)
-                else:
-                    self.model.load_state_dict(state_dict, strict=False)
-                
-                self._modify_model_for_transfer() # Called without arguments
-                
-                self.model.to(self.device)
-                if self.layers_to_unfreeze_count > 0: # If any layers are unfrozen, model is for training
-                    self.model.train() 
-                else: # Otherwise, feature extraction mode
-                    self.model.eval()
-                self.logger.info(f"{self.config.name}: Loaded and modified base model {self.model_class_str} from {self.base_model_path}.")
-
-            except FileNotFoundError as e: # Specific handling for file not found
-                self.logger.error(f"{self.config.name}: {e}. Using default model.")
-                self._create_default_transfer_model(num_selected_features)
+                state_dict = torch.load(self.base_model_path, map_location=self.params.get('device', 'cpu'))
+                self.base_model_instance.load_state_dict(state_dict.get('state_dict', state_dict))
+                self.logger.info(f"{self.config.name}: Loaded base model {self.base_model_class_str} from {self.base_model_path} with input_dim {self.base_model_internal_input_dim}.")
+                loaded_successfully = True
             except Exception as e:
-                self.logger.error(f"{self.config.name}: Error loading/modifying base model: {e}. Using default model.", exc_info=True)
-                self._create_default_transfer_model(num_selected_features)
-        else:
-            self.logger.warning(f"{self.config.name}: model_class_str or base_model_path not provided. Using default model.")
-            self._create_default_transfer_model(num_selected_features)
-
-    def _create_default_transfer_model(self, num_input_features_per_step: int):
-        # Default model: Simple MLP
-        mlp_input_dim = num_input_features_per_step * self.lookback_window
-        self.model = nn.Sequential(
-            nn.Linear(mlp_input_dim, 128),
-            Mish(), # Assuming Mish is defined
-            nn.Linear(128, 64),
-            Swish(), # Assuming Swish is defined
-            nn.Linear(64, self.final_output_dim) # Use final_output_dim
-        )
-        self.model.to(self.device)
-        self.model.eval() # Default to eval mode
-        self.logger.info(f"{self.config.name}: Created default MLP model with input_dim={mlp_input_dim}, output_dim={self.final_output_dim}.")
-
-    def _modify_model_for_transfer(self):
-        model_to_modify = self.model 
-        # layers_to_unfreeze_count is self.layers_to_unfreeze_count
-        # new_output_dim is self.final_output_dim
-        # device is self.device
-
-        self.logger.info(f"Modifying model for transfer. Layers to unfreeze (from end): {self.layers_to_unfreeze_count}, New output dim: {self.final_output_dim}, Device: {self.device}")
-
-        if not (hasattr(model_to_modify, 'children') and callable(model_to_modify.children)):
-            self.logger.warning(f"Model {type(model_to_modify)} does not have a 'children' method or is not an nn.Module. Cannot modify layers.")
-            # Handle case where model_to_modify might be a single nn.Linear layer itself
-            if isinstance(model_to_modify, nn.Linear):
-                if model_to_modify.out_features != self.final_output_dim:
-                    self.logger.info(f"Model is a single Linear layer. Replacing it.")
-                    in_features = model_to_modify.in_features
-                    self.model = nn.Linear(in_features, self.final_output_dim) # Replace self.model
-                # Parameters of a new nn.Linear are requires_grad=True by default
-            else:
-                return # Cannot modify if not Linear and no children
-
-        children_modules = []
-        if hasattr(model_to_modify, 'children') and callable(model_to_modify.children):
-            children_modules = list(model_to_modify.children())
+                self.logger.error(f"{self.config.name}: Error loading base model {self.base_model_class_str}: {e}. No model created.", exc_info=True)
         
-        num_children = len(children_modules)
+        if not loaded_successfully and self.base_model_class_str: # Try creating default if path failed but class given
+             try:
+                module_path, class_name = self.base_model_class_str.rsplit('.', 1)
+                module = importlib.import_module(module_path)
+                BaseModelClass = getattr(module, class_name)
+                self.base_model_instance = BaseModelClass(input_dim=self.base_model_internal_input_dim)
+                self.logger.warning(f"{self.config.name}: Path for base model {self.base_model_class_str} failed or not provided. Created default instance with input_dim {self.base_model_internal_input_dim}.")
+                loaded_successfully = True
+             except Exception as e:
+                self.logger.error(f"{self.config.name}: Error creating default base model {self.base_model_class_str}: {e}. No model created.", exc_info=True)
 
-        if num_children == 0 and not isinstance(model_to_modify, nn.Linear): # Already handled single Linear above
-             self.logger.warning(f"Model {type(model_to_modify)} has no children modules and is not Linear. Modification might be limited.")
-             return
-
-
-        # Freeze/unfreeze layers if there are children_modules
-        if num_children > 0:
-            for i, child_module in enumerate(children_modules):
-                # Freeze layers that are NOT among the final 'self.layers_to_unfreeze_count'
-                if i < (num_children - self.layers_to_unfreeze_count):
-                    for param in child_module.parameters():
-                        param.requires_grad = False
-                    self.logger.debug(f"Froze layer {i}: {child_module}")
-                else: # Unfreeze the final 'self.layers_to_unfreeze_count' layers
-                    for param in child_module.parameters():
-                        param.requires_grad = True
-                    self.logger.debug(f"Unfroze layer {i}: {child_module}")
+        if self.base_model_instance:
+            if self.freeze_base_model:
+                for param_item in self.base_model_instance.parameters(): # param_item to avoid clash
+                    param_item.requires_grad = False
+                self.logger.info(f"{self.config.name}: Froze base model parameters.")
             
-            # Replace the last layer if applicable
-            last_layer_module = children_modules[-1]
-            if isinstance(last_layer_module, nn.Linear):
-                if last_layer_module.out_features != self.final_output_dim:
-                    in_features = last_layer_module.in_features
-                    new_final_layer = nn.Linear(in_features, self.final_output_dim)
-                    
-                    if isinstance(model_to_modify, nn.Sequential):
-                        model_to_modify[-1] = new_final_layer # This uses __setitem__
-                    else:
-                        # Attempt to find by attribute name if not Sequential (more complex)
-                        # For simplicity, this example assumes nn.Sequential or direct attribute replacement if known
-                        # This part might need to be more robust for general nn.Module containers
-                        replaced_by_attr = False
-                        for name, module_item in model_to_modify.named_children():
-                            if module_item is last_layer_module:
-                                setattr(model_to_modify, name, new_final_layer)
-                                replaced_by_attr = True
-                                break
-                        if not replaced_by_attr:
-                            self.logger.warning("Could not replace last layer by attribute: model is not Sequential and direct attribute not found/set.")
-                    self.logger.info(f"Replaced last layer. Old out: {last_layer_module.out_features}, New out: {self.final_output_dim}")
-            else:
-                self.logger.warning(f"Last layer is not nn.Linear (type: {type(last_layer_module)}). Cannot automatically change output dim.")
-        
-        self.model.to(self.device) # Ensure final model is on device
-
-    def forward(self, price_data_batch: torch.Tensor, 
-                feature_data_batch: torch.Tensor, 
-                portfolio_composition_batch: Optional[torch.Tensor] = None, 
-                market_state_batch: Optional[torch.Tensor] = None, 
-                current_positions_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Processes feature_data_batch using the (potentially modified) model to generate signals.
-        Args:
-            price_data_batch: (batch_size, num_assets, seq_len, num_ohlcv_features)
-            feature_data_batch: (batch_size, num_assets, seq_len, num_input_features)
-            ... other args
-        Returns:
-            Signals tensor of shape (batch_size, num_assets).
-        """
-        batch_size, num_assets, seq_len, num_input_features = feature_data_batch.shape
-        device = feature_data_batch.device # Use device of input data for consistency
-
-        if seq_len < self.lookback_window:
-            self.logger.debug(f"{self.config.name}: Insufficient data ({seq_len} points) for lookback {self.lookback_window}. Returning zero signals.")
-            return torch.zeros(batch_size, num_assets, device=device)
-
-        # Select features based on self.feature_indices or use all if empty
-        if self.feature_indices:
-            if not all(idx < num_input_features for idx in self.feature_indices):
-                self.logger.warning(f"{self.config.name}: Feature indices out of bounds (max index: {num_input_features-1}). Returning zero signals.")
-                return torch.zeros(batch_size, num_assets, device=device)
-            current_features = feature_data_batch[:, :, :, self.feature_indices] # (B, A, S, F_selected)
+            head_layers_list = []
+            current_head_dim = self.base_model_output_features
+            for hidden_dim_item in self.new_head_hidden_layers_config: # hidden_dim_item
+                head_layers_list.append(nn.Linear(current_head_dim, hidden_dim_item))
+                head_layers_list.append(nn.ReLU())
+                current_head_dim = hidden_dim_item
+            head_layers_list.append(nn.Linear(current_head_dim, self.new_head_output_dim))
+            self.new_head_instance = nn.Sequential(*head_layers_list)
+            
+            # Combine base model and new head
+            # This assumes base_model_instance is a feature extractor and new_head_instance is a classifier/regressor.
+            # If base_model_instance itself has multiple stages, this might need adjustment.
+            self.model = nn.Sequential(self.base_model_instance, self.new_head_instance)
+            self.model.to(self.params.get('device', 'cpu'))
+            self.logger.info(f"{self.config.name}: Initialized with base model and new head (output_dim={self.new_head_output_dim}). Base model input dim: {self.base_model_internal_input_dim}")
         else:
-            # If no indices, use all features. The model's input_dim should match this.
-            current_features = feature_data_batch # (B, A, S, F_all)
-        
-        num_selected_features = current_features.shape[-1]
-        
-        # We need the last 'lookback_window' steps for each asset
-        # Input to model: (batch_size * num_assets, lookback_window * num_selected_features)
-        lookback_features = current_features[:, :, -self.lookback_window:, :]
-        
-        # Flatten the lookback_window and num_selected_features dimensions
-        model_input_flat_per_asset = lookback_features.reshape(batch_size, num_assets, -1)
-        
-        # Reshape for batch processing by the MLP: (B * A, L * F_selected)
-        model_input_batched = model_input_flat_per_asset.reshape(batch_size * num_assets, -1)
+            self.logger.error(f"{self.config.name}: Base model could not be loaded or created. Transfer learning strategy will not function correctly.")
+            # Create a dummy model to prevent runtime errors if self.model is accessed
+            dummy_input_dim = self.input_dim_per_step * self.lookback_window
+            self.model = nn.Linear(dummy_input_dim, self.new_head_output_dim) 
+            self.model.to(self.params.get('device', 'cpu'))
 
-        # Check if the model is a Sequential model to access in_features of the first layer
-        first_layer_in_features = -1
-        if isinstance(self.model, nn.Sequential) and len(self.model) > 0 and hasattr(self.model[0], 'in_features'):
-            first_layer_in_features = self.model[0].in_features
-        elif hasattr(self.model, 'in_features'): # For single layer models like nn.Linear directly
-            first_layer_in_features = self.model.in_features
+    def forward(self, asset_features: torch.Tensor, 
+                current_positions: Optional[torch.Tensor] = None, 
+                timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
+        batch_size, sequence_length, features_per_step = asset_features.shape
+        device = asset_features.device
 
-        if first_layer_in_features != -1 and model_input_batched.shape[-1] != first_layer_in_features:
-            self.logger.warning(f"{self.config.name}: Model input dim mismatch. Expected {first_layer_in_features}, got {model_input_batched.shape[-1]}. Returning zeros.")
-            return torch.zeros(batch_size, num_assets, device=device)
-        elif first_layer_in_features == -1:
-            self.logger.warning(f"{self.config.name}: Could not determine model's expected input features. Proceeding with caution.")
+        if not self.model:
+             self.logger.error(f"{self.config.name}: Model not initialized. Returning zero signal.")
+             return torch.zeros((batch_size, 1, 1), device=device)
+        
+        if features_per_step != self.input_dim_per_step:
+            self.logger.error(f"{self.config.name}: Mismatch asset_features dim_per_step ({features_per_step}) and expected input_dim_per_step ({self.input_dim_per_step}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
 
-        predictions_flat = torch.zeros(batch_size * num_assets, self.final_output_dim, device=device)
+        if sequence_length < self.lookback_window:
+            self.logger.warning(f"{self.config.name}: Sequence length ({sequence_length}) is less than lookback window ({self.lookback_window}). Returning zero signal.")
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        model_input_sequence = asset_features[:, -self.lookback_window:, :]
+        model_input_flat = model_input_sequence.reshape(batch_size, -1) # (batch_size, self.lookback_window * self.input_dim_per_step)
+
+        if model_input_flat.shape[1] != self.base_model_internal_input_dim:
+             self.logger.error(f"{self.config.name}: Mismatch between flattened input dim ({model_input_flat.shape[1]}) and base model internal input dim ({self.base_model_internal_input_dim}). Returning zero signal.")
+             return torch.zeros((batch_size, 1, 1), device=device)
+
+        signal = torch.zeros(batch_size, device=device)
         try:
-            with torch.no_grad() if not (self.model.training and self.layers_to_unfreeze_count > 0) else torch.enable_grad():
-                # If model is in training mode (fine-tuning), grads should be enabled for the forward pass
-                # otherwise, no_grad context for inference
-                predictions_flat = self.model(model_input_batched) # (B * A, final_output_dim)
-        except Exception as e:
-            self.logger.error(f"{self.config.name}: Error during model forward pass: {e}. Returning zero signals.", exc_info=True)
-            return torch.zeros(batch_size, num_assets, device=device)
+            # Set grad enabled based on whether the base model is frozen and if the head is being trained.
+            # For pure inference, no_grad() is usually appropriate.
+            with torch.no_grad(): 
+                self.model.eval()
+                logits = self.model(model_input_flat) # (batch_size, new_head_output_dim)
 
-        signals_flat: torch.Tensor
-        if self.final_output_dim == 1: # Regression: signal is sign of prediction
-            signals_flat = torch.sign(predictions_flat.squeeze(-1)) # (B * A,)
-        elif self.final_output_dim == 3: # Classification: [sell, hold, buy]
-            action_indices = torch.argmax(predictions_flat, dim=1) # (B * A,)
-            signals_flat = action_indices.float() - 1.0 # Map 0,1,2 to -1,0,1
-        else: # Default to zero signals if output_dim is not 1 or 3
-            self.logger.warning(f"{self.config.name}: Unsupported final_output_dim {self.final_output_dim} for signal generation. Returning zero signals.")
-            signals_flat = torch.zeros(predictions_flat.shape[0], device=device)
-        
-        return signals_flat.reshape(batch_size, num_assets)
+            action_indices = torch.argmax(logits, dim=1)
+            if self.new_head_output_dim == 3: # Sell, Hold, Buy
+                signal = action_indices.float() - 1.0
+            elif self.new_head_output_dim == 2: # Sell, Buy
+                signal = (action_indices.float() * 2.0) - 1.0
+            else: # Regression or other classification
+                # If regression (output_dim=1), might compare to thresholds
+                if self.new_head_output_dim == 1:
+                    threshold_buy = self.params.get('threshold_buy', 0.01)
+                    threshold_sell = self.params.get('threshold_sell', -0.01)
+                    signal[logits[:, 0] > threshold_buy] = 1.0
+                    signal[logits[:, 0] < threshold_sell] = -1.0
+                else:
+                    self.logger.warning(f"{self.config.name}: new_head_output_dim is {self.new_head_output_dim}. Signal logic might need adjustment. Defaulting to hold for unhandled cases.")
+        except Exception as e:
+            self.logger.error(f"{self.config.name}: Error during model forward pass: {e}. Returning zero signal.", exc_info=True)
+            return torch.zeros((batch_size, 1, 1), device=device)
+
+        return signal.reshape(batch_size, 1, 1)

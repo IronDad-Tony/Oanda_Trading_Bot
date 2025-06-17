@@ -25,52 +25,21 @@ import gc  # 垃圾回收
 import warnings # To issue warnings
 import logging # Ensure logging is imported
 
-try:
-    from src.agent.sac_policy import CustomSACPolicy
-    from src.agent.high_level_integration_system import HighLevelIntegrationSystem
-    from src.agent.strategy_innovation_module import create_strategy_innovation_module
-    from src.agent.market_state_awareness_system import MarketStateAwarenessSystem
-    from src.agent.meta_learning_optimizer import MetaLearningOptimizer
-    from src.common.config import (
-        DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
-        SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
-        SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU,
-        TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP # <--- 添加混合精度訓練支持
-    )
-    from src.common.logger_setup import logger
-except ImportError:
-    try:
-        from src.agent.sac_policy import CustomSACPolicy
-        from src.agent.high_level_integration_system import HighLevelIntegrationSystem
-        from src.agent.strategy_innovation_module import create_strategy_innovation_module
-        from src.agent.market_state_awareness_system import MarketStateAwarenessSystem
-        from src.agent.meta_learning_optimizer import MetaLearningOptimizer
-        from src.common.config import (
-            DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
-            SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
-            SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU,
-            TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP
-        )
-        from src.common.logger_setup import logger
-        logger.info("Direct run SACAgentWrapper: Successfully re-imported modules.")
-    except ImportError as e_retry_wrapper:
-        logger = logging.getLogger("sac_agent_wrapper_fallback")  # type: ignore
-        logger.setLevel(logging.INFO)
-        _ch_wrapper = logging.StreamHandler(sys.stdout)
-        _ch_wrapper.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        if not logger.handlers:
-            logger.addHandler(_ch_wrapper)
-        logger.error(f"Direct run SACAgentWrapper: Critical import error: {e_retry_wrapper}", exc_info=True)
-        CustomSACPolicy = None  # type: ignore
-        HighLevelIntegrationSystem = None  # type: ignore
-        create_strategy_innovation_module = None  # type: ignore
-        MarketStateAwarenessSystem = None  # type: ignore
-        MetaLearningOptimizer = None  # type: ignore
-        DEVICE = "cpu"; SAC_LEARNING_RATE = 3e-4; SAC_BATCH_SIZE = 256; SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 1000
-        SAC_LEARNING_STARTS_FACTOR = 10; SAC_GAMMA = 0.99; SAC_ENT_COEF = 'auto'
-        SAC_TRAIN_FREQ_STEPS = 1; SAC_GRADIENT_STEPS = 1; SAC_TAU = 0.005; TIMESTEPS = 128
-        LOGS_DIR = Path("./logs_fallback"); MAX_SYMBOLS_ALLOWED = 20; USE_AMP = False
-
+# Remove the problematic try-except block for Config import
+from src.agent.sac_policy import CustomSACPolicy
+from src.agent.high_level_integration_system import HighLevelIntegrationSystem
+from src.agent.strategy_innovation_module import create_strategy_innovation_module
+from src.agent.market_state_awareness_system import MarketStateAwarenessSystem
+from src.agent.meta_learning_optimizer import MetaLearningOptimizer
+from src.common.config import (
+    DEVICE, SAC_LEARNING_RATE, SAC_BATCH_SIZE, SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
+    SAC_LEARNING_STARTS_FACTOR, SAC_GAMMA, SAC_ENT_COEF,
+    SAC_TRAIN_FREQ_STEPS, SAC_GRADIENT_STEPS, SAC_TAU,
+    TIMESTEPS, LOGS_DIR, MAX_SYMBOLS_ALLOWED, USE_AMP,
+    ENHANCED_TRANSFORMER_CONFIG_PATH, QUANTUM_STRATEGY_CONFIG_PATH, 
+    ENHANCED_MODEL_CONFIG_PATH # Added missing config imports
+)
+from src.common.logger_setup import logger
 
 # Attempt to import QuantumEnhancedTransformer, handling potential import errors
 try:
@@ -91,6 +60,7 @@ class QuantumEnhancedSAC:
                  batch_size: int = SAC_BATCH_SIZE, # SAC_BATCH_SIZE 現在是 64
                  buffer_size: Optional[int] = None, # 改為直接接收 buffer_size
                  buffer_size_factor: int = SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR,
+                 learning_starts: Optional[int] = None, # <--- MODIFIED: ADDED learning_starts
                  learning_starts_factor: int = SAC_LEARNING_STARTS_FACTOR,
                  gamma: float = SAC_GAMMA,
                  ent_coef: Union[str, float] = SAC_ENT_COEF,
@@ -102,7 +72,8 @@ class QuantumEnhancedSAC:
                  seed: Optional[int] = None,
                  custom_objects: Optional[Dict[str, Any]] = None,
                  device: Union[torch.device, str] = DEVICE,
-                 use_amp: bool = USE_AMP                ):
+                 use_amp: bool = USE_AMP,                **kwargs # <--- MODIFIED: ADDED **kwargs
+                ):
         self.env = env
         # 使用传入的 policy_class（默认为 CustomSACPolicy）
         self.policy_class = policy_class
@@ -135,8 +106,12 @@ class QuantumEnhancedSAC:
             self.buffer_size = buffer_size
             
         # 計算 learning_starts
-        self.learning_starts = max(1000, self.buffer_size // learning_starts_factor)
-          # 設置優化的批次大小
+        if learning_starts is not None: # <--- MODIFIED: Prioritize direct learning_starts
+            self.learning_starts = learning_starts
+        else:
+            self.learning_starts = max(1000, self.buffer_size // learning_starts_factor) # Fallback to factor
+            
+        # 設置優化的批次大小
         self.optimized_batch_size = min(batch_size, self.buffer_size // 4)        # 設置 TensorBoard 日誌路徑，使用統一的目錄結構
         if tensorboard_log_path is None:
             # 使用統一的 TensorBoard 目錄，直接指向根目錄以避免層次過深
@@ -170,6 +145,9 @@ class QuantumEnhancedSAC:
         # 使用主 TensorBoard 目錄，不創建額外的子目錄
         full_tensorboard_path = self.tensorboard_log_path
         
+        # Remove 'policy' from kwargs if it exists, as it's already explicitly passed
+        cleaned_kwargs = {k: v for k, v in kwargs.items() if k != 'policy'}
+
         self.agent = SAC(
             policy=self.policy_class, env=self.env, learning_rate=learning_rate,
             buffer_size=self.buffer_size, learning_starts=self.learning_starts,
@@ -177,7 +155,8 @@ class QuantumEnhancedSAC:
             train_freq=(train_freq_steps, "step"), gradient_steps=gradient_steps,
             ent_coef=ent_coef, policy_kwargs=self.policy_kwargs,
             verbose=verbose, seed=seed, device=self.device,
-            tensorboard_log=full_tensorboard_path
+            tensorboard_log=full_tensorboard_path,
+            **cleaned_kwargs # <--- MODIFIED: Pass cleaned_kwargs to SAC constructor
         )        # CustomSACPolicy 在內部已使用 TransformerFeatureExtractor，無需手動替換        # Initialize High-Level Integration System for Phase 5
         try:
             if HighLevelIntegrationSystem is not None:
