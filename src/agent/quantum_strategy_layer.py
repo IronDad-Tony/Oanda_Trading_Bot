@@ -183,65 +183,70 @@ class StrategySuperposition(nn.Module):
     動態調整策略權重（振幅），根據市場波動率進行調節
     """
     
-    def __init__(self, state_dim: int, action_dim: int, num_strategies: int = 3, 
-                 custom_strategies: Optional[List[BaseStrategy]] = None):
+    def __init__(self, state_dim: int, action_dim: int, num_strategies: Optional[int] = None, 
+                 custom_strategies: Optional[List[nn.Module]] = None, device: Optional[torch.device] = None):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.num_strategies = num_strategies
-        
-        # 初始化策略網絡
-        if custom_strategies:
-            self.strategies = nn.ModuleList(custom_strategies)
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 策略池長度以 custom_strategies 為主
+        if custom_strategies is not None:
+            self.strategies = nn.ModuleList([s.to(self.device) for s in custom_strategies])
             self.num_strategies = len(custom_strategies)
         else:
             self.strategies = nn.ModuleList([
-                ArbitrageStrategy(state_dim, action_dim),
-                TrendFollowingStrategy(state_dim, action_dim),
-                MeanReversionStrategy(state_dim, action_dim)
+                TrendFollowingStrategy(state_dim, action_dim).to(self.device),
+                MeanReversionStrategy(state_dim, action_dim).to(self.device)
             ])
-        
+            self.num_strategies = len(self.strategies)
         # 可學習的量子振幅參數
-        self.base_amplitudes = nn.Parameter(torch.ones(self.num_strategies) / self.num_strategies)
-        
+        self.base_amplitudes = nn.Parameter(torch.ones(self.num_strategies, device=self.device) / self.num_strategies)
         # 波動率調節網絡
         self.volatility_modulator = nn.Sequential(
             nn.Linear(1, 32),
             nn.ReLU(),
             nn.Linear(32, self.num_strategies),
             nn.Sigmoid()
-        )
-        
+        ).to(self.device)
         # 自適應權重調整
         self.adaptive_weight_net = nn.Sequential(
             nn.Linear(state_dim + 1, 64),  # state + volatility
             nn.ReLU(),
             nn.Linear(64, self.num_strategies),
             nn.Softmax(dim=-1)
-        )
-        
+        ).to(self.device)
         # 策略相關性學習
-        self.strategy_correlation = nn.Parameter(torch.eye(self.num_strategies) * 0.1)
+        self.strategy_correlation = nn.Parameter(torch.eye(self.num_strategies, device=self.device) * 0.1)
         
     def forward(self, state: torch.Tensor, volatility: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向傳播：計算策略疊加的輸出
         
         Args:
-            state: 量子編碼的市場狀態
-            volatility: 市場波動率
+            state: 量子編碼的市場狀態 [batch, num_strategies, latent_dim] 或 [batch, MAX_SYMBOLS_ALLOWED, latent_dim]
+            volatility: 市場波動率 [batch, 1] 或 [batch, num_strategies, 1]
             
         Returns:
-            Tuple[疊加策略輸出, 調整後的振幅]
+            Tuple[疊加策略輸出, 調整後的權重]
         """
+        # 保證 device 對齊
+        state = state.to(self.device)
+        volatility = volatility.to(self.device)
+        
+        # 動態 shape 適配，保證 shape 一致且資訊不丟失
+        if state.ndim == 2:
+            # [batch, latent_dim] -> [batch, num_strategies, latent_dim]
+            state = state.unsqueeze(1).expand(-1, self.num_strategies, -1)
+        elif state.ndim == 3 and state.shape[1] != self.num_strategies:
+            # [batch, MAX_SYMBOLS_ALLOWED, latent_dim] -> [batch, num_strategies, latent_dim] (取前 num_strategies 個 symbol)
+            state = state[:, :self.num_strategies, :]
         batch_size = state.size(0)
         
         # 執行所有策略
         strategy_outputs = []
-        for strategy in self.strategies:
-            output = strategy(state)
+        for i, strategy in enumerate(self.strategies):
+            output = strategy(state[:, i, :].to(self.device))  # [batch, action_dim]
             strategy_outputs.append(output)
-        
         strategy_tensor = torch.stack(strategy_outputs, dim=1)  # [batch, num_strategies, action_dim]
         
         # 基礎振幅正規化
@@ -249,9 +254,16 @@ class StrategySuperposition(nn.Module):
         
         # 波動率調節
         volatility_factor = self.volatility_modulator(volatility.unsqueeze(-1))
-        
+
         # 自適應權重
-        state_vol_concat = torch.cat([state, volatility.unsqueeze(-1)], dim=-1)
+        # 修正：將 volatility broadcast 成 [batch, num_strategies, 1]
+        if volatility.dim() == 2 and volatility.shape[1] == 1:
+            vol_broadcast = volatility.unsqueeze(1).expand(-1, state.shape[1], 1)  # [batch, num_strategies, 1]
+        elif volatility.dim() == 3 and volatility.shape[1] == state.shape[1]:
+            vol_broadcast = volatility  # 已經是 [batch, num_strategies, 1]
+        else:
+            raise ValueError(f"volatility shape {volatility.shape} 不符預期")
+        state_vol_concat = torch.cat([state, vol_broadcast], dim=-1)
         adaptive_weights = self.adaptive_weight_net(state_vol_concat)
         
         # 組合所有權重因子

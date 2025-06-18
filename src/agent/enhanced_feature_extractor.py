@@ -59,6 +59,8 @@ class MockTransformer(nn.Module):
         logger.info("MockTransformer initialized.")
 
     def forward(self, src: th.Tensor, symbol_ids: Optional[th.Tensor] = None) -> th.Tensor:
+        # --- SHAPE ASSERT ---
+        assert src.shape[-1] == self.fc_in.in_features, f"[ShapeError] src last dim ({src.shape[-1]}) != fc_in.in_features ({self.fc_in.in_features})"
         # src shape: (batch_size, seq_len, feature_dim)
         # logger.debug(f"MockTransformer.forward: src shape: {src.shape}")
         
@@ -119,7 +121,9 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
                  use_msfe: bool = False, use_cts_fusion: bool = False, use_symbol_embedding: bool = False, 
                  msfe_configs: Optional[dict] = None, cts_fusion_configs: Optional[dict] = None, 
                  symbol_embedding_configs: Optional[dict] = None):
-        
+        # Call super().__init__ first to comply with PyTorch module rules
+        # We'll set features_dim after parsing config
+        super().__init__(observation_space, features_dim=1)  # Temporary, will be overwritten below
         logger.info("ENHANCED_TF_FE_INIT_MINIMAL_LOG_TEST_POINT_A (forced level)")
         logger.info(f"EnhancedTransformerFeatureExtractor.__init__ ENTERED. PID: {os.getpid()}, TID: {threading.get_ident()}")
         logger.info(f"EnhancedTransformerFeatureExtractor.__init__: model_config_path='{model_config_path}'")
@@ -147,6 +151,27 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             logger.error(f"EnhancedTransformerFeatureExtractor: Unexpected error loading config {model_config_path}: {e}. Critical error.")
             raise
 
+        # Extract relevant parameters from model_config
+        transformer_params = self.model_config.get('transformer_params', {})
+        self.input_dim = transformer_params.get('input_dim', 64) # Example default
+        self.model_dim = transformer_params.get('model_dim', 128)
+        self.n_head = transformer_params.get('n_head', 4)
+        self.num_layers = transformer_params.get('num_layers', 3)
+        self.dropout = transformer_params.get('dropout', 0.1)
+        self.transformer_output_dim = transformer_params.get('output_dim', self.model_dim) 
+
+        # --- SHAPE AUTO-CHECK & AUTO-FIX ---
+        # If observation_space is a Dict, try to infer input_dim from it
+        if isinstance(observation_space, GymDict):
+            if 'market_features' in observation_space.spaces:
+                obs_shape = observation_space.spaces['market_features'].shape
+                if len(obs_shape) == 2:
+                    obs_input_dim = obs_shape[-1]
+                    if obs_input_dim != self.input_dim:
+                        logger.warning(f"[AutoFix] input_dim in config ({self.input_dim}) != observation_space market_features dim ({obs_input_dim}), auto-correcting input_dim to {obs_input_dim}")
+                        self.input_dim = obs_input_dim
+        logger.info(f"EnhancedTransformerFeatureExtractor: Final input_dim after auto-check: {self.input_dim}")
+
         # Override feature flags from model_config if they are explicitly passed as False to __init__
         # This allows turning OFF a feature via constructor even if it's ON in the config file.
         # If the constructor arg is True or None (default), the config file value (or its default if not in config) is used.
@@ -161,23 +186,6 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         logger.info(f"  use_cts_fusion: {self.use_cts_fusion} (constructor: {use_cts_fusion}, config: {self.model_config.get('use_cross_time_fusion')})")
         logger.info(f"  use_symbol_embedding: {self.use_symbol_embedding} (constructor: {use_symbol_embedding}, config: {self.model_config.get('use_symbol_embedding')})")
 
-        # Extract relevant parameters from model_config
-        transformer_params = self.model_config.get('transformer_params', {})
-        self.input_dim = transformer_params.get('input_dim', 64) # Example default
-        self.model_dim = transformer_params.get('model_dim', 128)
-        self.n_head = transformer_params.get('n_head', 4)
-        self.num_layers = transformer_params.get('num_layers', 3)
-        self.dropout = transformer_params.get('dropout', 0.1)
-        # Output dim of the transformer should be features_dim for SB3
-        # Let's assume the transformer's output_dim is self.model_dim if not specified further, 
-        # or a specific 'output_dim' if present in config.
-        self.transformer_output_dim = transformer_params.get('output_dim', self.model_dim) 
-
-        # The _features_dim for SB3 is the output of this entire feature extractor
-        # This might be different from transformer_output_dim if there are post-processing layers.
-        # For now, assume it's the transformer_output_dim.
-        _features_dim = self.transformer_output_dim
-        
         # Initialize symbol embedding related parameters if used
         self.num_symbols = None
         self.symbol_embedding_dim = None
@@ -192,6 +200,8 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         
         # Pass the full model_config to MockTransformer for its own parsing if needed
         # Also pass specific parsed params for clarity and direct use by MockTransformer's known args
+        # super().__init__ 必須先呼叫，然後再初始化 nn.Module 子模組
+        super().__init__(observation_space, features_dim=self.transformer_output_dim)
         self.transformer = MockTransformer(
             input_dim=self.input_dim, # This is the dim of features per time step
             model_dim=self.model_dim,
@@ -204,11 +214,8 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             symbol_embedding_dim=self.symbol_embedding_dim,
             config=self.model_config # Pass the whole config too
         )
-        logger.info(f"EnhancedTransformerFeatureExtractor: MockTransformer initialized with output_dim={self.transformer_output_dim}")
-
-        # Call super().__init__ after defining _features_dim
-        super().__init__(observation_space, features_dim=_features_dim)
-        logger.info(f"EnhancedTransformerFeatureExtractor.__init__ COMPLETED. _features_dim set to: {_features_dim}")
+        logger.info(f"EnhancedTransformerFeatureExtractor: MockTransformer initialized with input_dim={self.input_dim}, output_dim={self.transformer_output_dim}")
+        logger.info(f"EnhancedTransformerFeatureExtractor.__init__ COMPLETED. _features_dim set to: {self.transformer_output_dim}")
         logger.info(f"  Final effective use_msfe: {self.use_msfe}")
         logger.info(f"  Final effective use_cts_fusion: {self.use_cts_fusion}")
         logger.info(f"  Final effective use_symbol_embedding: {self.use_symbol_embedding}")
@@ -216,45 +223,37 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
 
 
     def forward(self, observations: PyTorchObs) -> th.Tensor:
-        # logger.debug(f"EnhancedTransformerFeatureExtractor.forward called. Obs keys: {observations.keys()}")
-        # Assuming 'market_features' is the primary input tensor for the transformer
-        # Shape: (batch_size, sequence_length, num_features_per_step)
-        market_features = observations.get('market_features')
-        if market_features is None:
-            logger.error("'market_features' not found in observations!")
-            raise ValueError("'market_features' must be part of observations for EnhancedTransformerFeatureExtractor")
-
-        # logger.debug(f"  market_features shape: {market_features.shape}")
-
-        symbol_ids = None
-        if self.use_symbol_embedding:
-            symbol_ids = observations.get('symbol_id') # Expected shape: (batch_size, 1) or (batch_size)
-            if symbol_ids is None:
+        # 支援 dict/tensor 輸入，確保資訊不遺失，完全相容 SB3 與自定義 pipeline
+        if isinstance(observations, dict):
+            market_features = observations.get('market_features')
+            if market_features is None:
+                logger.error("'market_features' not found in observations!")
+                raise ValueError("'market_features' must be part of observations for EnhancedTransformerFeatureExtractor")
+            # --- SHAPE AUTO-ADAPT ---
+            # 支援 [batch, MAX_SYMBOLS_ALLOWED * d_model] 或 [batch, MAX_SYMBOLS_ALLOWED, d_model]
+            if market_features.ndim == 2 and market_features.shape[-1] % self.input_dim == 0:
+                n_symbols = market_features.shape[-1] // self.input_dim
+                # 僅 reshape，不做 pooling，保證每個 symbol 特徵完整保留
+                market_features = market_features.view(market_features.shape[0], n_symbols, self.input_dim)
+            assert market_features.shape[-1] == self.input_dim, f"[ShapeError] market_features last dim ({market_features.shape[-1]}) != input_dim ({self.input_dim})"
+            symbol_ids = observations.get('symbol_id') if self.use_symbol_embedding else None
+            if self.use_symbol_embedding and symbol_ids is None:
                 logger.error("'symbol_id' not found in observations but use_symbol_embedding is True!")
                 raise ValueError("'symbol_id' must be provided if use_symbol_embedding is True.")
-            # Ensure symbol_ids are long type for nn.Embedding
-            symbol_ids = symbol_ids.long()
-            # logger.debug(f"  symbol_ids shape: {symbol_ids.shape}, dtype: {symbol_ids.dtype}")
+            if symbol_ids is not None:
+                symbol_ids = symbol_ids.long()
+        else:
+            market_features = observations
+            # --- SHAPE AUTO-ADAPT ---
+            if market_features.ndim == 2 and market_features.shape[-1] % self.input_dim == 0:
+                n_symbols = market_features.shape[-1] // self.input_dim
+                market_features = market_features.view(market_features.shape[0], n_symbols, self.input_dim)
+            assert market_features.shape[-1] == self.input_dim, f"[ShapeError] market_features last dim ({market_features.shape[-1]}) != input_dim ({self.input_dim})"
+            symbol_ids = None
 
+        # 僅 reshape，不做 pooling，保證資訊不丟失
         # Pass to the transformer model
-        # The MockTransformer expects src and optional symbol_ids
         extracted_features = self.transformer(market_features, symbol_ids=symbol_ids)
-        # logger.debug(f"  extracted_features shape after transformer: {extracted_features.shape}") # Expected: (batch_size, self.transformer_output_dim)
-        
-        # Placeholder for MSFE and CTS-Fusion logic
-        if self.use_msfe:
-            # logger.debug("MSFE logic would be applied here.")
-            # This would involve processing market_features at different scales
-            # and combining them, potentially before or within the main transformer.
-            # For simplicity, assume extracted_features is the result after MSFE if enabled.
-            pass
-
-        if self.use_cts_fusion:
-            # logger.debug("CTS-Fusion logic would be applied here.")
-            # This would involve fusing information across different time scales/steps.
-            # Could be part of the transformer architecture or a separate module.
-            pass
-        
         return extracted_features
 
 
@@ -272,7 +271,7 @@ class EnhancedTransformerFeatureExtractorWithMemory(EnhancedTransformerFeatureEx
         self.memory_size = memory_size
         self.feature_dim = MAX_SYMBOLS_ALLOWED * enhanced_transformer_output_dim_per_symbol
         
-        # 記憶存儲
+        # 記憶存储
         self.register_buffer('long_term_memory', 
                            torch.zeros(memory_size, self.feature_dim))
         self.register_buffer('memory_ptr', torch.zeros(1, dtype=torch.long))

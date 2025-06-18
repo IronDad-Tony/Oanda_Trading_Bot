@@ -806,22 +806,25 @@ class EnhancedTransformer(nn.Module):
             indices.append(self.ohlcv_feature_index_in_src[key])
         return raw_ohlcv_src[..., indices]
 
-    def forward(self, x_dict: Dict[str, Optional[torch.Tensor]]) -> torch.Tensor:
+    def forward(self, x_dict: Dict[str, Optional[torch.Tensor]], return_full_sequence: bool = False) -> torch.Tensor:
         """
         Args:
             x_dict: Dictionary containing input tensors:
-                \"src\": [batch_size, num_active_symbols, seq_len, input_dim] - Main input features.
-                \"symbol_ids\": Optional[torch.Tensor] - [batch_size, num_active_symbols] - Symbol identifiers for embedding.
-                \"src_key_padding_mask\": Optional[torch.Tensor] - [batch_size, num_active_symbols] - Mask for padded symbols.
+                "src": [batch_size, num_active_symbols, seq_len, input_dim] - Main input features.
+                "symbol_ids": Optional[torch.Tensor] - [batch_size, num_active_symbols] - Symbol identifiers for embedding.
+                "src_key_padding_mask": Optional[torch.Tensor] - [batch_size, num_active_symbols] - Mask for padded symbols.
                                          True indicates a padded symbol that should be ignored.
-                \"raw_ohlcv_data_batch\": Optional[List[pd.DataFrame]] - Batch of raw OHLCV data for GMM.
+                "raw_ohlcv_data_batch": Optional[List[pd.DataFrame]] - Batch of raw OHLCV data for GMM.
                                           Each DataFrame should have OHLCV columns and a DatetimeIndex.
                                           Length of list is batch_size. Each df is [seq_len, num_features_ohlcv].
+            return_full_sequence: If True, return [batch, num_symbols, seq_len, d_model] for downstream modules needing full sequence.
         Returns:
-            Output tensor: [batch_size, num_active_symbols, output_dim]
+            Output tensor: [batch_size, num_active_symbols, output_dim] or [batch_size, num_active_symbols, seq_len, d_model] if return_full_sequence
         """
         src = x_dict["src"]
         symbol_ids = x_dict.get("symbol_ids")
+        # --- SHAPE ASSERT ---
+        assert src.shape[-1] == self.input_dim, f"[ShapeError] src last dim ({src.shape[-1]}) != input_dim ({self.input_dim})"
         symbol_padding_mask = x_dict.get("src_key_padding_mask") 
         raw_ohlcv_data_batch = x_dict.get("raw_ohlcv_data_batch")
 
@@ -936,25 +939,7 @@ class EnhancedTransformer(nn.Module):
             # If self.pos_embed is an instance of LearnedPositionalEncoding
             x = self.pos_embed(x) # Assuming LearnedPositionalEncoding handles [B*N, S, E]
         elif self.positional_encoding_type == 'sinusoidal' and self.pos_encoder is not None and not isinstance(self.pos_encoder, nn.Identity):
-            # Sinusoidal PositionalEncoding from transformer_model.py expects [B*N, S, E]
-            # and its self.pe is [1, max_len, d_model]
-             x = self.pos_encoder(x) # This should correctly add PE
-        # If self.pos_encoder is nn.Identity, nothing happens.
-
-
-        # 5. Fourier Features (optional)
-        if self.fourier_block is not None:
-            x_fourier = self.fourier_block(x)
-            x = x + x_fourier # Additive features
-
-        # 6. Wavelet Features (optional)
-        if self.wavelet_block is not None:
-            x_wavelet = self.wavelet_block(x)
-            x = x + x_wavelet # Additive features
-
-        # --- 7. 跨時間尺度融合 (Cross-Time-Scale Fusion) (可選) ---
-        if self.cts_fusion_module is not None:
-            x = self.cts_fusion_module(x)
+            x = self.pos_encoder(x)
 
         x = self.dropout_layer(x) 
 
@@ -964,20 +949,24 @@ class EnhancedTransformer(nn.Module):
             x = layer(x, 
                       key_padding_mask=temporal_key_padding_mask, 
                       external_market_state_probs=external_market_state_probs_for_transformer)
-            
+        
         x = self.final_norm(x) 
-        
+
+        if return_full_sequence:
+            # 回傳完整序列 [batch, num_symbols, seq_len, d_model]
+            x_full = x.reshape(batch_size, num_active_symbols, seq_len, self.d_model)
+            if symbol_padding_mask is not None:
+                mask_expanded = symbol_padding_mask.unsqueeze(-1).unsqueeze(-1).expand_as(x_full)
+                x_full = x_full.masked_fill(mask_expanded, 0.0)
+            return x_full
+
         x_agg = x[:, -1, :] 
-        
         output = self.output_projection(x_agg) # [B*N, output_dim]
         output = self.output_activation_fn(output)
-        
         output = output.reshape(batch_size, num_active_symbols, self.output_dim)
-        
         if symbol_padding_mask is not None:
             mask_expanded = symbol_padding_mask.unsqueeze(-1).expand_as(output)
             output = output.masked_fill(mask_expanded, 0.0)
-            
         return output
 
     def get_dynamic_config(self) -> Dict[str, Any]:

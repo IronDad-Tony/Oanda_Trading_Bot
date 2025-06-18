@@ -24,8 +24,8 @@ ENHANCED_TRANSFORMER_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_transformer_
 # 新增：指向 quantum_strategy_config.json 的路徑
 QUANTUM_STRATEGY_CONFIG_PATH = BASE_DIR / "configs" / "quantum_strategy_config.json"
 
-# 新增：指向 enhanced_model_config.py 的路徑
-ENHANCED_MODEL_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_model_config.py"
+# 新增：指向 enhanced_model_config.json 的路徑
+ENHANCED_MODEL_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_model_config.json"
 
 # --- Quantum Strategy 配置 ---
 QUANTUM_STRATEGY_NUM_STRATEGIES = 28  # 總策略數量，根據 strategies/__init__.py 自動更新或手動確認

@@ -129,7 +129,7 @@ class QuantumEnhancedSAC:
         default_policy_kwargs = dict(
             net_arch=dict(pi=[256, 256], qf=[256, 256]),
             features_extractor_class=EnhancedTransformerFeatureExtractor,
-            features_extractor_kwargs={"enhanced_transformer_output_dim_per_symbol": 128},
+            features_extractor_kwargs={"model_config_path": "configs/enhanced_model_config.json"},
         )
         
         # 如果用戶提供了 policy_kwargs，則合併
@@ -779,7 +779,7 @@ if __name__ == "__main__":
     dummy_vec_env_main = DummyVecEnv([lambda: MockEnvMain()])
 
     test_policy_kwargs_main = {
-        "features_extractor_kwargs": dict(enhanced_transformer_output_dim_per_symbol=128),
+        "features_extractor_kwargs": dict(model_config_path="configs/enhanced_model_config.json"),
         "net_arch": dict(pi=[64, 64], qf=[64, 64])
     }
     try:

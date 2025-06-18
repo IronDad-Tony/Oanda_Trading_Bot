@@ -72,11 +72,11 @@ class QuantumActor(Actor):
         # --- SB3 Actor constructor arguments ---
         log_std_init: float = -3, # SAC Actor 的 log_std 初始化值
         use_sde: bool = False, # 是否使用狀態依賴探索 (SDE)
+        # --- 其餘自定義參數 ---
         sde_net_arch: Optional[List[int]] = None, # SDE 特徵網絡的架構
         use_expln: bool = False, # 是否在 SDE 中使用指數線性單元 (expln)
         clip_mean: float = 2.0, # SDE 中裁剪平均值的範圍
         normalize_images: bool = True, # 是否標準化圖像觀測 (來自 BasePolicy)
-        # --- Custom QuantumActor arguments ---
         use_ess_layer: bool = False, # 是否使用增強策略疊加層 (ESS)
         ess_config: Optional[Dict[str, Any]] = None, # ESS 層的配置
         use_adaptive_action_noise: bool = False, # 是否使用自適應動作噪聲
@@ -87,133 +87,56 @@ class QuantumActor(Actor):
         use_quantum_layer: bool = False, # 是否使用量子啟發層
         quantum_config: Optional[Dict[str, Any]] = None, # 量子層的配置
     ):
-        # 調用父類 Actor 的 __init__ 方法，傳遞其所需的參數
-        # stable_baselines3.sac.policies.Actor 的構造函數簽名:
-        # (observation_space, action_space, net_arch, features_extractor (instance), features_dim, 
-        #  log_std_init, use_sde, sde_net_arch, use_expln, clip_mean, normalize_images)
+        # 僅傳遞 Actor 支援的參數給 super
         super(QuantumActor, self).__init__(
             observation_space=observation_space,
             action_space=action_space,
-            net_arch=net_arch, # Actor 頭部網絡的架構 (latent_pi)
-            features_extractor=features_extractor, # 傳遞實例化的特徵提取器
-            features_dim=features_dim, # 傳遞特徵維度
+            net_arch=net_arch,
+            features_extractor=features_extractor,
+            features_dim=features_dim,
             log_std_init=log_std_init,
             use_sde=use_sde,
-            sde_net_arch=sde_net_arch, # 這是 Actor 用於 SDE 特徵的網絡架構
-            use_expln=use_expln,
-            clip_mean=clip_mean,
-            normalize_images=normalize_images # BasePolicy 需要的參數
         )
-
-        # 存儲 QuantumActor 特有的參數和自定義的激活函數
-        self.custom_activation_fn = activation_fn # 與父類可能使用的 activation_fn 區分
-        # self.use_sde = use_sde # 父類 Actor 已處理 use_sde
-        # self.sde_net_arch_custom = sde_net_arch # 如果 QuantumActor 內部有獨立的 SDE 邏輯則需要，否則父類已處理
-
-        self.device_val = get_device(device) 
-        self.dropout_rate = dropout_rate
-        self.use_layer_norm_actor = use_layer_norm_actor
-        
-        self.use_quantum_layer = use_quantum_layer
-        self.quantum_config = quantum_config if quantum_config else {}
+        # 其餘自定義參數本地保存
+        self.custom_activation_fn = activation_fn
+        self.sde_net_arch = sde_net_arch
+        self.use_expln = use_expln
+        self.clip_mean = clip_mean
+        self.normalize_images = normalize_images
         self.use_ess_layer = use_ess_layer
         self.ess_config = ess_config if ess_config else {}
-        self.use_adaptive_action_noise = use_adaptive_action_noise # 暫未在此 __init__ 中使用
-        self.adaptive_noise_config = adaptive_noise_config if adaptive_noise_config else {} # 暫未在此 __init__ 中使用
+        self.use_adaptive_action_noise = use_adaptive_action_noise
+        self.adaptive_noise_config = adaptive_noise_config if adaptive_noise_config else {}
+        self.device_val = get_device(device)
+        self.dropout_rate = dropout_rate
+        self.use_layer_norm_actor = use_layer_norm_actor
+        self.use_quantum_layer = use_quantum_layer
+        self.quantum_config = quantum_config if quantum_config else {}
 
-        # --- Actor 網絡構建 (latent_pi, mu, log_std/sde_features) ---
-        # 父類 Actor 的 __init__ 已經創建了 self.latent_pi, self.mu, self.log_std (或 SDE 相關層)
-        # self.latent_pi 是基於傳遞給 super() 的 net_arch 構建的。
-        # self.mu 和 self.log_std (或 SDE 層) 是基於 latent_pi 的輸出構建的。
-
-        # 如果需要自定義這些層的行為 (例如，加入 dropout, LayerNorm, 量子層),
-        # 則需要在此處重新構建或修改它們。
-        # SB3 Actor 結構:
-        # features -> latent_pi (使用 net_arch) -> mu (線性層)
-        #                                      -> log_std (線性層) 或 SDE 特徵 (使用 sde_net_arch)
-
-        # 獲取 latent_pi 網絡的輸出維度，這是 mu 和 log_std 層的輸入維度
-        # 如果 net_arch 為空，則 last_layer_dim_pi 等於 features_dim
-        last_layer_dim_pi = features_dim
-        if len(net_arch) > 0:
-            last_layer_dim_pi = net_arch[-1]
-
-        # 重新構建或修改 latent_pi (如果需要加入 Dropout 或 LayerNorm)
-        # 父類的 self.latent_pi 是一個 nn.Sequential(create_mlp(...))
-        # 為了加入自定義層，我們需要更細緻地控制其構建
-        
-        # 創建策略頭部網絡 (policy head network)
-        # 這個網絡處理來自 features_extractor (或父類 latent_pi 如果 net_arch 不為空) 的特徵
-        # 並輸出供 mu 和 log_std 層使用的特徵
-        policy_head_layers = []
-        current_policy_head_dim = features_dim # 輸入維度是特徵提取器的輸出維度
-        
-        # net_arch 參數定義了 actor 頭部網絡的結構
-        for layer_size in net_arch: # net_arch 是傳遞給 QuantumActor 的，用於 actor 的 pi 網絡
-            policy_head_layers.append(nn.Linear(current_policy_head_dim, layer_size))
-            if self.use_layer_norm_actor:
-                policy_head_layers.append(nn.LayerNorm(layer_size))
-            policy_head_layers.append(self.custom_activation_fn()) # 使用自定義的激活函數
-            if self.dropout_rate > 0:
-                policy_head_layers.append(nn.Dropout(self.dropout_rate))
-            current_policy_head_dim = layer_size
-        
-        # 如果 policy_head_layers 為空 (例如 net_arch 為空), latent_pi_out 就是 features_extractor 的輸出
-        if len(policy_head_layers) > 0:
-            self.policy_head_net = nn.Sequential(*policy_head_layers)
+        # --- 實務設計：自動建立 policy_head_net ---
+        # features_dim -> net_arch -> latent_dim (通常 net_arch[-1])
+        # 若 net_arch 為空，預設一層 [features_dim -> features_dim]
+        mlp_arch = net_arch if net_arch else [features_dim]
+        # 只傳遞 SB3 支援參數，不傳 dropout_rate
+        mlp_layers = create_mlp(
+            input_dim=features_dim,
+            net_arch=mlp_arch,
+            activation_fn=activation_fn,
+            output_dim=mlp_arch[-1] if len(mlp_arch) > 0 else features_dim
+        )
+        # 若需 dropout，可於每層後手動插入
+        if dropout_rate > 0.0:
+            layers_with_dropout = []
+            for layer in mlp_layers:
+                layers_with_dropout.append(layer)
+                if isinstance(layer, nn.Linear):
+                    layers_with_dropout.append(nn.Dropout(dropout_rate))
+            self.policy_head_net = nn.Sequential(*layers_with_dropout)
         else:
-            self.policy_head_net = nn.Identity() # 如果 net_arch 為空，則直接使用提取的特徵
-
-        # 父類 Actor 會創建 self.mu 和 self.log_std。
-        # self.mu = nn.Linear(last_layer_dim_pi, action_dim)
-        # self.log_std = nn.Linear(last_layer_dim_pi, action_dim) (for non-SDE)
-        # 或 SDE 相關層。
-        # 我們在這裡不需要重新定義它們，除非要徹底改變其結構或在其前後插入層。
-        # 父類的 latent_pi 已經由 super().__init__ 中的 net_arch 參數配置。
-        # 我們自定義的 policy_head_net 是為了更靈活地添加 dropout 和 layernorm。
-        # 在 forward 方法中，我們將使用 self.policy_head_net 處理特徵，然後將結果傳遞給父類構建的 self.mu 和 self.log_std。
-        # 因此，我們需要確保 self.mu 和 self.log_std 的輸入維度與 self.policy_head_net 的輸出維度 (current_policy_head_dim) 一致。
-        # 父類 Actor 的 self.mu 和 self.log_std 是基於 last_layer_dim_pi (即 net_arch[-1] 或 features_dim) 創建的。
-        # 如果我們的 current_policy_head_dim 與此不同，則需要重新創建 mu 和 log_std 層。
-
-        action_dim = get_action_dim(self.action_space)
-        if current_policy_head_dim != last_layer_dim_pi:
-            logger.warning(f"QuantumActor: policy_head_net output dim ({current_policy_head_dim}) "
-                           f"differs from Actor's expected input dim for mu/log_std ({last_layer_dim_pi}). "
-                           f"Recreating mu/log_std layers.")
-            # 如果維度不匹配 (通常發生在 net_arch 為空，而我們添加了 policy_head_net = nn.Identity() 的情況，
-            # 此時 current_policy_head_dim = features_dim，這應該與 last_layer_dim_pi 相同)
-            # 或者如果 net_arch 不為空，current_policy_head_dim = net_arch[-1]，也應與 last_layer_dim_pi 相同。
-            # 此警告主要用於調試，正常情況下維度應該一致。
-            # 如果確实不一致，則需要在此處重新創建 self.mu 和 self.log_std
-            if self.use_sde:
-                # SDE 情況下，父類 Actor 會創建 self.mu 和一個產生 SDE 特徵的網絡 (通常賦值給 self.log_std)
-                self.mu = nn.Linear(current_policy_head_dim, action_dim)
-                # sde_features_net_arch 是 sde_net_arch (來自父類)
-                # sde_features_net 的輸入是 current_policy_head_dim (或 features_dim，取決於 SDE 設計)
-                # 輸出是 action_dim (用於 StateDependentNoiseDistribution)
-                # 這裡假設 SDE 特徵網絡的輸入也是 policy_head_net 的輸出
-                sde_output_dim = action_dim 
-                self.log_std = create_mlp(current_policy_head_dim, sde_output_dim, net_arch=self.sde_net_arch, activation_fn=self.custom_activation_fn, squash_output=False)
-
-            else:
-                self.mu = nn.Linear(current_policy_head_dim, action_dim)
-                self.log_std = nn.Linear(current_policy_head_dim, action_dim)
-        
-        # 初始化 Quantum Layer (如果啟用)
-        if self.use_quantum_layer:
-            q_input_dim = current_policy_head_dim # 量子層的輸入是策略頭部網絡的輸出
-            q_output_dim = self.quantum_config.get('output_dim', q_input_dim)
-            
-            self.quantum_config.setdefault('input_dim', q_input_dim)
-            # ... 其他量子層默認配置 ...
-            # self.quantum_layer = QuantumInspiredLayer(**self.quantum_config) # 實際的量子層實現
-            logger.info(f"QuantumActor: 量子層 (Quantum layer) 已配置 (佔位符). 輸入維度: {q_input_dim}, 輸出維度: {q_output_dim}")
-            # 如果使用量子層，它可能會替換或修改 self.mu 和 self.log_std
-            # 例如，量子層的輸出可能成為新的 mu/log_std 層的輸入
-            # 這需要根據量子層的具體集成方式進行設計
-            # 暫時假設它會修改 current_policy_head_dim，如果它在此處集成並影響後續層
-            # 或者，它可以是 policy_head_net 本身的一部分
+            self.policy_head_net = nn.Sequential(*mlp_layers)
+        # 若未來需插入量子策略層，可在此處包裝 self.policy_head_net
+        # if self.use_quantum_layer:
+        #     self.policy_head_net = QuantumStrategyLayerWrapper(self.policy_head_net, self.quantum_config)
 
     # forward 方法: 定義如何從觀測中計算動作分佈的參數
     # 父類 Actor 的 forward 方法返回 (actions, mean_actions, log_std) 或類似 SDE 的輸出
@@ -350,6 +273,8 @@ class QuantumCritic(ContinuousCritic):
         return data
 
 class CustomSACPolicy(SACPolicy):
+    net_arch_actor = []
+    net_arch_critic = []
     def __init__(
         self,
         observation_space: spaces.Space,
@@ -390,6 +315,9 @@ class CustomSACPolicy(SACPolicy):
             logger.info(f"CustomSACPolicy.__init__ (before super): model_config content (first level keys)={list(features_extractor_kwargs['model_config'].keys()) if isinstance(features_extractor_kwargs['model_config'], dict) else None}")
 
 
+        # --- 修正: 明確設置 self.use_sde ---
+        self.use_sde = use_sde
+
         self.use_quantum_layer = use_quantum_layer
         self.quantum_config = quantum_config if quantum_config else {}
         self.use_ess_layer = use_ess_layer
@@ -400,7 +328,12 @@ class CustomSACPolicy(SACPolicy):
         self.dropout_rate_critic = dropout_rate_critic
         self.use_layer_norm_actor = use_layer_norm_actor
         self.use_layer_norm_critic = use_layer_norm_critic
-        self.sde_net_arch = sde_net_arch # Store sde_net_arch for make_actor. self.use_expln and self.clip_mean are already instance attributes.
+        self.log_std_init = log_std_init
+        self.use_expln = use_expln
+        self.clip_mean = clip_mean
+        self.sde_net_arch = sde_net_arch
+        self.n_critics = n_critics
+        self.share_features_extractor = share_features_extractor
 
         _features_extractor_kwargs = features_extractor_kwargs or {}
 
@@ -423,11 +356,21 @@ class CustomSACPolicy(SACPolicy):
             share_features_extractor=share_features_extractor,
         )
         
+        # --- net_arch 解析與屬性設置（必須在 super().__init__ 之前）---
+        if isinstance(net_arch, dict):
+            self.net_arch = net_arch
+            self.net_arch_actor = net_arch.get('pi', [])
+            self.net_arch_critic = net_arch.get('qf', [])
+        else:
+            self.net_arch = net_arch
+            self.net_arch_actor = net_arch
+            self.net_arch_critic = net_arch
+
         logger.info(f"CustomSACPolicy.__init__ (after super): self.features_extractor type: {type(self.features_extractor)}")
         if hasattr(self.features_extractor, 'model_config_dict'): # Check for the attribute name used in EnhancedTransformerFeatureExtractor
             logger.info(f"  FE model_config_dict: {getattr(self.features_extractor, 'model_config_dict', 'N/A')}")
         if hasattr(self.features_extractor, 'use_symbol_embedding'):
-             logger.info(f"  FE use_symbol_embedding: {getattr(self.features_extractor, 'use_symbol_embedding', 'N/A')}")
+            logger.info(f"  FE use_symbol_embedding: {getattr(self.features_extractor, 'use_symbol_embedding', 'N/A')}")
         if hasattr(self.features_extractor, 'use_msfe'):
             logger.info(f"  FE use_msfe: {getattr(self.features_extractor, 'use_msfe', 'N/A')}")
         if hasattr(self.features_extractor, 'use_cts_fusion'):
@@ -451,7 +394,7 @@ class CustomSACPolicy(SACPolicy):
         
         logger.info(f"CustomSACPolicy.make_actor: actor_features_extractor 類型: {type(actor_features_extractor)}, features_dim: {actor_features_extractor.features_dim}")
         logger.info(f"CustomSACPolicy.make_actor: actor_net_arch: {actor_net_arch}")
-        # logger.info(f"CustomSACPolicy.make_actor: Quantum kwargs for Actor: {q_kwargs_for_actor}, use_quantum: {use_quantum}") # 移除舊的 q_kwargs_for_actor 日誌
+        # logger.info(f"CustomSACPolicy.make_actor: Quantum kwargs for Actor: {q_kwargs_for_actor}, use_quantum: {use_quantum}") # 移除舊的 q_kwargs_for_Actor 日誌
 
         # 創建 QuantumActor 實例，傳遞所有必要的參數
         return QuantumActor(
@@ -490,33 +433,35 @@ class CustomSACPolicy(SACPolicy):
         logger.info(f"CustomSACPolicy.make_critic: features_extractor arg was {'provided' if features_extractor else 'None'}. Using self.features_extractor: {type(self.features_extractor)}")
         if critic_features_extractor is None:
             logger.error("[CRITICAL ERROR] CustomSACPolicy.make_critic: critic_features_extractor is None.")
-            # Unlike actor, critic might be okay if share_features_extractor is False,
-            # but our QuantumCritic expects one.
             raise ValueError("critic_features_extractor cannot be None in make_critic for QuantumCritic.")
 
         critic_net_arch = self.net_arch if isinstance(self.net_arch, list) else self.net_arch.get('vf', [])
-
         q_kwargs_for_critic = self.quantum_critic_kwargs.copy()
         use_quantum = q_kwargs_for_critic.pop("use_quantum_layer", False)
 
         logger.info(f"CustomSACPolicy.make_critic: critic_features_extractor type: {type(critic_features_extractor)}, features_dim: {critic_features_extractor.features_dim}")
         logger.info(f"CustomSACPolicy.make_critic: critic_net_arch: {critic_net_arch}")
         logger.info(f"CustomSACPolicy.make_critic: Quantum kwargs for Critic: {q_kwargs_for_critic}, use_quantum: {use_quantum}")
-        
-        return QuantumCritic(
+
+        # 正確做法：只回傳一個 QuantumCritic，並將 n_critics 傳給它，讓其內部管理多個 Q-network
+        critic = QuantumCritic(
             self.observation_space,
             self.action_space,
             net_arch=critic_net_arch,
             features_extractor=critic_features_extractor,
-            features_dim=critic_features_extractor.features_dim, # Use the dim from the specific extractor
+            features_dim=critic_features_extractor.features_dim,
             activation_fn=self.activation_fn,
-            normalize_images=self.normalize_images, # from SACPolicy parent
-            n_critics=self.n_critics,
-            share_features_extractor=self.share_features_extractor, # from SACPolicy parent
-            # Quantum specific
-            use_quantum_layer=use_quantum,
-            **q_kwargs_for_critic # Pass remaining quantum_critic_kwargs
+            normalize_images=self.normalize_images,
+            n_critics=self.n_critics,  # 讓 QuantumCritic 內部管理多 Q-network
+            # 其餘自定義參數可安全傳遞
+            # use_ess_layer=self.use_ess_layer,
+            # ess_config=self.ess_config,
+            # dropout_rate=self.dropout_rate,
+            # use_layer_norm_critic=self.use_layer_norm_critic,
+            # device=self.device,
+            # share_features_extractor=self.share_features_extractor,
         )
+        return critic
 
     def _build_features_extractor(self) -> BaseFeaturesExtractor:
         # Ensure self.logger is available
@@ -572,6 +517,10 @@ class CustomSACPolicy(SACPolicy):
             current_logger.info(f"CustomSACPolicy._build: Explicitly built features_extractor: {self.features_extractor}")
             current_logger.info(f"CustomSACPolicy._build: Type of explicitly built features_extractor: {type(self.features_extractor)}")
 
+        # 確保 net_arch_actor 屬性存在，避免 make_actor 報錯
+        if not hasattr(self, 'net_arch_actor') or self.net_arch_actor is None:
+            self.net_arch_actor = self.net_arch if hasattr(self, 'net_arch') else [256, 256]
+
         super()._build(lr_schedule) # This calls SACPolicy._build, which then calls make_actor, make_critic
 
         current_logger.info(f"CustomSACPolicy._build (after super()._build): self.features_extractor IS {self.features_extractor}")
@@ -612,16 +561,41 @@ class CustomSACPolicy(SACPolicy):
             current_logger.critical(f"Debug info: self.features_extractor_kwargs = {self.features_extractor_kwargs if hasattr(self, 'features_extractor_kwargs') else 'Not Set'}")
             raise ValueError("actor_features_extractor 在 make_actor 中不能為 None.")
         
-        # ... rest of make_actor, ensure it uses actor_features_extractor.features_dim ...
+        # actor_net_arch 是 actor 頭部網絡的架構 (pi 部分)
+        actor_net_arch = self.net_arch if isinstance(self.net_arch, list) else self.net_arch.get('pi', [])
+        
+        logger.info(f"CustomSACPolicy.make_actor: actor_features_extractor 類型: {type(actor_features_extractor)}, features_dim: {actor_features_extractor.features_dim}")
+        logger.info(f"CustomSACPolicy.make_actor: actor_net_arch: {actor_net_arch}")
+        # logger.info(f"CustomSACPolicy.make_actor: Quantum kwargs for Actor: {q_kwargs_for_actor}, use_quantum: {use_quantum}") # 移除舊的 q_kwargs_for_Actor 日誌
+
+        # 創建 QuantumActor 實例，傳遞所有必要的參數
         return QuantumActor(
-            self.observation_space,
-            self.action_space,
-            self.net_arch_actor, 
-            self.activation_fn,
-            features_extractor=actor_features_extractor,
-            features_dim=actor_features_extractor.features_dim, # Crucial: use the chosen extractor's dim
-            normalize_images=self.normalize_images,
-            **self.actor_kwargs,
+            observation_space=self.observation_space,
+            action_space=self.action_space,
+            net_arch=actor_net_arch, # Actor 頭部網絡的架構
+            features_extractor=actor_features_extractor, # 實例化的特徵提取器
+            features_dim=actor_features_extractor.features_dim, # 特徵維度
+            
+            # SB3 Actor 所需的參數 (從策略自身獲取)
+            log_std_init=self.log_std_init,
+            use_sde=self.use_sde,
+            sde_net_arch=self.sde_net_arch, # 策略的 SDE 網絡架構 (用於 Actor 的 SDE 特徵網絡)
+            use_expln=self.use_expln,
+            clip_mean=self.clip_mean,
+            normalize_images=self.normalize_images, # BasePolicy 的參數
+
+            # QuantumActor 特有的參數 (從策略自身獲取)
+            activation_fn=self.activation_fn, # 策略的激活函數
+            use_quantum_layer=self.use_quantum_layer,
+            quantum_config=self.quantum_config,
+            use_ess_layer=self.use_ess_layer,
+            ess_config=self.ess_config,
+            # use_adaptive_action_noise 和 adaptive_noise_config 也是策略的屬性
+            use_adaptive_action_noise=self.use_adaptive_action_noise,
+            adaptive_noise_config=self.adaptive_noise_config,
+            dropout_rate=self.dropout_rate_actor, # Actor 特定的 dropout 率
+            use_layer_norm_actor=self.use_layer_norm_actor, # Actor 特定的 LayerNorm 使用標誌
+            device=self.device # 策略的設備
         )
 
     # ... make_critic method, potentially with similar logging if issues persist there ...
@@ -643,28 +617,23 @@ class CustomSACPolicy(SACPolicy):
 
         # Assuming QuantumCritic is defined and has a similar signature to SB3's Critic
         # You might need to adjust this part based on your QuantumCritic definition
-        critics = []
-        for i in range(self.n_critics):
-            critic_net_arch = self.net_arch_critic if self.net_arch_critic is not None else self.net_arch
-            
-            # START HACK: If net_arch_critic is None, and self.net_arch is also None (e.g. from default SAC),
-            # provide a default architecture for the critic.
-            if critic_net_arch is None:
-                current_logger.warning("CustomSACPolicy.make_critic: critic_net_arch is None. Using default [256, 256] for critic.")
-                critic_net_arch = [256, 256]
-            # END HACK
-
-            # TODO: Ensure QuantumCritic can accept these arguments.
-            # It might need features_dim from critic_features_extractor.
-            critic = QuantumCritic(
-                self.observation_space,
-                self.action_space,
-                net_arch=critic_net_arch, # Use resolved critic_net_arch
-                activation_fn=self.activation_fn,
-                features_extractor=critic_features_extractor,
-                features_dim=critic_features_extractor.features_dim, # Pass features_dim
-                normalize_images=self.normalize_images,
-                **self.critic_kwargs,
-            )
-            critics.append(critic)
-        return critics
+        critic = QuantumCritic(
+            self.observation_space,
+            self.action_space,
+            net_arch=self.net_arch_critic, # Use resolved critic_net_arch
+            features_extractor=critic_features_extractor,
+            features_dim=critic_features_extractor.features_dim, # Pass features_dim
+            activation_fn=self.activation_fn,
+            normalize_images=self.normalize_images,
+            # 僅傳遞必要參數，**self.critic_kwargs 需移除 net_arch 相關重複項
+            # 其餘自定義參數可安全傳遞
+            # 例如:
+            # use_ess_layer=self.use_ess_layer,
+            # ess_config=self.ess_config,
+            # dropout_rate=self.dropout_rate,
+            # use_layer_norm_critic=self.use_layer_norm_critic,
+            # n_critics=self.n_critics,
+            # device=self.device,
+            # share_features_extractor=self.share_features_extractor,
+        )
+        return critic

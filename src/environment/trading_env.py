@@ -1184,7 +1184,23 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             else:
                 obs_volatility[slot_idx] = 0.0   # 無交易品種，波動率設為0
         margin_level_val = float(self.equity_ac / (self.total_margin_used_ac + Decimal('1e-9')))
-        return {"features_from_dataset": obs_f, "current_positions_nominal_ratio_ac": np.clip(obs_pr, -5.0, 5.0).astype(np.float32), "unrealized_pnl_ratio_ac": np.clip(obs_upl_r, -1.0, 5.0).astype(np.float32), "margin_level": np.clip(np.array([margin_level_val]), 0.0, 100.0).astype(np.float32), "time_since_last_trade_ratio": obs_tslt_ratio.astype(np.float32), "volatility": obs_volatility.astype(np.float32), "padding_mask": obs_pm}   # 添加波動率特徵
+        # ========== 新增 market_features 給 RL 特徵提取器 ==========
+        # 取 features_from_dataset 的最新一個 timestep，作為每個 symbol 的即時特徵
+        # obs_f shape: (num_env_slots, timesteps_history, num_features_per_symbol)
+        # market_features shape: (num_env_slots, num_features_per_symbol)
+        market_features = obs_f[:, -1, :].copy()  # numpy array, float32
+        # ========== 組裝 observation dict，新增 market_features ==========
+        return {
+            "features_from_dataset": obs_f,
+            "current_positions_nominal_ratio_ac": np.clip(obs_pr, -5.0, 5.0).astype(np.float32),
+            "unrealized_pnl_ratio_ac": np.clip(obs_upl_r, -1.0, 5.0).astype(np.float32),
+            "margin_level": np.clip(np.array([margin_level_val]), 0.0, 100.0).astype(np.float32),
+            "time_since_last_trade_ratio": obs_tslt_ratio.astype(np.float32),
+            "volatility": obs_volatility.astype(np.float32),
+            "padding_mask": obs_pm,
+            # 新增 market_features，供 EnhancedTransformerFeatureExtractor 使用
+            "market_features": market_features
+        }   # 添加波動率特徵與 market_features
 
     def _init_render_figure(self):
         """初始化matplotlib圖表用於渲染"""

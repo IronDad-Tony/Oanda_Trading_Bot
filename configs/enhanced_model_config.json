@@ -1,0 +1,73 @@
+{
+    "hidden_dim": 256,
+    "num_layers": 6,
+    "num_heads": 8,
+    "intermediate_dim": 1024,
+    "dropout_rate": 0.1,
+    "max_sequence_length": 128,
+    "num_symbols": null,
+    "output_dim": 128,
+    "use_adaptive_attention": true,
+    "num_market_states": 4,
+    "use_gmm_market_state_detector": false,
+    "gmm_market_state_detector_path": null,
+    "gmm_ohlcv_feature_config": false,
+    "use_fourier_features": false,
+    "use_wavelet_features": false,
+    "positional_encoding_type": "sinusoidal",
+    "output_activation": null,
+    "use_symbol_embedding": true,
+    "use_msfe": true,
+    "msfe_hidden_dim": 256,
+    "msfe_scales": [3, 5, 7, 11],
+    "use_cts_fusion": true,
+    "cts_time_scales": [1, 3, 5],
+    "cts_fusion_type": "hierarchical_attention",
+    "advanced_fusion_params": {
+        "context_vector_dim": 128,
+        "attention_heads": 4,
+        "dropout_rate": 0.1
+    },
+    "use_multi_resolution_input": true,
+    "multi_resolution_params": {
+        "resolutions": ["S5", "M1", "M15"],
+        "fusion_method": "attention_weighted_sum",
+        "s5_weight": 0.5,
+        "m1_weight": 0.3,
+        "m15_weight": 0.2
+    },
+    "use_dynamic_feature_weighting": true,
+    "dynamic_weighting_params": {
+        "weighting_type": "attention",
+        "attention_dim": 64
+    },
+    "use_contextualized_embeddings": true,
+    "contextualized_embedding_params": {
+        "embedding_source": "bert_like",
+        "bert_model_name": "bert-base-uncased",
+        "embedding_dim_override": 128
+    },
+    "use_hierarchical_structure": true,
+    "hierarchical_params": {
+        "num_levels": 2,
+        "level_fusion_method": "recursive_attention"
+    },
+    "use_regularization": true,
+    "regularization_params": {
+        "type": "l2_norm_clipping",
+        "l2_lambda": 0.0001,
+        "norm_clip_value": 1.0,
+        "spectral_norm_iterations": 1
+    },
+    "use_auxiliary_losses": true,
+    "auxiliary_loss_params": {
+        "market_state_prediction_weight": 0.1,
+        "volatility_prediction_weight": 0.05,
+        "reconstruction_weight": 0.15
+    },
+    "use_explainability_features": true,
+    "explainability_params": {
+        "integrated_gradients_steps": 20,
+        "shap_approximation_samples": 50
+    }
+}

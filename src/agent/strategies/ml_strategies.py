@@ -93,6 +93,7 @@ class ReinforcementLearningStrategy(BaseStrategy):
         
         self.model.to(self.params.get('device', 'cpu'))
         self.logger.info(f"{self.config.name}: Initialized. Model input dim: {model_feature_input_dim}. Action dim: {self.action_dim}.")
+        self.device = self.params.get('device', 'cpu')
 
     def forward(self, asset_features: torch.Tensor, 
                 current_positions: Optional[torch.Tensor] = None, 
@@ -107,28 +108,29 @@ class ReinforcementLearningStrategy(BaseStrategy):
         """
         batch_size, sequence_length, num_input_features = asset_features.shape
         device = asset_features.device
+        self.model.to(device)
 
         if num_input_features != self.model[0].in_features:
             self.logger.error(f"{self.config.name}: Mismatch between asset_features dim ({num_input_features}) and model input dim ({self.model[0].in_features}). Returning zero signal.")
             return torch.zeros((batch_size, 1, 1), device=device)
 
         # Use the latest features from the sequence
-        latest_features = asset_features[:, -1, :]  # Shape: (batch_size, num_input_features)
+        latest_features = asset_features[:, -1, :].to(device)  # Shape: (batch_size, num_input_features)
 
         signals_flat = torch.zeros(batch_size, device=device)
         try:
-            with torch.no_grad(): # Typically, strategies don't train themselves during inference
-                self.model.eval() # Ensure model is in eval mode
-                action_logits = self.model(latest_features) # (batch_size, action_dim)
-                action_indices = torch.argmax(action_logits, dim=1) # (batch_size,)
+            # with torch.no_grad(): # 移除 no_grad，允許梯度流
+            self.model.eval() # 仍可設 eval mode
+            action_logits = self.model(latest_features) # (batch_size, action_dim)
+            action_indices = torch.argmax(action_logits, dim=1) # (batch_size,)
 
-                if self.action_dim == 3: # Sell (-1), Hold (0), Buy (1)
-                    signals_flat = action_indices.float() - 1.0
-                elif self.action_dim == 2: # Sell (-1), Buy (1)
-                    signals_flat = (action_indices.float() * 2.0) - 1.0
-                else: # Default to hold if action_dim is not 2 or 3
-                    self.logger.warning(f"{self.config.name}: action_dim is {self.action_dim}, which is not 2 or 3. Defaulting to hold signal.")
-                    signals_flat = torch.zeros_like(action_indices, dtype=torch.float)
+            if self.action_dim == 3: # Sell (-1), Hold (0), Buy (1)
+                signals_flat = action_indices.float() - 1.0
+            elif self.action_dim == 2: # Sell (-1), Buy (1)
+                signals_flat = (action_indices.float() * 2.0) - 1.0
+            else: # Default to hold if action_dim is not 2 or 3
+                self.logger.warning(f"{self.config.name}: action_dim is {self.action_dim}, which is not 2 or 3. Defaulting to hold signal.")
+                signals_flat = torch.zeros_like(action_indices, dtype=torch.float)
         except Exception as e:
             self.logger.error(f"{self.config.name}: Error during model forward pass: {e}. Returning zero signals.", exc_info=True)
             return torch.zeros((batch_size, 1, 1), device=device)
@@ -238,9 +240,9 @@ class DeepLearningPredictionStrategy(BaseStrategy):
 
         signal = torch.zeros(batch_size, device=device)
         try:
-            with torch.no_grad():
-                self.model.eval()
-                prediction = self.model(model_input_flat) # (batch_size, output_dim)
+            # with torch.no_grad(): # 移除 no_grad，允許梯度流
+            self.model.eval()
+            prediction = self.model(model_input_flat) # (batch_size, output_dim)
 
             if self.output_dim == 1: # Regression: predict price change or similar
                 threshold_buy = self.params.get('threshold_buy', 0.01)
@@ -255,7 +257,6 @@ class DeepLearningPredictionStrategy(BaseStrategy):
                  signal = (action_indices.float() * 2.0) - 1.0
             else:
                 self.logger.warning(f"{self.config.name}: output_dim is {self.output_dim}. Signal generation logic not defined for this. Defaulting to hold.")
-        
         except Exception as e:
             self.logger.error(f"{self.config.name}: Error during model forward pass or signal generation: {e}. Returning zero signals.", exc_info=True)
             return torch.zeros((batch_size, 1, 1), device=device)
@@ -347,7 +348,7 @@ class EnsembleLearningStrategy(BaseStrategy):
         # If a sub-model expects a different dim, it's an issue unless feature selection/transformation is done here.
         # For now, assume sub-models are compatible with num_strategy_features or their config handles it.
         
-        latest_features = asset_features[:, -1, :] # (batch_size, num_strategy_features)
+        latest_features = asset_features[:, -1, :].to(device) # (batch_size, num_strategy_features)
         
         all_predictions = []
         for i, model in enumerate(self.models):
@@ -424,6 +425,7 @@ class TransferLearningStrategy(BaseStrategy):
         )
 
     def __init__(self, config: StrategyConfig, params: Optional[Dict[str, Any]] = None, logger: Optional[logging.Logger] = None):
+        self.device = params.get('device', 'cpu') if params and 'device' in params else 'cpu'
         super().__init__(config, params=params, logger=logger)
         
         self.base_model_path = self.params.get('base_model_path')
@@ -493,20 +495,21 @@ class TransferLearningStrategy(BaseStrategy):
             # This assumes base_model_instance is a feature extractor and new_head_instance is a classifier/regressor.
             # If base_model_instance itself has multiple stages, this might need adjustment.
             self.model = nn.Sequential(self.base_model_instance, self.new_head_instance)
-            self.model.to(self.params.get('device', 'cpu'))
+            self.model.to(self.device)
             self.logger.info(f"{self.config.name}: Initialized with base model and new head (output_dim={self.new_head_output_dim}). Base model input dim: {self.base_model_internal_input_dim}")
         else:
             self.logger.error(f"{self.config.name}: Base model could not be loaded or created. Transfer learning strategy will not function correctly.")
             # Create a dummy model to prevent runtime errors if self.model is accessed
             dummy_input_dim = self.input_dim_per_step * self.lookback_window
             self.model = nn.Linear(dummy_input_dim, self.new_head_output_dim) 
-            self.model.to(self.params.get('device', 'cpu'))
+            self.model.to(self.device)
 
     def forward(self, asset_features: torch.Tensor, 
                 current_positions: Optional[torch.Tensor] = None, 
                 timestamp: Optional[pd.Timestamp] = None) -> torch.Tensor:
         batch_size, sequence_length, features_per_step = asset_features.shape
         device = asset_features.device
+        self.model.to(device)
 
         if not self.model:
              self.logger.error(f"{self.config.name}: Model not initialized. Returning zero signal.")
@@ -520,7 +523,7 @@ class TransferLearningStrategy(BaseStrategy):
             self.logger.warning(f"{self.config.name}: Sequence length ({sequence_length}) is less than lookback window ({self.lookback_window}). Returning zero signal.")
             return torch.zeros((batch_size, 1, 1), device=device)
 
-        model_input_sequence = asset_features[:, -self.lookback_window:, :]
+        model_input_sequence = asset_features[:, -self.lookback_window:, :].to(device)
         model_input_flat = model_input_sequence.reshape(batch_size, -1) # (batch_size, self.lookback_window * self.input_dim_per_step)
 
         if model_input_flat.shape[1] != self.base_model_internal_input_dim:
@@ -531,26 +534,19 @@ class TransferLearningStrategy(BaseStrategy):
         try:
             # Set grad enabled based on whether the base model is frozen and if the head is being trained.
             # For pure inference, no_grad() is usually appropriate.
-            with torch.no_grad(): 
-                self.model.eval()
-                logits = self.model(model_input_flat) # (batch_size, new_head_output_dim)
+            # with torch.no_grad(): # 移除 no_grad，允許梯度流
+            self.model.eval()
+            logits = self.model(model_input_flat) # (batch_size, new_head_output_dim)
 
             action_indices = torch.argmax(logits, dim=1)
             if self.new_head_output_dim == 3: # Sell, Hold, Buy
                 signal = action_indices.float() - 1.0
             elif self.new_head_output_dim == 2: # Sell, Buy
                 signal = (action_indices.float() * 2.0) - 1.0
-            else: # Regression or other classification
-                # If regression (output_dim=1), might compare to thresholds
-                if self.new_head_output_dim == 1:
-                    threshold_buy = self.params.get('threshold_buy', 0.01)
-                    threshold_sell = self.params.get('threshold_sell', -0.01)
-                    signal[logits[:, 0] > threshold_buy] = 1.0
-                    signal[logits[:, 0] < threshold_sell] = -1.0
-                else:
-                    self.logger.warning(f"{self.config.name}: new_head_output_dim is {self.new_head_output_dim}. Signal logic might need adjustment. Defaulting to hold for unhandled cases.")
+            else:
+                self.logger.warning(f"{self.config.name}: new_head_output_dim is {self.new_head_output_dim}. Signal generation logic not defined for this. Defaulting to hold.")
         except Exception as e:
-            self.logger.error(f"{self.config.name}: Error during model forward pass: {e}. Returning zero signal.", exc_info=True)
+            self.logger.error(f"{self.config.name}: Error during model forward pass or signal generation: {e}. Returning zero signals.", exc_info=True)
             return torch.zeros((batch_size, 1, 1), device=device)
 
         return signal.reshape(batch_size, 1, 1)
