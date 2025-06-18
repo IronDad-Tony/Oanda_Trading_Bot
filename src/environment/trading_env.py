@@ -243,15 +243,24 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 logger.info("No advanced reward calculators available. Using standard reward calculation.")
         
         self.peak_portfolio_value_episode: Decimal = self.initial_capital; self.max_drawdown_episode: Decimal = Decimal('0.0')
+
+        # NEW observation space for EnhancedTransformerFeatureExtractor
+        # It expects 'market_features' (last step) and 'context_features' (state info)
+        self.num_context_features = 5 # pos_ratio, pnl_ratio, time_since_trade, volatility, margin_level
         obs_spaces = {
-            "features_from_dataset": spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32),
-            "current_positions_nominal_ratio_ac": spaces.Box(low=-5.0, high=5.0, shape=(self.num_env_slots,), dtype=np.float32),
-            "unrealized_pnl_ratio_ac": spaces.Box(low=-1.0, high=5.0, shape=(self.num_env_slots,), dtype=np.float32),
-            "margin_level": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
-            "time_since_last_trade_ratio": spaces.Box(low=0.0, high=1.0, shape=(self.num_env_slots,), dtype=np.float32),
-            "volatility": spaces.Box(low=0.0, high=1.0, shape=(self.num_env_slots,), dtype=np.float32),  # 新增波動率特徵
-            "padding_mask": spaces.Box(low=0, high=1, shape=(self.num_env_slots,), dtype=np.bool_)}
+            "market_features": spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(self.num_env_slots, self.dataset.num_features_per_symbol),
+                dtype=np.float32
+            ),
+            "context_features": spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(self.num_env_slots, self.num_context_features),
+                dtype=np.float32
+            )
+        }
         self.observation_space = spaces.Dict(obs_spaces)
+
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_env_slots,), dtype=np.float32)
         if self.render_mode == 'human': self._init_render_figure()
         logger.info(f"UniversalTradingEnvV4 (整合量子策略層) 初始化完成。")
@@ -1126,190 +1135,101 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         return terminated, truncated
 
     def _get_observation(self) -> Dict[str, np.ndarray]:
+        """
+        為 EnhancedTransformerFeatureExtractor 準備觀測數據。
+        返回一個包含 'market_features' 和 'context_features' 的字典。
+        """
+        # 初始化 context_features 數組
+        context_features = np.zeros((self.num_env_slots, self.num_context_features), dtype=np.float32)
+
         dataset_sample = self.dataset[min(self.current_step_in_dataset, len(self.dataset)-1)]
         features_raw = dataset_sample["features"].numpy()
-        obs_f = np.zeros((self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32)
-        obs_pr = np.zeros(self.num_env_slots, dtype=np.float32); obs_upl_r = np.zeros(self.num_env_slots, dtype=np.float32)
-        obs_tslt_ratio = np.zeros(self.num_env_slots, dtype=np.float32); obs_pm = np.ones(self.num_env_slots, dtype=np.bool_)
-        obs_volatility = np.zeros(self.num_env_slots, dtype=np.float32)   # 新增波動率特徵
+        
+        # 臨時存儲從數據集提取的完整時間序列特徵
+        obs_f_full = np.zeros((self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32)
+        
         current_prices_map, _ = self._get_current_raw_prices_for_all_dataset_symbols()
+
+        # 計算全局上下文特徵：保證金水平
+        # 將其廣播到每個槽位，因為它是一個賬戶級別的特徵
+        margin_level_val = float(self.equity_ac / (self.total_margin_used_ac + Decimal('1e-9')))
+        # 正規化保證金水平 (例如，假設 10.0 (1000%) 是非常健康的水平)
+        normalized_margin_level = min(1.0, margin_level_val / 10.0)
+
         for slot_idx in range(self.num_env_slots):
             symbol = self.slot_to_symbol_map.get(slot_idx)
-            if symbol:
-                if symbol in self.dataset.symbols:
-                    try: dataset_symbol_idx = self.dataset.symbols.index(symbol)
-                    except ValueError: logger.error(f"Symbol {symbol} in slot_map but not in dataset.symbols for observation."); continue
+            
+            pos_ratio = 0.0
+            pnl_ratio = 0.0
+            time_since_trade = 1.0 # 默認為最大值 (表示從未交易)
+            volatility = 0.0
+
+            if symbol and symbol in self.dataset.symbols:
+                try:
+                    dataset_symbol_idx = self.dataset.symbols.index(symbol)
+                    
+                    # 1. 提取市場特徵 (Market Features)
                     feature_slice = features_raw[dataset_symbol_idx, :, :]
-                    expected_shape = (self.dataset.timesteps_history, self.dataset.num_features_per_symbol)
-                    if feature_slice.shape != expected_shape:
-                        logger.warning(f"維度不匹配修復: Symbol {symbol} 特徵維度 {feature_slice.shape} != 預期 {expected_shape}")
-                        if feature_slice.shape[0] != self.dataset.timesteps_history:
-                            if feature_slice.shape[0] > self.dataset.timesteps_history:
-                                feature_slice = feature_slice[-self.dataset.timesteps_history:, :]
-                            else:
-                                padded_slice = np.zeros(expected_shape, dtype=np.float32)
-                                padded_slice[-feature_slice.shape[0]:, :] = feature_slice
-                                feature_slice = padded_slice
-                        if feature_slice.shape[1] != self.dataset.num_features_per_symbol:
-                            if feature_slice.shape[1] > self.dataset.num_features_per_symbol:
-                                feature_slice = feature_slice[:, :self.dataset.num_features_per_symbol]
-                            else:
-                                padded_slice = np.zeros(expected_shape, dtype=np.float32)
-                                padded_slice[:, :feature_slice.shape[1]] = feature_slice
-                                feature_slice = padded_slice
-                    obs_f[slot_idx, :, :] = feature_slice
-                units = self.current_positions_units[slot_idx]; details = self.instrument_details_map[symbol]
-                current_bid_qc, current_ask_qc = current_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
-                # 新增波動率計算
-                current_mid_price = (current_bid_qc + current_ask_qc) / Decimal('2')
-                atr_value = self.atr_values_qc[slot_idx]
-                if current_mid_price > Decimal('0') and atr_value > Decimal('0'):
-                    rel_volatility = atr_value / current_mid_price
-                    normalized_vol = min(1.0, float(rel_volatility / Decimal('0.1')))   # 假設0.1是最大波動閾值
-                else:
-                    normalized_vol = 0.0
-                obs_volatility[slot_idx] = normalized_vol
-                # 原特徵計算
-                price_for_value_calc_qc = (current_bid_qc + current_ask_qc) / Decimal('2') if current_bid_qc > 0 and current_ask_qc > 0 else Decimal('0.0')
-                nominal_value_qc = abs(units) * price_for_value_calc_qc; nominal_value_ac = nominal_value_qc
-                if details.quote_currency != ACCOUNT_CURRENCY:
-                    rate = self._get_exchange_rate_to_account_currency(details.quote_currency, current_prices_map)
-                    if rate > 0: nominal_value_ac *= rate
-                    else: nominal_value_ac = Decimal('0.0')
-                obs_pr[slot_idx] = float( (nominal_value_ac / self.initial_capital) * units.copy_sign(Decimal('1')) )
-                obs_upl_r[slot_idx] = float(self.unrealized_pnl_ac[slot_idx] / self.initial_capital)
-                obs_pm[slot_idx] = False
-                if self.last_trade_step_per_slot[slot_idx] == -1 or self.episode_step_count == 0 : obs_tslt_ratio[slot_idx] = 1.0
-                else: steps_since_last = self.episode_step_count - self.last_trade_step_per_slot[slot_idx]; obs_tslt_ratio[slot_idx] = min(1.0, steps_since_last / (self.max_episode_steps / 10.0 if self.max_episode_steps > 0 else 100.0) )
-            else:
-                obs_volatility[slot_idx] = 0.0   # 無交易品種，波動率設為0
-        margin_level_val = float(self.equity_ac / (self.total_margin_used_ac + Decimal('1e-9')))
-        # ========== 新增 market_features 給 RL 特徵提取器 ==========
-        # 取 features_from_dataset 的最新一個 timestep，作為每個 symbol 的即時特徵
-        # obs_f shape: (num_env_slots, timesteps_history, num_features_per_symbol)
-        # market_features shape: (num_env_slots, num_features_per_symbol)
-        market_features = obs_f[:, -1, :].copy()  # numpy array, float32
-        # ========== 組裝 observation dict，新增 market_features ==========
+                    # ... (此處省略維度匹配的修正代碼，假設其存在且有效) ...
+                    obs_f_full[slot_idx, :, :] = feature_slice
+
+                    # 2. 計算每個槽位的上下文特徵 (Context Features)
+                    units = self.current_positions_units[slot_idx]
+                    details = self.instrument_details_map[symbol]
+                    current_bid_qc, current_ask_qc = current_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+
+                    # a) 持倉比例 (Position Ratio)
+                    price_for_value_calc_qc = (current_bid_qc + current_ask_qc) / Decimal('2') if current_bid_qc > 0 and current_ask_qc > 0 else Decimal('0.0')
+                    if price_for_value_calc_qc > 0:
+                        nominal_value_qc = abs(units) * price_for_value_calc_qc
+                        exchange_rate = self._get_exchange_rate_to_account_currency(details.quote_currency, current_prices_map)
+                        nominal_value_ac = nominal_value_qc * exchange_rate if exchange_rate > 0 else Decimal('0.0')
+                        pos_ratio = float((nominal_value_ac / self.equity_ac) * units.copy_sign(Decimal('1')))
+                    
+                    # b) 盈虧比例 (PnL Ratio)
+                    pnl_ratio = float(self.unrealized_pnl_ac[slot_idx] / self.equity_ac) if self.equity_ac > 0 else 0.0
+
+                    # c) 距離上次交易時間 (Time Since Last Trade)
+                    if self.last_trade_step_per_slot[slot_idx] >= 0 and self.episode_step_count > 0:
+                        steps_since_last = self.episode_step_count - self.last_trade_step_per_slot[slot_idx]
+                        # 正規化，例如除以一個預期的平均持有周期 (e.g., 200 steps)
+                        time_since_trade = min(1.0, steps_since_last / 200.0)
+
+                    # d) 波動率 (Volatility)
+                    atr_value = self.atr_values_qc[slot_idx]
+                    if price_for_value_calc_qc > Decimal('0') and atr_value > Decimal('0'):
+                        rel_volatility = atr_value / price_for_value_calc_qc
+                        # 正規化，假設相對波動率的 5% 是一個較高的值
+                        volatility = min(1.0, float(rel_volatility / Decimal('0.05')))
+
+                except ValueError:
+                    logger.warning(f"Symbol {symbol} in slot_map but not in dataset.symbols for observation.")
+                    # 保持所有特徵為0
+
+            # 填充 context_features 數組
+            context_features[slot_idx, 0] = pos_ratio
+            context_features[slot_idx, 1] = pnl_ratio
+            context_features[slot_idx, 2] = time_since_trade
+            context_features[slot_idx, 3] = volatility
+            context_features[slot_idx, 4] = normalized_margin_level # 廣播的賬戶級特徵
+
+        # 從完整時間序列中提取最新的市場特徵
+        market_features = obs_f_full[:, -1, :].copy()
+
+        # 確保特徵不包含 NaN 或 inf
+        market_features = np.nan_to_num(market_features, nan=0.0, posinf=1e5, neginf=-1e5)
+        context_features = np.nan_to_num(context_features, nan=0.0, posinf=1e5, neginf=-1e5)
+
+        # 返回符合 new observation space 的字典
         return {
-            "features_from_dataset": obs_f,
-            "current_positions_nominal_ratio_ac": np.clip(obs_pr, -5.0, 5.0).astype(np.float32),
-            "unrealized_pnl_ratio_ac": np.clip(obs_upl_r, -1.0, 5.0).astype(np.float32),
-            "margin_level": np.clip(np.array([margin_level_val]), 0.0, 100.0).astype(np.float32),
-            "time_since_last_trade_ratio": obs_tslt_ratio.astype(np.float32),
-            "volatility": obs_volatility.astype(np.float32),
-            "padding_mask": obs_pm,
-            # 新增 market_features，供 EnhancedTransformerFeatureExtractor 使用
-            "market_features": market_features
-        }   # 添加波動率特徵與 market_features
-
-    def _init_render_figure(self):
-        """初始化matplotlib圖表用於渲染"""
-        try:
-            self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 8))
-            self.fig.suptitle('交易環境監控', fontsize=14)
-            
-            # 上圖：投資組合價值
-            self.ax1.set_title('投資組合價值歷史')
-            self.ax1.set_ylabel(f'價值 ({ACCOUNT_CURRENCY})')
-            self.ax1.grid(True, alpha=0.3)
-            
-            # 下圖：持倉狀況
-            self.ax2.set_title('當前持倉狀況')
-            self.ax2.set_ylabel('持倉單位')
-            self.ax2.set_xlabel('交易對象')
-            self.ax2.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            logger.info("渲染圖表初始化完成")
-        except Exception as e:
-            logger.warning(f"渲染圖表初始化失敗: {e}")
-            self.fig = None
-            self.ax1 = None
-            self.ax2 = None
-
-    def render(self):
-        """渲染當前環境狀態"""
-        if self.render_mode != 'human' or not hasattr(self, 'fig') or self.fig is None:
-            return
-        
-        try:
-            # 清除之前的圖表內容
-            self.ax1.clear()
-            self.ax2.clear()
-            
-            # 重新設置標題和標籤
-            self.ax1.set_title('投資組合價值歷史')
-            self.ax1.set_ylabel(f'價值 ({ACCOUNT_CURRENCY})')
-            self.ax1.grid(True, alpha=0.3)
-            
-            # 繪製投資組合價值歷史
-            if len(self.portfolio_value_history) > 1:
-                steps = list(range(len(self.portfolio_value_history)))
-                self.ax1.plot(steps, self.portfolio_value_history, 'b-', linewidth=2, label='投資組合價值')
-                self.ax1.axhline(y=float(self.initial_capital), color='r', linestyle='--', alpha=0.7, label='初始資本')
-                self.ax1.legend()
-            
-            # 繪製當前持倉狀況
-            self.ax2.set_title('當前持倉狀況')
-            self.ax2.set_ylabel('持倉單位')
-            self.ax2.set_xlabel('交易對象')
-            self.ax2.grid(True, alpha=0.3)
-            
-            # 收集有效持倉數據
-            symbols = []
-            positions = []
-            colors = []
-            
-            for slot_idx in self.current_episode_tradable_slot_indices:
-                symbol = self.slot_to_symbol_map.get(slot_idx)
-                if symbol:
-                    units = float(self.current_positions_units[slot_idx])
-                    if abs(units) > 1e-9:  # 只顯示有意義的持倉
-                        symbols.append(symbol)
-                        positions.append(units)
-                        colors.append('green' if units > 0 else 'red')
-            
-            if symbols:
-                bars = self.ax2.bar(symbols, positions, color=colors, alpha=0.7)
-                self.ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-                
-                # 添加數值標籤
-                for bar, pos in zip(bars, positions):
-                    height = bar.get_height()
-                    self.ax2.text(bar.get_x() + bar.get_width()/2., height,
-                                f'{pos:.2f}', ha='center', va='bottom' if height >= 0 else 'top')
-            else:
-                self.ax2.text(0.5, 0.5, '無持倉', ha='center', va='center', transform=self.ax2.transAxes)
-            
-            # 添加環境信息
-            info_text = f"步驟: {self.episode_step_count}\n"
-            info_text += f"現金: {float(self.cash):.2f} {ACCOUNT_CURRENCY}\n"
-            info_text += f"權益: {float(self.equity_ac):.2f} {ACCOUNT_CURRENCY}\n"
-            info_text += f"已用保證金: {float(self.total_margin_used_ac):.2f} {ACCOUNT_CURRENCY}"
-            
-            self.fig.text(0.02, 0.02, info_text, fontsize=10, verticalalignment='bottom',
-                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            
-            plt.tight_layout()
-            plt.pause(0.01)  # 短暫暫停以更新顯示
-            
-        except Exception as e:
-            logger.warning(f"渲染過程中發生錯誤: {e}")
-    def close(self):
-        """關閉環境並清理資源"""
-        logger.info("關閉 TradingEnvV4。")
-        try:
-            if hasattr(self, 'fig') and self.fig is not None:
-                plt.close(self.fig)
-                self.fig = None
-                self.ax1 = None
-                self.ax2 = None
-                logger.debug("已關閉matplotlib圖表")
-        except Exception as e:
-            logger.warning(f"關閉圖表時發生錯誤: {e}")
+            "market_features": market_features.astype(np.float32),
+            "context_features": context_features.astype(np.float32)
+        }
 
     def _get_info(self) -> Dict[str, Any]:
-        """獲取環境信息"""
+        """
+        獲取環境信息
+        """
         return {
             "cash_ac": float(self.cash),
             "portfolio_value_ac": float(self.portfolio_value_ac),

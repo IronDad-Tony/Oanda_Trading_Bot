@@ -507,11 +507,45 @@ class QuantumEnhancedSAC:
             if hasattr(self.agent.policy, 'quantum_policy_layer') and hasattr(self.agent.policy.quantum_policy_layer, 'optimizer'):
                 del self.agent.policy.quantum_policy_layer.optimizer
 
-    def load(self, path: Union[str, Path], env: Optional[DummyVecEnv] = None):
+    def load(self, path: Union[str, Path], env: Optional[DummyVecEnv] = None, policy_kwargs: Optional[Dict[str, Any]] = None):
+        """
+        加載智能體模型，並允許覆蓋 policy_kwargs。
+
+        Args:
+            path (Union[str, Path]): 模型文件路徑。
+            env (Optional[DummyVecEnv], optional): 環境實例。如果為 None，則使用初始化時的環境。
+            policy_kwargs (Optional[Dict[str, Any]], optional): 
+                要覆蓋的策略關鍵字參數。這對於在加載時啟用或禁用
+                symbol_embedding, msfe, cts_fusion 等高級特徵至關重要。
+                如果為 None，將使用 wrapper 實例中存儲的 policy_kwargs。
+        """
         try:
-            self.agent = SAC.load(path, env=env or self.env, custom_objects=self.custom_objects, device=self.agent.device)
+            # 確定要使用的 policy_kwargs
+            # 優先使用方法調用時傳入的，其次是 wrapper 實例自身的
+            final_policy_kwargs = policy_kwargs if policy_kwargs is not None else self.policy_kwargs
+            
+            logger.info(f"正在從 {path} 加載模型...")
+            logger.info(f"加載時使用的 policy_kwargs: {final_policy_kwargs}")
+
+            # 在加載時傳遞 policy_kwargs 來覆蓋已保存的參數
+            self.agent = SAC.load(
+                path, 
+                env=env or self.env, 
+                custom_objects=self.custom_objects, 
+                device=self.agent.device,
+                policy_kwargs=final_policy_kwargs  # <--- 核心修正
+            )
+            
             logger.info(f"智能體模型已從 {path} 加載。")
             
+            # 驗證高級特徵開關是否已正確設置
+            if hasattr(self.agent.policy, 'features_extractor') and hasattr(self.agent.policy.features_extractor, 'config'):
+                config = self.agent.policy.features_extractor.config
+                logger.info(f"加載後模型特徵提取器配置: "
+                            f"symbol_embedding={getattr(config, 'use_symbol_embedding', 'N/A')}, "
+                            f"msfe={getattr(config, 'use_msfe', 'N/A')}, "
+                            f"cts_fusion={getattr(config, 'use_cts_fusion', 'N/A')}")
+
             # 使用統一的 TensorBoard 目錄，不創建新的時間戳目錄
             self.session_subdir = ""
             logger.info(f"模型載入後，TensorBoard 將記錄到: {self.tensorboard_log_path}")

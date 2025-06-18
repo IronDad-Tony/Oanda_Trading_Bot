@@ -253,7 +253,18 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
 
         # 僅 reshape，不做 pooling，保證資訊不丟失
         # Pass to the transformer model
-        extracted_features = self.transformer(market_features, symbol_ids=symbol_ids)
+        # The transformer might return multiple values (e.g., features, attention_weights)
+        # We must ensure only the feature tensor is returned to SB3.
+        transformer_output = self.transformer(market_features, symbol_ids=symbol_ids)
+
+        # Check if the output is a tuple and extract the first element (the features)
+        if isinstance(transformer_output, tuple):
+            extracted_features = transformer_output[0]
+            # Optional: Log that we are discarding other parts of the output
+            # logger.debug(f"Transformer returned a tuple. Extracted features of shape {extracted_features.shape}. Discarding other parts.")
+        else:
+            extracted_features = transformer_output
+
         return extracted_features
 
 

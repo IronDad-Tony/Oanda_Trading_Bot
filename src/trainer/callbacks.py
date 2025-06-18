@@ -311,7 +311,7 @@ class UniversalCheckpointCallback(BaseCallback):
                     logger.debug(f"Calculated L2 norm from entire policy: {l2_norm_val:.6f}")
                     
         except Exception as e_l2:
-            logger.warning(f"L2範數計算錯誤: {e_l2}")
+            logger.warning("L2範數計算錯誤", exc_info=e_l2)
             l2_norm_val = 0.0
 
         # 計算梯度範數 - 使用穩定性監控器並添加備用方法
@@ -335,7 +335,7 @@ class UniversalCheckpointCallback(BaseCallback):
                         logger.debug(f"Calculated gradient norm directly: {grad_norm_val:.6f}")
                     
         except Exception as e_grad:
-            logger.warning(f"梯度範數計算錯誤: {e_grad}")
+            logger.warning("梯度範數計算錯誤", exc_info=e_grad)
             grad_norm_val = 0.0        # Debug: Log the actual values being passed to shared_data_manager every 100 steps
         if self.n_calls % 100 == 0:
             logger.info(f"Step {step_count}: L2={l2_norm_val:.6f}, Grad={grad_norm_val:.6f}, Actor_Loss={actor_loss} (type: {type(actor_loss)}), Critic_Loss={critic_loss} (type: {type(critic_loss)})")# 將所有指標傳遞給shared_data_manager，每步都傳遞
@@ -444,7 +444,7 @@ class UniversalCheckpointCallback(BaseCallback):
                             nan_detected = True
                 
                 if nan_detected:
-                    logger.error(f"檢測到NaN值在步驟 {self.num_timesteps}，這可能導致訓練不穩定")
+                    logger.error("檢測到NaN值在步驟 %s，這可能導致訓練不穩定", self.num_timesteps)
                     self.nan_reset_count += 1
                     
                     # 記錄到監控系統
@@ -452,7 +452,7 @@ class UniversalCheckpointCallback(BaseCallback):
                         self.model.logger.record("train/nan_detections", self.stability_monitor.nan_detections)
                 
             except Exception as e_nan:
-                logger.warning(f"NaN檢查過程中發生錯誤: {e_nan}")
+                logger.warning("NaN檢查過程中發生錯誤", exc_info=e_nan)
         
         # 6. 記錄穩定性統計
         if self.n_calls > 0 and self.n_calls % self.log_transformer_norm_freq == 0:
@@ -469,7 +469,7 @@ class UniversalCheckpointCallback(BaseCallback):
                 self.logger.record("train/total_nan_detections", stability_stats.get('nan_detections', 0))
                 
             except Exception as e_stats:
-                logger.warning(f"記錄穩定性統計時發生錯誤: {e_stats}")
+                logger.warning("記錄穩定性統計時發生錯誤", exc_info=e_stats)
         
         # Check for stop request from shared_data_manager (e.g., Streamlit button)
         if self.shared_data_manager is not None and self.shared_data_manager.is_stop_requested():
