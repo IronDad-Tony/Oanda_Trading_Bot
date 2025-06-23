@@ -380,7 +380,7 @@ class UniversalCheckpointCallback(BaseCallback):
 
             # If we have diagnostics, send them to the data manager
             if diagnostics_payload and self.shared_data_manager is not None:
-                self.shared_data_manager.add_diagnostics_record(diagnostics_payload)
+                self.shared_data_manager.add_diagnostics_record(step=self.num_timesteps, diagnostics_data=diagnostics_payload)
 
         except Exception as e:
             logger.warning(f"Error collecting or sending diagnostic data: {e}", exc_info=True)

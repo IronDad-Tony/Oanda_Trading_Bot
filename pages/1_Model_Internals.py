@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import time
-from src.common.shared_data_manager import SharedDataManager
+from src.common.shared_data_manager import SharedTrainingDataManager
 
 st.set_page_config(layout="wide")
 
@@ -19,12 +19,16 @@ data_container = st.empty()
 
 def get_diagnostics_data():
     """
-    Retrieves diagnostics data from the shared data manager.
+    Retrieves the latest diagnostics data from the shared data manager.
     """
     try:
-        shared_data_manager = SharedDataManager()
-        diagnostics_data = shared_data_manager.get_diagnostics_data()
-        return diagnostics_data
+        shared_data_manager = SharedTrainingDataManager()
+        # Fetch the most recent diagnostic record
+        latest_diagnostics_list = shared_data_manager.get_latest_diagnostics(count=1)
+        if latest_diagnostics_list:
+            # The actual payload is inside the 'data' key of the record
+            return latest_diagnostics_list[0].get('data')
+        return None
     except (FileNotFoundError, ConnectionRefusedError):
         st.warning("Shared data manager is not available. Is the training process running?")
         return None
