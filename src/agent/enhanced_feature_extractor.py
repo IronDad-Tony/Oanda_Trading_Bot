@@ -97,6 +97,7 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         # --- Superclass Initialization ---
         # This MUST be called before assigning any nn.Module to self.
         super().__init__(observation_space, features_dim=features_dim)
+        self.observation_space = observation_space
 
         # --- Module Initialization Stage ---
         # Now it's safe to create and assign nn.Module instances.

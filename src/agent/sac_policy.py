@@ -138,35 +138,26 @@ class QuantumActor(Actor):
         # if self.use_quantum_layer:
         #     self.policy_head_net = QuantumStrategyLayerWrapper(self.policy_head_net, self.quantum_config)
 
-    # forward 方法: 定義如何從觀測中計算動作分佈的參數
-    # 父類 Actor 的 forward 方法返回 (actions, mean_actions, log_std) 或類似 SDE 的輸出
-    # 我們需要重寫它以使用 self.policy_head_net
-    def forward(self, obs: PyTorchObs, deterministic: bool = False) -> th.Tensor:
+    def get_action_dist_params(self, obs: PyTorchObs) -> Tuple[th.Tensor, th.Tensor, Dict[str, th.Tensor]]:
+        """
+        Get the parameters for the action distribution.
+        This is an override of the base Actor method.
+        """
         # 從觀測中提取特徵
-        # self.features_extractor 是在 BasePolicy 中設置的，由父類 Actor 繼承
-        features = self.extract_features(obs, self.features_extractor) # 明確傳遞特徵提取器
+        features = self.extract_features(obs, self.features_extractor)
 
         # 通過我們自定義的策略頭部網絡處理特徵
         latent_pi = self.policy_head_net(features)
 
         # 使用父類 Actor 已創建的 self.mu 和 self.log_std (或 SDE 相關層)
-        # 這些層現在以 latent_pi (self.policy_head_net 的輸出) 作為輸入
         mean_actions = self.mu(latent_pi)
 
         if self.use_sde:
-            # 在 SDE 模式下，self.log_std (由父類 Actor 創建) 實際上是一個網絡，
-            # 它從 SDE 特徵網絡 (sde_features_net) 的輸出計算 SDE 分佈所需的特徵。
-            # sde_features_net 的輸入通常是 latent_pi 或原始 features。
-            # SB3 Actor 的 sde_features_net (如果 sde_net_arch 不為空) 輸入是 latent_pi。
-            # 如果 sde_net_arch 為空，則 SDE 特徵是 latent_pi 本身。
-            sde_features = self.log_std(latent_pi) # self.log_std 在 SDE 模式下是 SDE 特徵生成網絡
-            # 返回均值動作和 SDE 特徵 (用於 StateDependentNoiseDistribution)
-            return mean_actions, sde_features
+            sde_features = self.log_std(latent_pi)
+            return mean_actions, sde_features, {}
         else:
-            # 非 SDE 模式下，self.log_std 是直接輸出 log 標準差的層
             log_std = self.log_std(latent_pi)
-            # 返回均值動作和 log 標準差
-            return mean_actions, log_std
+            return mean_actions, log_std, {}
 
     # _get_constructor_parameters 方法: 用於保存和加載模型
     def _get_constructor_parameters(self) -> Dict[str, Any]:
