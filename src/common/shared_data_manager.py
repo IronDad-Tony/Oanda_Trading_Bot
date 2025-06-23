@@ -37,13 +37,14 @@ class SharedTrainingDataManager:
             cls._manager = multiprocessing.Manager()
         return cls._manager
 
-    def __init__(self, max_metrics=2000, max_trades=10000):
+    def __init__(self, max_metrics=2000, max_trades=10000, max_diagnostics=500):
         """
         初始化共享數據管理器
         
         Args:
             max_metrics: 最大保存的訓練指標數量 (用於內部deque)
             max_trades: 最大保存的交易記錄數量 (用於內部deque)
+            max_diagnostics: 最大保存的診斷記錄數量 (用於內部deque)
         """
         self.lock = threading.RLock()  # 可重入鎖，主要保護內部狀態和deques
         
@@ -64,10 +65,12 @@ class SharedTrainingDataManager:
         manager = self.get_manager()
         self.metrics_mp_queue = manager.Queue(maxsize=max_metrics * 2) # Larger buffer for mp queue
         self.trades_mp_queue = manager.Queue(maxsize=max_trades * 2)  # Larger buffer for mp queue
+        self.diagnostics_mp_queue = manager.Queue(maxsize=max_diagnostics * 2) # NEW: For diagnostics
 
         # Internal deques for UI to read from (populated from mp_queues)
         self.metrics_queue = deque(maxlen=max_metrics)
         self.trade_queue = deque(maxlen=max_trades)
+        self.diagnostics_queue = deque(maxlen=max_diagnostics) # NEW: For diagnostics
         
         # 當前統計數據 (由訓練過程直接更新，也通過鎖保護)
         self.current_metrics = {
@@ -121,6 +124,17 @@ class SharedTrainingDataManager:
                     break
                 except Exception as e:
                     logger.error(f"Error pulling from trades_mp_queue: {e}", exc_info=False) # Log lightly
+                    break
+
+            # NEW: Process diagnostics queue
+            while True:
+                try:
+                    diagnostic = self.diagnostics_mp_queue.get_nowait()
+                    self.diagnostics_queue.append(diagnostic)
+                except QueueEmptyException:
+                    break
+                except Exception as e:
+                    logger.error(f"Error pulling from diagnostics_mp_queue: {e}", exc_info=False)
                     break
 
     def update_training_status(self, status: str, progress: Optional[float] = None, 
@@ -214,6 +228,28 @@ class SharedTrainingDataManager:
             # if time.time() - self.last_save_time > self.auto_save_interval:
             #     self._auto_save() # This method will be removed
     
+    def add_diagnostics_record(self, step: int, diagnostics_data: Dict[str, Any]):
+        """
+        添加診斷記錄 (如 transformer activations, strategy weights) - 由訓練過程調用
+        Puts data onto diagnostics_mp_queue.
+        
+        Args:
+            step: 訓練步數
+            diagnostics_data: 包含診斷信息的字典
+        """
+        record = {
+            'step': step,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'data': diagnostics_data
+        }
+        
+        try:
+            self.diagnostics_mp_queue.put_nowait(record)
+        except multiprocessing.queues.Full:
+            logger.warning("Diagnostics multiprocessing queue is full. Record may be lost.")
+        except Exception as e:
+            logger.error(f"Error putting to diagnostics_mp_queue: {e}", exc_info=False)
+
     def add_trade_record(self, symbol: str, action: str, price: float, 
                         quantity: float, profit_loss: float, 
                         training_step: int, timestamp: Optional[datetime] = None):
@@ -286,6 +322,15 @@ class SharedTrainingDataManager:
             # For now, assume UI can handle ISO strings or Plotly handles them.
             return list(self.metrics_queue)[-count:]
 
+    def get_latest_diagnostics(self, count: int = 1) -> List[Dict[str, Any]]:
+        """獲取最新的診斷記錄 - 由 UI 調用"""
+        self._pull_data_from_mp_queues() # Ensure internal deques are updated
+        with self.lock:
+            if not self.diagnostics_queue:
+                return []
+            # Return the most recent 'count' records
+            return list(self.diagnostics_queue)[-count:]
+
     def get_latest_trades(self, count: int = 100) -> List[Dict[str, Any]]:
         """獲取最新的交易記錄 - 由 UI 調用"""
         self._pull_data_from_mp_queues() # Ensure internal deques are updated
@@ -339,6 +384,7 @@ class SharedTrainingDataManager:
                 'data_counts': {
                     'metrics': len(self.metrics_queue),
                     'trades': len(self.trade_queue),
+                    'diagnostics': len(self.diagnostics_queue), # NEW
                     'symbols': len(self.symbol_stats)
                 },
                 'training_start_time': self.training_start_time
@@ -408,9 +454,18 @@ class SharedTrainingDataManager:
                     break
                 except Exception:
                     break
+            # NEW: Drain diagnostics queue
+            while not self.diagnostics_mp_queue.empty():
+                try:
+                    self.diagnostics_mp_queue.get_nowait()
+                except QueueEmptyException:
+                    break
+                except Exception:
+                    break
 
             self.metrics_queue.clear()
             self.trade_queue.clear()
+            self.diagnostics_queue.clear() # NEW
             self.symbol_stats.clear()
             
             self.training_status = 'idle'

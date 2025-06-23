@@ -23,19 +23,41 @@ logger = logging.getLogger(__name__)
 MAX_SYMBOLS_ALLOWED = 10
 TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
 
-class MockTransformer(nn.Module):
+class UniversalTransformer(nn.Module):
+    """
+    A universal transformer module that processes input features and captures
+    intermediate layer activations for visualization and analysis.
+    """
     def __init__(self, input_dim, model_dim, output_dim, nhead, num_layers, dropout_rate=0.1, **kwargs):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, model_dim)
         encoder_layer = nn.TransformerEncoderLayer(d_model=model_dim, nhead=nhead, batch_first=True, dropout=dropout_rate)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.output_proj = nn.Linear(model_dim, output_dim)
-        logger.info(f"MockTransformer initialized: input_dim={input_dim}, model_dim={model_dim}, output_dim={output_dim}")
+        logger.info(f"UniversalTransformer initialized: input_dim={input_dim}, model_dim={model_dim}, output_dim={output_dim}")
+        # This dictionary will hold the activations from each layer
+        self.activations = {}
 
     def forward(self, src: th.Tensor) -> th.Tensor:
-        src_proj = self.input_proj(src)
-        transformer_output = self.transformer_encoder(src_proj)
-        last_token_output = transformer_output[:, -1, :]
+        """
+        Forward pass for the transformer. It processes the source tensor and
+        stores the output of each encoder layer in the self.activations dictionary.
+        """
+        # Reset activations at the beginning of each forward pass
+        self.activations = {}
+        
+        x = self.input_proj(src)
+        
+        # Iterate through encoder layers to capture activations
+        for i, layer in enumerate(self.transformer_encoder.layers):
+            x = layer(x)
+            # Detach the tensor to prevent gradients from flowing back from this
+            # stored value during training, as it's for diagnostics only.
+            self.activations[f'encoder_layer_{i}'] = x.detach()
+
+        # The final output is based on the last token's representation,
+        # which aggregates information from the sequence.
+        last_token_output = x[:, -1, :] 
         output = self.output_proj(last_token_output)
         return output
 
@@ -98,6 +120,10 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         # This MUST be called before assigning any nn.Module to self.
         super().__init__(observation_space, features_dim=features_dim)
         self.observation_space = observation_space
+        
+        # This dictionary will be populated with layer activations after each forward pass
+        self.activations: Dict[str, th.Tensor] = {}
+
 
         # --- Module Initialization Stage ---
         # Now it's safe to create and assign nn.Module instances.
@@ -107,7 +133,7 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             self.symbol_embedding = nn.Embedding(self.symbol_vocab_size, self.symbol_embedding_dim)
             logger.info(f"Symbol embedding enabled: vocab_size={self.symbol_vocab_size}, embedding_dim={self.symbol_embedding_dim}")
 
-        self.transformer = MockTransformer(
+        self.transformer = UniversalTransformer(
             input_dim=transformer_input_dim,
             model_dim=self.model_config.get('hidden_dim', self.model_config.get('transformer_model_dim', 128)),
             output_dim=transformer_output_dim,
@@ -144,6 +170,11 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             transformer_input = th.cat([market_features, expanded_embeds], dim=-1)
 
         transformer_output = self.transformer(transformer_input)
+        
+        # After the forward pass, the transformer's activations are updated.
+        # Copy them to this class's attribute so a callback can access them.
+        self.activations = self.transformer.activations
+
 
         aux_features_list = []
         for key in self.observation_space.spaces:

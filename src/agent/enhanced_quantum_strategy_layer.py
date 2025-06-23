@@ -123,7 +123,14 @@ class EnhancedStrategySuperposition(nn.Module):
             self.strategy_performance_ema = None
         
         self.gumbel_selector = None # For Gumbel-Softmax based selection if used
-    
+
+        # For diagnostics
+        self.last_strategy_weights: Optional[torch.Tensor] = None
+        self.last_all_strategy_signals: Optional[torch.Tensor] = None
+        self.last_combined_signals: Optional[torch.Tensor] = None
+        self.last_attention_logits: Optional[torch.Tensor] = None
+        self.last_market_state_features: Optional[torch.Tensor] = None
+
     def _get_strategy_registry(self) -> Dict[str, Type[BaseStrategy]]:
         """Returns a copy of the global strategy registry."""
         return copy.deepcopy(STRATEGY_REGISTRY)
@@ -365,6 +372,7 @@ class EnhancedStrategySuperposition(nn.Module):
                         self.logger.warning("attention_network has no parameters. Cannot verify/move device.")
                     
                     attention_logits = self.attention_network(market_state_features) # (batch_size, num_actual_strategies)
+                    self.last_attention_logits = attention_logits.detach().cpu() # Store for diagnostics
                     if current_logits is not None:
                         current_logits = current_logits + attention_logits
                         self.logger.debug("Added attention logits to adaptive bias weights.")
@@ -465,6 +473,14 @@ class EnhancedStrategySuperposition(nn.Module):
         
         # Reshape to final output: (batch_size, num_assets, 1)
         final_actions = combined_signals.unsqueeze(-1)
+
+        # --- Store diagnostics ---
+        self.last_strategy_weights = strategy_weights.detach().cpu() if strategy_weights is not None else None
+        self.last_all_strategy_signals = all_strategy_signals.detach().cpu() if all_strategy_signals is not None else None
+        self.last_combined_signals = combined_signals.detach().cpu() if combined_signals is not None else None
+        # self.last_attention_logits is stored where it's calculated
+        self.last_market_state_features = market_state_features.detach().cpu() if market_state_features is not None else None
+        # --- End diagnostics ---
         
         self.logger.debug(f"ESS Forward: Input asset_features_batch shape: {asset_features_batch.shape}")
         # self.logger.debug(f"ESS Forward: Strategy weights shape: {strategy_weights.shape}") # Already logged if calculated
@@ -472,6 +488,22 @@ class EnhancedStrategySuperposition(nn.Module):
         self.logger.debug(f"ESS Forward: Final actions shape: {final_actions.shape}")
 
         return final_actions
+
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """
+        Returns a dictionary containing the last computed diagnostic values.
+        """
+        return {
+            "strategy_names": self.strategy_names,
+            "last_strategy_weights": self.last_strategy_weights,
+            "last_all_strategy_signals": self.last_all_strategy_signals,
+            "last_combined_signals": self.last_combined_signals,
+            "last_attention_logits": self.last_attention_logits,
+            "last_market_state_features": self.last_market_state_features,
+            "temperature": self.temperature.item() if self.temperature is not None else None,
+            "adaptive_bias_weights": self.adaptive_bias_weights.detach().cpu() if self.adaptive_bias_weights is not None else None,
+            "strategy_performance_ema": self.strategy_performance_ema.detach().cpu() if self.strategy_performance_ema is not None else None,
+        }
 
     def update_adaptive_weights(self, per_strategy_rewards: torch.Tensor):
         """

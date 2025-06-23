@@ -552,6 +552,21 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             "trade_type": "long" if current_units > 0 else "short" if current_units < 0 else "flat" # Add trade type for reward calc
         })
         
+        # NEW: Send trade record to the shared data manager for UI display
+        if self.shared_data_manager:
+            try:
+                self.shared_data_manager.add_trade_record(
+                    symbol=symbol,
+                    action="buy" if units_to_trade > 0 else "sell",
+                    price=float(trade_price_qc),
+                    quantity=float(abs(units_to_trade)), # Ensure quantity is always positive
+                    profit_loss=float(realized_pnl_ac),
+                    training_step=self.training_step_offset + self.episode_step_count,
+                    timestamp=timestamp.to_pydatetime()
+                )
+            except Exception as e:
+                logger.error(f"Failed to add trade record to shared manager: {e}", exc_info=True)
+
         self.last_trade_step_per_slot[slot_idx] = self.episode_step_count
         self.position_entry_step_per_slot[slot_idx] = self.episode_step_count
         self._update_margin_for_position(slot_idx, all_prices_map)

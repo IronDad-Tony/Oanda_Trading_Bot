@@ -60,6 +60,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import logging # Ensure logging is imported
 logger = logging.getLogger(__name__)
 
+from src.agent.enhanced_quantum_strategy_layer import EnhancedStrategySuperposition
+
 class QuantumActor(Actor):
     def __init__(
         self,
@@ -138,26 +140,86 @@ class QuantumActor(Actor):
         # if self.use_quantum_layer:
         #     self.policy_head_net = QuantumStrategyLayerWrapper(self.policy_head_net, self.quantum_config)
 
+        self.ess_layer: Optional[EnhancedStrategySuperposition] = None
+        if self.use_ess_layer:
+            if not self.ess_config:
+                raise ValueError("ess_config must be provided if use_ess_layer is True.")
+            
+            ess_input_dim = features_dim
+            self.ess_layer = EnhancedStrategySuperposition(
+                input_dim=ess_input_dim,
+                **self.ess_config
+            )
+            
+            # When using ESS, it computes the mean action directly.
+            # The original `mu` network is bypassed.
+            self.mu = nn.Identity()
+            
+            # For SAC, we still need a log_std. We make it a state-independent learnable parameter.
+            action_dim = get_action_dim(self.action_space)
+            self.log_std = nn.Parameter(th.ones(action_dim) * log_std_init, requires_grad=True)
+        else:
+            # Standard MLP head if not using ESS
+            mlp_arch = net_arch if net_arch else [features_dim]
+            self.policy_head_net = nn.Sequential(*create_mlp(
+                input_dim=features_dim,
+                net_arch=mlp_arch,
+                activation_fn=activation_fn,
+                output_dim=mlp_arch[-1] if mlp_arch else features_dim
+            ))
+
+    def get_ess_diagnostics(self) -> Optional[Dict[str, Any]]:
+        """Retrieves diagnostic information from the ESS layer."""
+        if self.use_ess_layer and self.ess_layer is not None:
+            return self.ess_layer.get_diagnostics()
+        return None
+
     def get_action_dist_params(self, obs: PyTorchObs) -> Tuple[th.Tensor, th.Tensor, Dict[str, th.Tensor]]:
         """
         Get the parameters for the action distribution.
         This is an override of the base Actor method.
+        It uses the EnhancedStrategySuperposition layer if enabled.
         """
-        # 從觀測中提取特徵
-        features = self.extract_features(obs, self.features_extractor)
+        if self.use_ess_layer and self.ess_layer is not None:
+            # 1. Extract high-level market state features using the main feature extractor.
+            market_state_features = self.extract_features(obs, self.features_extractor)
 
-        # 通過我們自定義的策略頭部網絡處理特徵
-        latent_pi = self.policy_head_net(features)
+            # 2. Get structured data directly from the observation dictionary.
+            asset_features_batch = obs.get('market_features')
+            if asset_features_batch is None:
+                raise ValueError("'market_features' not found in observation, but is required by the ESS layer.")
+            
+            current_positions_batch = obs.get('current_positions')
+            timestamps = obs.get('timestamps')
 
-        # 使用父類 Actor 已創建的 self.mu 和 self.log_std (或 SDE 相關層)
-        mean_actions = self.mu(latent_pi)
+            # 3. Pass the features to the ESS layer to get the mean actions.
+            mean_actions_presqueeze = self.ess_layer(
+                asset_features_batch=asset_features_batch,
+                market_state_features=market_state_features,
+                current_positions_batch=current_positions_batch,
+                timestamps=timestamps
+            )
+            
+            # Squeeze the output to match the action space shape (batch_size, num_assets).
+            mean_actions = mean_actions_presqueeze.squeeze(-1)
 
-        if self.use_sde:
-            sde_features = self.log_std(latent_pi)
-            return mean_actions, sde_features, {}
-        else:
-            log_std = self.log_std(latent_pi)
+            # 4. Return the computed mean and the state-independent, learnable log_std.
+            # The log_std parameter needs to be expanded to the batch size.
+            log_std = self.log_std.expand(mean_actions.shape[0], -1)
+            
             return mean_actions, log_std, {}
+        else:
+            # Fallback to the original SB3 actor logic if ESS layer is not used.
+            features = self.extract_features(obs, self.features_extractor)
+            latent_pi = self.policy_head_net(features)
+            mean_actions = self.mu(latent_pi)
+
+            if self.use_sde:
+                sde_features = self.log_std(latent_pi)
+                return mean_actions, sde_features, {}
+            else:
+                log_std = self.log_std(latent_pi)
+                return mean_actions, log_std, {}
 
     # _get_constructor_parameters 方法: 用於保存和加載模型
     def _get_constructor_parameters(self) -> Dict[str, Any]:

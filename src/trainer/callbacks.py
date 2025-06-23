@@ -349,6 +349,42 @@ class UniversalCheckpointCallback(BaseCallback):
             grad_norm=grad_norm_val
         )
         
+        # 7. Collect and log diagnostic data (Transformer Activations, ESS Diagnostics)
+        try:
+            diagnostics_payload = {}
+
+            # Get Transformer Activations from the feature extractor
+            if (hasattr(self.model.policy, 'features_extractor') and
+                    hasattr(self.model.policy.features_extractor, 'transformer') and
+                    hasattr(self.model.policy.features_extractor.transformer, 'activations')):
+                
+                activations = self.model.policy.features_extractor.transformer.activations
+                if activations:
+                    # Detach, move to CPU, and convert to numpy for serialization
+                    diagnostics_payload['transformer_activations'] = [
+                        act.detach().cpu().numpy() if hasattr(act, 'detach') else act 
+                        for act in activations
+                    ]
+                    logger.debug(f"Collected {len(activations)} transformer activation layers.")
+
+            # Get Enhanced Strategy Superposition (ESS) Diagnostics from the actor
+            if hasattr(self.model.policy, 'actor') and hasattr(self.model.policy.actor, 'get_ess_diagnostics'):
+                ess_diagnostics = self.model.policy.actor.get_ess_diagnostics()
+                if ess_diagnostics:
+                    # Detach, move to CPU, and convert to numpy for serialization
+                    diagnostics_payload['ess_diagnostics'] = {
+                        k: v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v
+                        for k, v in ess_diagnostics.items()
+                    }
+                    logger.debug(f"Collected ESS diagnostics: {list(ess_diagnostics.keys())}")
+
+            # If we have diagnostics, send them to the data manager
+            if diagnostics_payload and self.shared_data_manager is not None:
+                self.shared_data_manager.add_diagnostics_record(diagnostics_payload)
+
+        except Exception as e:
+            logger.warning(f"Error collecting or sending diagnostic data: {e}", exc_info=True)
+        
         # Update training progress for UI
         # self.model._total_timesteps is the total_timesteps passed to learn()
         if hasattr(self.model, '_total_timesteps') and self.model._total_timesteps > 0:
