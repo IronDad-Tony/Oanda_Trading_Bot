@@ -51,6 +51,8 @@ try:
     from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
     from src.environment.trading_env import UniversalTradingEnvV4
     from src.agent.sac_agent_wrapper import QuantumEnhancedSAC
+    from src.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
+    from configs.enhanced_model_config import ModelConfig # 修正：直接導入 ModelConfig 字典
     from src.trainer.callbacks import UniversalCheckpointCallback  # callback 定义在 src/trainer/callbacks.py
     if not _import_logged:
         logger.info("universal_trainer.py: Successfully imported other dependencies.")
@@ -93,6 +95,8 @@ except ImportError as e_initial_import_ut:
         from src.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
         from src.environment.trading_env import UniversalTradingEnvV4
         from src.agent.sac_agent_wrapper import QuantumEnhancedSAC
+        from src.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
+        from configs.enhanced_model_config import ModelConfig # 修正：直接導入 ModelConfig 字典
         from src.trainer.callbacks import UniversalCheckpointCallback
         if not _import_logged:
             logger.info("universal_trainer.py: Successfully re-imported other dependencies after path adjustment.")
@@ -123,12 +127,14 @@ except ImportError as e_initial_import_ut:
             def close(self): pass
         class QuantumEnhancedSAC:
             def __init__(self, **kwargs): pass
-            def load(self, path): pass
+            def load(self, path, **kwargs): pass
             def save(self, path): pass
             def learn(self, **kwargs): pass
             def train(self, **kwargs): pass
         class UniversalCheckpointCallback:
             def __init__(self, **kwargs): pass
+        class EnhancedTransformerFeatureExtractor: pass
+        ModelConfig = {} # Fallback
         
         # Fallback for config
         TIMESTEPS, MAX_SYMBOLS_ALLOWED, ACCOUNT_CURRENCY, INITIAL_CAPITAL = 128, 20, "AUD", 100000
@@ -419,8 +425,6 @@ class UniversalTrainer:
         設置SAC代理
         
         Args:
-            load_model_path:
-        Args:
             load_model_path: 可選的模型加載路徑 (用於恢復檢查點)
             
         返回:
@@ -432,28 +436,50 @@ class UniversalTrainer:
                 return False
             
             logger.info("設置SAC代理...")
+
+            # 1. 加載並動態更新模型配置
+            logger.info("加載並配置模型...")
+            model_config = ModelConfig.copy() # 使用導入的字典，並創建副本以防修改
+            
+            # 確保 device 正確設置
+            model_config['device'] = DEVICE
+            logger.info(f"模型配置更新: device 設置為 {DEVICE}")
+            logger.info(f"模型配置確認: num_symbols 保持為 {model_config.get('num_symbols')} (應等於 MAX_SYMBOLS_ALLOWED)")
+
+
+            # 2. 構建 policy_kwargs，將配置傳遞給特徵提取器
+            policy_kwargs = {
+                "features_extractor_class": EnhancedTransformerFeatureExtractor,
+                "features_extractor_kwargs": {
+                    "model_config": model_config # 直接傳遞字典
+                }
+            }
+            logger.info(f"Policy kwargs 構建完成，特徵提取器為: {policy_kwargs['features_extractor_class'].__name__}")
             
             # 判斷模型加載路徑
             model_path_to_load = load_model_path or self.existing_model_path
             
-            # 創建SAC代理
+            # 3. 創建SAC代理，傳入 policy_kwargs
+            logger.info("創建 QuantumEnhancedSAC 代理...")
             self.agent = QuantumEnhancedSAC(
                 env=self.env,
                 device=DEVICE,
                 use_amp=USE_AMP,
-                verbose=1
+                verbose=1,
+                policy_kwargs=policy_kwargs # 傳遞配置
             )
             
             # 如果存在，加載現有模型
             if model_path_to_load and Path(model_path_to_load).exists():
-                logger.info(f"加載現有模型: {model_path_to_load}")
+                logger.info(f"正在從 {model_path_to_load} 加載現有模型...")
                 try:
-                    self.agent.load(str(model_path_to_load))
+                    # 加載時也傳遞 policy_kwargs，以強制使用當前配置，避免舊配置問題
+                    self.agent.load(str(model_path_to_load), policy_kwargs=policy_kwargs)
                     logger.info("模型加載成功。")
                 except Exception as e:
-                    logger.warning(f"未能加載模型，將創建新模型: {e}")
+                    logger.warning(f"加載模型失敗，將創建一個新模型。錯誤: {e}", exc_info=True)
             else:
-                logger.info("創建新模型。")
+                logger.info("未找到現有模型或未提供路徑，將創建一個新模型。")
             
             logger.info("SAC代理設置成功。")
             return True

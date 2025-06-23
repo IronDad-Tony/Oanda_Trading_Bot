@@ -240,7 +240,8 @@ class UniversalMemoryMappedDataset(Dataset):
         self.num_features_per_symbol: int = -1
         self.total_aligned_steps: int = 0
         self.scalers_map: Optional[Dict[str, Dict[str, StandardScaler]]] = None
-        self.feature_columns_ordered_for_metadata: List[str] = [] # 用於存儲特徵列順序
+        self.feature_columns_ordered_for_metadata: List[str] = [] # 用於存储特徵列順序
+        self.raw_price_columns_ordered: List[str] = []
 
         if force_reload and self.dataset_mmap_dir.exists():
             logger.info(f"Force reload: 正在刪除已存在的mmap目錄: {self.dataset_mmap_dir}")
@@ -330,6 +331,7 @@ class UniversalMemoryMappedDataset(Dataset):
                 break
         if self.num_features_per_symbol == -1: logger.error("未能確定預處理後的特徵數量。"); return
         logger.info("開始創建和寫入內存映射文件...")
+        self.raw_price_columns_ordered = ['bid_close', 'ask_close', 'bid_high', 'bid_low', 'ask_high', 'ask_low']
         for symbol in self.symbols:
             df_features = processed_features_map.get(symbol)
             if df_features is None or df_features.empty:
@@ -346,7 +348,7 @@ class UniversalMemoryMappedDataset(Dataset):
             self.processed_features_memmaps[symbol][:] = features_array[:]; self.processed_features_memmaps[symbol].flush()
             logger.debug(f"Symbol {symbol} 的特徵mmap文件已創建: {mmap_features_path}")
             df_raw_aligned = aligned_raw_data_map.get(symbol)
-            raw_price_cols_to_store = ['bid_close', 'ask_close']
+            raw_price_cols_to_store = self.raw_price_columns_ordered
             if df_raw_aligned is None or df_raw_aligned.empty or not all(col in df_raw_aligned.columns for col in raw_price_cols_to_store):
                 logger.warning(f"Symbol {symbol} 沒有對齊後的原始價格數據，將創建全零的價格mmap文件。")
                 prices_array = np.zeros((self.total_aligned_steps, len(raw_price_cols_to_store)), dtype=np.float32)
@@ -366,7 +368,7 @@ class UniversalMemoryMappedDataset(Dataset):
             "total_aligned_steps": self.total_aligned_steps,
             "num_features_per_symbol": self.num_features_per_symbol,
             "feature_columns_ordered": self.feature_columns_ordered_for_metadata, # 使用存儲的列順序
-            "raw_price_columns_ordered": ['bid_close', 'ask_close']
+            "raw_price_columns_ordered": self.raw_price_columns_ordered
         }
         try:
             with open(self.metadata_file_path, 'w') as f: json.dump(metadata, f, indent=4)
@@ -393,6 +395,11 @@ class UniversalMemoryMappedDataset(Dataset):
                 self._load_and_preprocess_data(); return
             self.timesteps_history = metadata_timesteps
             self.feature_columns_ordered_for_metadata = metadata.get("feature_columns_ordered", []) # 加載列順序
+            self.raw_price_columns_ordered = metadata.get("raw_price_columns_ordered", [])
+            if not self.raw_price_columns_ordered:
+                logger.warning("`raw_price_columns_ordered` not found in metadata or is empty. Forcing reload.")
+                self._load_and_preprocess_data()
+                return
             start_dt = pd.to_datetime(self.start_time_iso, utc=True); end_dt = pd.to_datetime(self.end_time_iso, utc=True)
             granularity_freq_str = f"{get_granularity_seconds(self.granularity)}s" # <--- 'S' 改為 's'
             self.aligned_timestamps = pd.date_range(start=start_dt, end=end_dt, freq=granularity_freq_str, name='time')
@@ -402,7 +409,7 @@ class UniversalMemoryMappedDataset(Dataset):
                     self.processed_features_memmaps[symbol] = np.memmap(str(mmap_features_path), dtype=np.float32, mode=self.mmap_mode, shape=(self.total_aligned_steps, self.num_features_per_symbol))
                 else: raise FileNotFoundError(f"特徵mmap文件未找到: {mmap_features_path}")
                 mmap_prices_path = self.dataset_mmap_dir / f"{symbol}_raw_prices.mmap"
-                raw_price_cols_count = len(metadata.get("raw_price_columns_ordered", ['bid_close', 'ask_close']))
+                raw_price_cols_count = len(self.raw_price_columns_ordered)
                 if mmap_prices_path.exists():
                     self.raw_prices_memmaps[symbol] = np.memmap(str(mmap_prices_path), dtype=np.float32, mode=self.mmap_mode, shape=(self.total_aligned_steps, raw_price_cols_count))
                 else: raise FileNotFoundError(f"原始價格mmap文件未找到: {mmap_prices_path}")

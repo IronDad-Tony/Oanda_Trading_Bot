@@ -1,4 +1,5 @@
 # Configuration for the Enhanced Transformer Model
+from src.common.config import MAX_SYMBOLS_ALLOWED
 
 ModelConfig = {
     'hidden_dim': 256,
@@ -7,7 +8,7 @@ ModelConfig = {
     'intermediate_dim': 1024,
     'dropout_rate': 0.1,
     'max_sequence_length': 128, # This can also be reviewed if sequences are shorter
-    'num_symbols': None,
+    'num_symbols': MAX_SYMBOLS_ALLOWED,
     'output_dim': 128,
     'use_adaptive_attention': True,
     'num_market_states': 4,

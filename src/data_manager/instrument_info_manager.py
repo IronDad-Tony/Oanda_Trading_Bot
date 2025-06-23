@@ -153,6 +153,12 @@ class InstrumentInfoManager:
     def get_all_available_symbols(self) -> List[str]:
         if self._is_cache_expired() and OANDA_API_KEY and OANDA_ACCOUNT_ID: self._fetch_all_instruments_details()
         return list(InstrumentInfoManager._instrument_cache.keys())
+
+    @property
+    def all_symbols(self) -> List[str]:
+        """Returns a sorted list of all available symbol names to ensure consistent ordering."""
+        return sorted(self.get_all_available_symbols())
+
     def get_details_for_multiple_symbols(self, symbols: List[str]) -> Dict[str, Optional[InstrumentDetails]]:
         if self._is_cache_expired() and OANDA_API_KEY and OANDA_ACCOUNT_ID: self._fetch_all_instruments_details()
         result = {};

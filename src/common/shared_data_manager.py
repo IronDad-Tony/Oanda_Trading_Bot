@@ -53,6 +53,9 @@ class SharedTrainingDataManager:
         self.training_error = None
         self.stop_requested = False
         self.training_start_time = None
+
+        # NEW: To store the latest 'info' dict from the environment
+        self.current_env_info = {}
         
         # Store actual initial capital for accurate return calculations
         self.actual_initial_capital = None
@@ -264,6 +267,17 @@ class SharedTrainingDataManager:
             if stats['trades'] > 0: stats['win_rate'] = (stats['wins'] / stats['trades']) * 100
             # More complex stats like avg_return, sharpe_ratio might need to pull from the deque/queue
 
+    def update_env_data(self, step: int, env_info: Dict[str, Any]):
+        """
+        Updates with the latest information from the environment step.
+        This is called directly from the environment.
+        """
+        with self.lock:
+            # We can cherry-pick or store the whole thing. Storing all is more flexible.
+            self.current_env_info = env_info
+            # Ensure the global step is consistent
+            self.current_env_info['step'] = step
+
     def get_latest_metrics(self, count: int = 100) -> List[Dict[str, Any]]:
         """獲取最新的訓練指標 - 由 UI 調用"""
         self._pull_data_from_mp_queues() # Ensure internal deques are updated
@@ -319,6 +333,7 @@ class SharedTrainingDataManager:
                 'error': self.training_error,
                 'stop_requested': self.stop_requested,
                 'current_metrics': self.current_metrics.copy(),
+                'current_env_info': self.current_env_info.copy(),
                 'symbol_stats': {k: v.copy() for k, v in self.symbol_stats.items()},
                 'performance_stats': self.performance_stats.copy(),
                 'data_counts': {
@@ -403,10 +418,14 @@ class SharedTrainingDataManager:
             self.training_error = None
             self.stop_requested = False
             self.training_start_time = None
+
+            # Reset env info
+            self.current_env_info = {}
             
             # Reset actual initial capital
             self.actual_initial_capital = None
             
+
             self.current_metrics = {
                 'step': 0, 'reward': 0.0, 'portfolio_value': float(INITIAL_CAPITAL),
                 'actor_loss': np.nan, # Changed

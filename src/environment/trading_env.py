@@ -118,8 +118,43 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                  max_position_size_percentage: float = float(MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY)):
         super().__init__()
         self.dataset = dataset
+
+        # NEW: Add a check for dataset compatibility to prevent ATR calculation errors
+        required_cols = ['bid_close', 'ask_close', 'bid_high', 'bid_low', 'ask_high', 'ask_low']
+        if not hasattr(self.dataset, 'raw_price_columns_ordered') or not all(c in self.dataset.raw_price_columns_ordered for c in required_cols):
+            error_msg = (
+                "Dataset is missing 'raw_price_columns_ordered' metadata or required columns for ATR calculation "
+                f"(needs {required_cols}). Please delete the existing mmap data folder and rebuild the dataset."
+            )
+            logger.critical(error_msg)
+            raise ValueError(error_msg)
+            
         self.instrument_info_manager = instrument_info_manager
         self.initial_capital = Decimal(str(initial_capital))
+
+        # Create a mapping from symbol string to a unique integer ID based on the master list from InstrumentInfoManager
+        # This is crucial for the symbol embedding layer in the feature extractor.
+        if not hasattr(self.instrument_info_manager, 'all_symbols') or not self.instrument_info_manager.all_symbols:
+             # Attempt to get it via the method if the property doesn't exist for some reason.
+             self.universe_symbols = self.instrument_info_manager.get_all_available_symbols()
+             if not self.universe_symbols:
+                raise ValueError("InstrumentInfoManager does not have 'all_symbols' and get_all_available_symbols() returned empty. Cannot create symbol-ID mapping.")
+        else:
+            self.universe_symbols = self.instrument_info_manager.all_symbols
+
+        # Define number of symbols and padding ID consistently with the feature extractor
+        self.num_universe_symbols = len(self.universe_symbols)
+        if self.num_universe_symbols == 0:
+            logger.critical("InstrumentInfoManager returned an empty list of universe symbols. Cannot proceed.")
+            raise ValueError("InstrumentInfoManager returned an empty list of universe symbols.")
+
+        self.symbol_to_global_id_map: Dict[str, int] = {symbol: i for i, symbol in enumerate(self.universe_symbols)}
+        
+        # The padding ID is the index right after the last valid symbol ID (0 to num_universe_symbols-1).
+        # This matches the feature extractor's nn.Embedding(num_symbols + 1, padding_idx=num_symbols).
+        self.padding_symbol_id = self.num_universe_symbols
+        logger.info(f"Symbol mapping created. Universe size: {self.num_universe_symbols}. Padding ID set to: {self.padding_symbol_id}")
+
         # 初始化統一的貨幣轉換管理器
         from src.data_manager.currency_manager import CurrencyDependencyManager
         self.currency_manager = CurrencyDependencyManager(ACCOUNT_CURRENCY, apply_oanda_markup=True)
@@ -164,6 +199,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.atr_values_qc: np.ndarray = np.array([Decimal('0.0')] * self.num_env_slots, dtype=object)
         self.stop_loss_prices_qc: np.ndarray = np.array([Decimal('0.0')] * self.num_env_slots, dtype=object)
         self.last_trade_step_per_slot: np.ndarray = np.full(self.num_env_slots, -1, dtype=np.int32)
+        self.position_entry_step_per_slot: np.ndarray = np.full(self.num_env_slots, -1, dtype=np.int32)
         self.total_margin_used_ac: Decimal = Decimal('0.0'); self.portfolio_value_ac: Decimal = Decimal('0.0'); self.equity_ac: Decimal = Decimal('0.0')
         self.portfolio_value_history: List[float] = []; self.reward_history: List[float] = []; self.trade_log: List[Dict[str, Any]] = []
         
@@ -245,8 +281,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.peak_portfolio_value_episode: Decimal = self.initial_capital; self.max_drawdown_episode: Decimal = Decimal('0.0')
 
         # NEW observation space for EnhancedTransformerFeatureExtractor
-        # It expects 'market_features' (last step) and 'context_features' (state info)
+        # It expects 'market_features' (last step), 'context_features' (state info), and 'symbol_id'
         self.num_context_features = 5 # pos_ratio, pnl_ratio, time_since_trade, volatility, margin_level
+        
+        # The number of symbols for the embedding layer is the size of our symbol universe.
+        num_embedding_symbols = self.num_universe_symbols
+
         obs_spaces = {
             "market_features": spaces.Box(
                 low=-np.inf, high=np.inf,
@@ -257,6 +297,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 low=-np.inf, high=np.inf,
                 shape=(self.num_env_slots, self.num_context_features),
                 dtype=np.float32
+            ),
+            "symbol_id": spaces.Box(
+                low=0, 
+                high=num_embedding_symbols, # The highest valid ID is the padding_symbol_id
+                shape=(self.num_env_slots,),
+                dtype=np.int32
             )
         }
         self.observation_space = spaces.Dict(obs_spaces)
@@ -264,6 +310,536 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_env_slots,), dtype=np.float32)
         if self.render_mode == 'human': self._init_render_figure()
         logger.info(f"UniversalTradingEnvV4 (整合量子策略層) 初始化完成。")
+
+    def _update_portfolio_and_equity_value(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
+        """
+        Updates unrealized PnL for all positions, total portfolio value, and equity.
+        This is a critical method called at each step.
+        """
+        total_unrealized_pnl_ac = Decimal('0.0')
+        
+        for slot_idx in range(self.num_env_slots):
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            units = self.current_positions_units[slot_idx]
+            
+            if not symbol or abs(units) < Decimal('1e-9'):
+                self.unrealized_pnl_ac[slot_idx] = Decimal('0.0')
+                continue
+                
+            current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            if current_bid_qc <= Decimal('0') or current_ask_qc <= Decimal('0'):
+                # Cannot calculate PnL without a valid price, keep the last known PnL.
+                total_unrealized_pnl_ac += self.unrealized_pnl_ac[slot_idx]
+                continue
+
+            entry_price_qc = self.avg_entry_prices_qc[slot_idx]
+            
+            # Determine the current price to use for PnL calculation (the price to close the position)
+            current_price_for_pnl = current_bid_qc if units > 0 else current_ask_qc
+                
+            pnl_per_unit_qc = current_price_for_pnl - entry_price_qc
+            unrealized_pnl_qc = units * pnl_per_unit_qc
+            
+            exchange_rate = self._get_exchange_rate_to_account_currency(self.instrument_details_map[symbol].quote_currency, all_prices_map)
+            unrealized_pnl_ac = unrealized_pnl_qc * exchange_rate
+            
+            self.unrealized_pnl_ac[slot_idx] = unrealized_pnl_ac
+            total_unrealized_pnl_ac += unrealized_pnl_ac
+
+        self.equity_ac = self.cash + total_unrealized_pnl_ac
+        self.portfolio_value_ac = self.equity_ac # For a margin account, portfolio value is equity
+        
+        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
+        
+        self.peak_portfolio_value_episode = max(self.peak_portfolio_value_episode, self.portfolio_value_ac)
+        if self.peak_portfolio_value_episode > Decimal('0'):
+            drawdown = (self.peak_portfolio_value_episode - self.portfolio_value_ac) / self.peak_portfolio_value_episode
+            self.max_drawdown_episode = max(self.max_drawdown_episode, drawdown)
+        
+        self.portfolio_value_history.append(float(self.portfolio_value_ac))
+
+    def _update_atr_values(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
+        """
+        Calculates and updates the ATR values for all active symbols.
+        """
+        try:
+            # Dynamically get price column indices from dataset metadata
+            try:
+                price_cols = self.dataset.raw_price_columns_ordered
+                idx_bid_close = price_cols.index('bid_close')
+                idx_ask_close = price_cols.index('ask_close')
+                idx_bid_high = price_cols.index('bid_high')
+                idx_ask_high = price_cols.index('ask_high')
+                idx_bid_low = price_cols.index('bid_low')
+                idx_ask_low = price_cols.index('ask_low')
+            except (ValueError, AttributeError) as e:
+                logger.error(f"Could not find required price columns in dataset metadata. Error: {e}", exc_info=True)
+                # Set all ATRs to zero as a fallback
+                for slot_idx in self.current_episode_tradable_slot_indices:
+                    self.atr_values_qc[slot_idx] = Decimal('0.0')
+                return
+
+            safe_step_index = min(self.current_step_in_dataset, len(self.dataset) - 1)
+            if safe_step_index < self.dataset.timesteps_history -1: # Need enough history for ATR
+                return
+
+            # We need historical data, so we get the full sample from the dataset
+            dataset_sample = self.dataset[safe_step_index - (self.dataset.timesteps_history - 1)]
+            historical_raw_prices_np = dataset_sample["raw_prices"].numpy().astype(np.float64)
+            
+            dataset_symbol_to_idx_map = {symbol: i for i, symbol in enumerate(self.dataset.symbols)}
+
+            for slot_idx in self.current_episode_tradable_slot_indices:
+                symbol = self.slot_to_symbol_map.get(slot_idx)
+                if not symbol or symbol not in dataset_symbol_to_idx_map:
+                    continue
+
+                dataset_idx = dataset_symbol_to_idx_map[symbol]
+                
+                # Use dynamic indices to get the correct columns
+                high_prices = (historical_raw_prices_np[dataset_idx, :, idx_bid_high] + historical_raw_prices_np[dataset_idx, :, idx_ask_high]) / 2
+                low_prices = (historical_raw_prices_np[dataset_idx, :, idx_bid_low] + historical_raw_prices_np[dataset_idx, :, idx_ask_low]) / 2
+                close_prices = (historical_raw_prices_np[dataset_idx, :, idx_bid_close] + historical_raw_prices_np[dataset_idx, :, idx_ask_close]) / 2
+
+                if len(close_prices) < self.atr_period:
+                    self.atr_values_qc[slot_idx] = Decimal('0.0')
+                    continue
+
+                df = pd.DataFrame({'high': high_prices, 'low': low_prices, 'close': close_prices})
+
+                high_low = df['high'] - df['low']
+                high_prev_close = np.abs(df['high'] - df['close'].shift(1))
+                low_prev_close = np.abs(df['low'] - df['close'].shift(1))
+                
+                tr = pd.concat([high_low, high_prev_close, low_prev_close], axis=1, ignore_index=True).max(axis=1, skipna=True)
+                atr = tr.rolling(window=self.atr_period, min_periods=self.atr_period).mean().iloc[-1]
+
+                self.atr_values_qc[slot_idx] = Decimal(str(atr)) if pd.notna(atr) and np.isfinite(atr) else Decimal('0.0')
+
+        except Exception as e:
+            logger.error(f"Error during ATR calculation: {e}", exc_info=True)
+            for slot_idx in self.current_episode_tradable_slot_indices:
+                self.atr_values_qc[slot_idx] = Decimal('0.0')
+
+    def _get_exchange_rate_to_account_currency(self, currency: str, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Decimal:
+        """
+        Gets the exchange rate to convert from a given currency to the account currency.
+        """
+        # Corrected to use the new currency manager method
+        return self.currency_manager.convert_to_account_currency(currency, all_prices_map)
+
+    def _round_trade_units(self, units: Decimal, precision: int) -> Decimal:
+        """Rounds trade units to the instrument's specified precision."""
+        return units.quantize(Decimal('1e-' + str(precision)), rounding=ROUND_HALF_UP)
+
+    def _update_margin_for_position(self, slot_idx: int, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
+        """
+        Updates the margin used for a single position.
+        """
+        symbol = self.slot_to_symbol_map.get(slot_idx)
+        if not symbol:
+            self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
+            return
+
+        units = self.current_positions_units[slot_idx]
+        if abs(units) < Decimal('1e-9'):
+            self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
+            return
+            
+        details = self.instrument_details_map[symbol]
+        _, ask_price_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+        
+        if ask_price_qc <= 0:
+            return
+
+        position_value_qc = abs(units) * ask_price_qc
+        
+        # Corrected currency conversion logic
+        # To convert a value from quote currency to base currency, we need the base/quote rate.
+        # get_specific_rate(base, quote) returns quote/base. We need get_specific_rate(quote, base) to get base/quote.
+        exchange_rate_quote_to_base = self.currency_manager.get_specific_rate(
+            details.quote_currency, details.base_currency, all_prices_map, is_for_conversion=True
+        )
+        
+        if exchange_rate_quote_to_base is None or exchange_rate_quote_to_base <= 0:
+            logger.warning(f"Could not get exchange rate for {details.quote_currency}/{details.base_currency} for margin calculation. Setting margin to 0.")
+            self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
+            return
+
+        position_value_base = position_value_qc * exchange_rate_quote_to_base
+        margin_required_base = position_value_base * Decimal(str(details.margin_rate))
+        
+        # This converts from base currency to account currency.
+        exchange_rate_base_to_ac = self.currency_manager.convert_to_account_currency(
+            details.base_currency, all_prices_map
+        )
+        margin_required_ac = margin_required_base * exchange_rate_base_to_ac
+        self.margin_used_per_position_ac[slot_idx] = margin_required_ac
+
+    def _execute_trade(self, slot_idx: int, units_to_trade: Decimal, trade_price_qc: Decimal, timestamp: pd.Timestamp, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Tuple[Decimal, Decimal]:
+        """
+        Core logic to execute a single trade. Returns (realized_pnl_ac, commission_ac).
+        """
+        symbol = self.slot_to_symbol_map[slot_idx]
+        if not symbol: return Decimal('0.0'), Decimal('0.0')
+
+        details = self.instrument_details_map[symbol]
+        
+        trade_value_qc = abs(units_to_trade) * trade_price_qc
+        exchange_rate = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+        trade_value_ac = trade_value_qc * exchange_rate
+        commission = trade_value_ac * self.commission_percentage
+        
+        self.cash -= commission
+
+        current_units = self.current_positions_units[slot_idx]
+        new_units = current_units + units_to_trade
+        avg_entry_price = self.avg_entry_prices_qc[slot_idx]
+        realized_pnl_qc = Decimal('0.0')
+        hold_duration = 0
+
+        # Determine if this trade closes or reduces an existing position
+        is_closing_trade = (abs(new_units) < abs(current_units)) or (np.sign(new_units) != np.sign(current_units) and abs(current_units) > 0)
+
+        if is_closing_trade:
+            entry_step = self.position_entry_step_per_slot[slot_idx]
+            if entry_step != -1:
+                hold_duration = self.episode_step_count - entry_step
+            
+            if np.sign(new_units) != np.sign(current_units): # Position is flipped
+                units_closed = -current_units
+            else: # Position is reduced
+                units_closed = -units_to_trade
+            
+            realized_pnl_qc = units_closed * (trade_price_qc - avg_entry_price)
+
+        # Update position entry step
+        if abs(current_units) < Decimal('1e-9') and abs(new_units) > Decimal('1e-9'):
+            # This is a new position opening
+            self.position_entry_step_per_slot[slot_idx] = self.episode_step_count
+        elif abs(new_units) < Decimal('1e-9'):
+            # Position is fully closed
+            self.position_entry_step_per_slot[slot_idx] = -1
+        elif np.sign(new_units) != np.sign(current_units):
+            # Position is flipped, so it's a new entry
+            self.position_entry_step_per_slot[slot_idx] = self.episode_step_count
+        
+        if abs(new_units) > Decimal('1e-9'):
+            if abs(current_units) < Decimal('1e-9') or np.sign(new_units) != np.sign(current_units):
+                self.avg_entry_prices_qc[slot_idx] = trade_price_qc
+            else:
+                # Ensure no division by zero if new_units is somehow zero
+                if abs(new_units) > Decimal('1e-9'):
+                    new_avg_price = ((current_units * avg_entry_price) + (units_to_trade * trade_price_qc)) / new_units
+                    self.avg_entry_prices_qc[slot_idx] = new_avg_price
+                else:
+                    self.avg_entry_prices_qc[slot_idx] = Decimal('0.0')
+        else:
+            self.avg_entry_prices_qc[slot_idx] = Decimal('0.0')
+
+        self.current_positions_units[slot_idx] = new_units
+        
+        realized_pnl_ac = realized_pnl_qc * exchange_rate
+        self.cash += realized_pnl_ac
+        
+        self.trade_log.append({
+            "step": self.episode_step_count, "timestamp": timestamp, "symbol": symbol,
+            "action": "buy" if units_to_trade > 0 else "sell", "units": float(units_to_trade),
+            "price_qc": float(trade_price_qc), "realized_pnl_ac": float(realized_pnl_ac),
+            "commission_ac": float(commission), "cash_ac": float(self.cash),
+            "portfolio_value_ac": float(self.portfolio_value_ac),
+            "hold_duration": hold_duration, # Add hold duration to the log
+            "trade_type": "long" if current_units > 0 else "short" if current_units < 0 else "flat" # Add trade type for reward calc
+        })
+        
+        self.last_trade_step_per_slot[slot_idx] = self.episode_step_count
+        self.position_entry_step_per_slot[slot_idx] = self.episode_step_count
+        self._update_margin_for_position(slot_idx, all_prices_map)
+        self._set_stop_loss_price(slot_idx) # Set SL after trade
+        
+        return realized_pnl_ac, commission
+
+    def _execute_agent_actions(self, action: np.ndarray, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], current_timestamp: pd.Timestamp) -> Decimal:
+        """
+        Interprets the agent's action vector and executes trades.
+        """
+        total_commission = Decimal('0.0')
+        
+        for slot_idx, desired_position_ratio in enumerate(action):
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if not symbol or slot_idx not in self.current_episode_tradable_slot_indices:
+                continue
+
+            details = self.instrument_details_map[symbol]
+            current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            if current_bid_qc <= 0: continue
+                 
+            mid_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2')
+             
+            
+            max_pos_value_ac = self.equity_ac * self.max_position_size_percentage
+            exchange_rate_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+            if exchange_rate_to_ac <= 0: continue
+                 
+            max_pos_value_qc = max_pos_value_ac / exchange_rate_to_ac
+            target_value_qc = max_pos_value_qc * Decimal(str(desired_position_ratio))
+            target_units = target_value_qc / mid_price_qc if mid_price_qc > 0 else Decimal('0')
+            target_units = self._round_trade_units(target_units, details.trade_units_precision)
+
+            current_units = self.current_positions_units[slot_idx]
+            units_to_trade = target_units - current_units
+            
+            if abs(units_to_trade) > Decimal('1e-9'):
+                trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
+                _, commission = self._execute_trade(slot_idx, units_to_trade, trade_price_qc, current_timestamp, all_prices_map)
+                total_commission += commission
+
+        return total_commission
+
+    def _get_positions_data(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Gathers detailed data for all current positions, required for advanced reward calculation.
+        Returns a dictionary mapping symbol to its position data.
+        """
+        positions_data: Dict[str, Dict[str, Any]] = {}
+        for slot_idx in range(self.num_env_slots):
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            units = self.current_positions_units[slot_idx]
+            
+            if not symbol or abs(units) < Decimal('1e-9'):
+                continue
+
+            entry_step = self.position_entry_step_per_slot[slot_idx]
+            hold_duration = self.episode_step_count - entry_step if entry_step != -1 else 0
+
+            positions_data[symbol] = {
+                "symbol": symbol,
+                "units": units,
+                "avg_entry_price_qc": self.avg_entry_prices_qc[slot_idx],
+                "unrealized_pnl_ac": self.unrealized_pnl_ac[slot_idx],
+                "margin_used_ac": self.margin_used_per_position_ac[slot_idx],
+                "stop_loss_price_qc": self.stop_loss_prices_qc[slot_idx],
+                "hold_duration": hold_duration,
+                "trade_type": "long" if units > 0 else "short"
+            }
+        return positions_data
+
+    def _get_market_data(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Dict[str, Dict[str, Any]]:
+        """
+        Gathers current market data (prices, ATR) for all tradable symbols.
+        """
+        market_data = {}
+        for slot_idx in self.current_episode_tradable_slot_indices:
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if not symbol:
+                continue
+            
+            bid, ask = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            
+            market_data[symbol] = {
+                "bid_price_qc": bid,
+                "ask_price_qc": ask,
+                "mid_price_qc": (bid + ask) / Decimal('2') if bid > 0 and ask > 0 else Decimal('0'),
+                "atr_qc": self.atr_values_qc[slot_idx]
+            }
+        return market_data
+
+    def _calculate_reward(self, portfolio_value_before_action: Decimal, commission_this_step: Decimal, positions_data: Dict[str, Dict[str, Any]], market_data: Dict[str, Dict[str, Any]]) -> Decimal:
+        """
+        Calculates the reward for the current step using the appropriate calculator.
+        """
+        if self.portfolio_value_ac <= 0 or portfolio_value_before_action <= 0:
+            log_return = Decimal('0.0')
+        else:
+            log_return = (self.portfolio_value_ac / portfolio_value_before_action).ln()
+
+        if self.use_progressive_rewards and self.progressive_reward_calculator:
+            # The progressive calculator expects individual arguments.
+            reward_float = self.progressive_reward_calculator.calculate_reward(
+                current_portfolio_value=self.portfolio_value_ac,
+                prev_portfolio_value=portfolio_value_before_action,
+                commission_this_step=commission_this_step,
+                trade_log=self.trade_log,  # Pass the full log
+                positions_data=positions_data,
+                market_data=market_data,
+                episode_step=self.episode_step_count
+            )
+            return Decimal(str(reward_float))
+            
+        if self.use_enhanced_rewards and self.enhanced_reward_calculator:
+            # Note: The enhanced calculator might also need an update if we want to use it.
+            return self.enhanced_reward_calculator.calculate_reward(log_return, self.trade_log, self.max_drawdown_episode)
+
+        # Fallback to simple reward
+        reward = log_return * self.reward_config["portfolio_log_return_factor"]
+        reward -= self.max_drawdown_episode * self.reward_config["max_drawdown_penalty_factor"]
+        return reward
+
+    def _set_stop_loss_price(self, slot_idx: int):
+        """
+        Sets the stop-loss price for a new or modified position based on ATR.
+        """
+        units = self.current_positions_units[slot_idx]
+        if abs(units) < Decimal('1e-9'):
+            self.stop_loss_prices_qc[slot_idx] = Decimal('0.0')
+            return
+
+        atr = self.atr_values_qc[slot_idx]
+        if atr <= 0:
+            # Cannot set SL without a valid ATR value.
+            self.stop_loss_prices_qc[slot_idx] = Decimal('0.0')
+            return
+
+        entry_price = self.avg_entry_prices_qc[slot_idx]
+        sl_distance = atr * self.stop_loss_atr_multiplier
+
+        if units > 0:  # Long position
+            self.stop_loss_prices_qc[slot_idx] = entry_price - sl_distance
+        else:  # Short position
+            self.stop_loss_prices_qc[slot_idx] = entry_price + sl_distance
+
+    def _apply_stop_loss(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], timestamp: pd.Timestamp):
+        """
+        Checks for and executes stop-loss orders for all open positions.
+        """
+        for slot_idx in self.current_episode_tradable_slot_indices:
+            units = self.current_positions_units[slot_idx]
+            if abs(units) < Decimal('1e-9'):
+                continue
+
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if not symbol: continue
+
+            stop_loss_price = self.stop_loss_prices_qc[slot_idx]
+            if stop_loss_price <= 0: continue
+
+            current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            
+            should_close = False
+            trade_price = Decimal('0')
+            if units > 0 and current_bid_qc <= stop_loss_price: # Long position stop-loss triggered
+                should_close = True
+                trade_price = current_bid_qc
+            elif units < 0 and current_ask_qc >= stop_loss_price: # Short position stop-loss triggered
+                should_close = True
+                trade_price = current_ask_qc
+
+            if should_close:
+                logger.info(f"STOP-LOSS TRIGGERED for {symbol} at price {trade_price}. SL Price was {stop_loss_price}.")
+                self._execute_trade(slot_idx, -units, trade_price, timestamp, all_prices_map)
+                # Stop loss is reset to 0 inside _set_stop_loss_price called by _execute_trade
+
+    def _handle_margin_call(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], timestamp: pd.Timestamp):
+        """
+        Checks for margin call conditions and liquidates positions if necessary.
+        OANDA's margin closeout happens when Margin Level (Equity / Margin Used) drops to 50%.
+        """
+        if self.total_margin_used_ac <= 0:
+            return
+
+        margin_level = self.equity_ac / self.total_margin_used_ac
+        
+        if margin_level < OANDA_MARGIN_CLOSEOUT_LEVEL:
+            logger.warning(f"MARGIN CALL! Equity: {self.equity_ac:.2f}, Margin Used: {self.total_margin_used_ac:.2f}, Margin Level: {margin_level:.2%}. Liquidating all positions.")
+            
+            # Liquidate all positions
+            for slot_idx in range(self.num_env_slots):
+                units = self.current_positions_units[slot_idx]
+                if abs(units) > Decimal('1e-9'):
+                    symbol = self.slot_to_symbol_map.get(slot_idx)
+                    if not symbol: continue
+                    
+                    current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+                    trade_price = current_bid_qc if units > 0 else current_ask_qc
+                    
+                    if trade_price > 0:
+                        self._execute_trade(slot_idx, -units, trade_price, timestamp, all_prices_map)
+            
+            # After liquidation, update portfolio value to reflect realized losses
+            self._update_portfolio_and_equity_value(all_prices_map)
+
+    def _check_termination_truncation(self) -> Tuple[bool, bool]:
+        """
+        Checks if the episode should terminate or be truncated.
+        """
+        terminated = False
+        # Termination condition: Portfolio value drops to a very low level (e.g., 10% of initial)
+        if self.portfolio_value_ac < self.initial_capital * Decimal('0.1'):
+            logger.warning(f"Episode terminated: Portfolio value ({self.portfolio_value_ac:.2f}) dropped below 10% of initial capital.")
+            terminated = True
+
+        truncated = False
+        # Truncation condition: Reached max episode steps
+        if self.episode_step_count >= self.max_episode_steps:
+            logger.info(f"Episode truncated: Reached max steps ({self.max_episode_steps}).")
+            truncated = True
+        
+        # Truncation condition: Dataset ends
+        if self.current_step_in_dataset >= len(self.dataset) -1:
+            truncated = True
+
+        return terminated, truncated
+
+    def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
+        """
+        Executes one time step within the environment.
+        """
+        self.episode_step_count += 1
+        
+        # 1. Get current market data for this step
+        all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
+        
+        # 2. Store state before any actions are taken
+        portfolio_value_before_action = self.portfolio_value_ac
+
+        # 3. Apply pre-action market mechanics (Stop-Loss, Margin Call)
+        self._apply_stop_loss(all_prices_map, current_timestamp)
+        self._handle_margin_call(all_prices_map, current_timestamp)
+        
+        # 4. Update portfolio value after potential automatic liquidations
+        self._update_portfolio_and_equity_value(all_prices_map)
+
+        # 5. Let the agent execute its intended actions, generating trades and commissions
+        commission_this_step = self._execute_agent_actions(action, all_prices_map, current_timestamp)
+        
+        # 6. Advance time to the next state in the dataset
+        self.current_step_in_dataset += 1
+        
+        # 7. Get market data for the *next* state to calculate PnL and define the new observation
+        all_prices_map_next, _ = self._get_current_raw_prices_for_all_dataset_symbols()
+        
+        # 8. Update portfolio value, equity, and ATR based on the new prices
+        self._update_portfolio_and_equity_value(all_prices_map_next)
+        self._update_atr_values(all_prices_map_next) # ATR for the *next* state
+        
+        # 9. Gather all data required for the reward calculation
+        positions_data = self._get_positions_data()
+        market_data = self._get_market_data(all_prices_map_next)
+        
+        # 10. Calculate reward based on the outcome of the step
+        reward = self._calculate_reward(
+            portfolio_value_before_action=portfolio_value_before_action,
+            commission_this_step=commission_this_step,
+            positions_data=positions_data,
+            market_data=market_data
+        )
+        self.reward_history.append(float(reward))
+
+        # 11. Check if the episode has ended (terminated or truncated)
+        terminated, truncated = self._check_termination_truncation()
+        
+        # 12. Get the observation and info for the new state
+        observation = self._get_observation()
+        info = self._get_info()
+        
+        # 13. Update shared data for external monitoring
+        if self.shared_data_manager:
+            self.shared_data_manager.update_env_data(self.training_step_offset + self.episode_step_count, info)
+
+        if self.render_mode == 'human':
+            self.render()
+
+        return observation, float(reward), terminated, truncated, info
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         super().reset(seed=seed); self.current_step_in_dataset = 0; self.episode_step_count = 0
@@ -275,6 +851,7 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             self.unrealized_pnl_ac[i] = Decimal('0.0'); self.margin_used_per_position_ac[i] = Decimal('0.0')
             self.atr_values_qc[i] = Decimal('0.0'); self.stop_loss_prices_qc[i] = Decimal('0.0')
         self.last_trade_step_per_slot.fill(0)
+        self.position_entry_step_per_slot.fill(-1)
         self.total_margin_used_ac = Decimal('0.0')
         self.equity_ac = self.initial_capital; self.portfolio_value_ac = self.initial_capital
         self.portfolio_value_history = [float(self.initial_capital)]; self.reward_history = []; self.trade_log = []
@@ -295,1076 +872,190 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         return self._get_observation(), self._get_info()
 
     def _get_current_raw_prices_for_all_dataset_symbols(self) -> Tuple[Dict[str, Tuple[Decimal, Decimal]], pd.Timestamp]:
-        dataset_sample = self.dataset[min(self.current_step_in_dataset, len(self.dataset)-1)]
-        latest_raw_prices_np = dataset_sample["raw_prices"][:, -1, :].numpy().astype(np.float64)
-        prices_map: Dict[str, Tuple[Decimal, Decimal]] = {}
-        for i, symbol_name in enumerate(self.dataset.symbols):
-            bid_price = Decimal(str(latest_raw_prices_np[i, 0])); ask_price = Decimal(str(latest_raw_prices_np[i, 1]))
-            if bid_price > 0 and ask_price > 0 and ask_price >= bid_price: prices_map[symbol_name] = (bid_price, ask_price)
-            else: prices_map[symbol_name] = (Decimal('0.0'), Decimal('0.0')); logger.debug(f"Symbol {symbol_name} invalid prices: bid={latest_raw_prices_np[i, 0]}, ask={latest_raw_prices_np[i, 1]}")
-        timestamp_index = self.current_step_in_dataset + self.dataset.timesteps_history - 1
-        timestamp_index = min(timestamp_index, len(self.dataset.aligned_timestamps)-1)
-        return prices_map, self.dataset.aligned_timestamps[timestamp_index]
-    
-    def _get_specific_rate(self, base_curr: str, quote_curr: str, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Optional[Decimal]:
-        base_curr_upper = base_curr.upper(); quote_curr_upper = quote_curr.upper()
-        if base_curr_upper == quote_curr_upper: return Decimal('1.0')
-        pair1 = f"{base_curr_upper}_{quote_curr_upper}"; pair2 = f"{quote_curr_upper}_{base_curr_upper}"
-        price_pair1_tuple = current_prices_map.get(pair1)
-        if price_pair1_tuple and price_pair1_tuple[1] > 0:
-            logger.debug(f"找到直接匯率 {pair1}: {price_pair1_tuple[1]}")
-            return price_pair1_tuple[1]
-        price_pair2_tuple = current_prices_map.get(pair2)
-        if price_pair2_tuple and price_pair2_tuple[0] > 0:
-            rate = Decimal('1.0') / price_pair2_tuple[0]
-            logger.debug(f"找到反向匯率 {pair2}: {price_pair2_tuple[0]} -> {rate}")
-            return rate
-        return None
-
-    def _get_exchange_rate_to_account_currency(self, from_currency: str, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Decimal:
         """
-        使用統一的CurrencyDependencyManager進行貨幣轉換
-        包含OANDA 0.5%標記以確保真實交易成本模擬
+        Safely retrieves the latest raw bid/ask prices for all symbols in the dataset for the current step.
+        This method is designed to be resilient to empty datasets or out-of-bounds indices.
         """
-        return self.currency_manager.convert_to_account_currency(
-            from_currency, current_prices_map, is_credit=True
-        )
-    
-    def _update_atr_values(self, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
-        for slot_idx in range(self.num_env_slots):
-            symbol = self.slot_to_symbol_map.get(slot_idx)
-            if not symbol: self.atr_values_qc[slot_idx] = Decimal('0.0'); continue
-            details = self.instrument_details_map.get(symbol); price_tuple = current_prices_map.get(symbol)
-            if not details or not price_tuple: self.atr_values_qc[slot_idx] = Decimal('0.0'); continue
-            bid_qc, ask_qc = price_tuple
-            if bid_qc <=0 or ask_qc <=0 or ask_qc < bid_qc: self.atr_values_qc[slot_idx] = details.pip_value_in_quote_currency_per_unit * Decimal('10'); continue
-            spread = ask_qc - bid_qc; self.atr_values_qc[slot_idx] = max(spread * Decimal('5'), details.pip_value_in_quote_currency_per_unit * Decimal('10'))
+        try:
+            # Check for an empty or invalid dataset early.
+            if len(self.dataset) == 0 or not hasattr(self.dataset, 'symbols') or not self.dataset.symbols:
+                logger.warning("Dataset is empty or has no symbols. Returning empty price map.")
+                return {}, pd.Timestamp.now(tz=timezone.utc)
 
-    def _update_stop_loss_prices(self, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
-        sl_multiplier = self.stop_loss_atr_multiplier
-        for slot_idx in range(self.num_env_slots):
-            units = self.current_positions_units[slot_idx]
-            if abs(units) > Decimal('1e-9'):
-                avg_entry = self.avg_entry_prices_qc[slot_idx]; atr = self.atr_values_qc[slot_idx]
-                if atr <= Decimal(0): self.stop_loss_prices_qc[slot_idx] = Decimal('0.0'); continue
-                if units > 0: self.stop_loss_prices_qc[slot_idx] = avg_entry - (atr * sl_multiplier)
-                else: self.stop_loss_prices_qc[slot_idx] = avg_entry + (atr * sl_multiplier)
-            else: self.stop_loss_prices_qc[slot_idx] = Decimal('0.0')
+            # Ensure the index is always within the valid range [0, len(dataset)-1]
+            safe_step_index = min(max(0, self.current_step_in_dataset), len(self.dataset) - 1)
 
-    def _update_portfolio_and_equity_value(self, current_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
-        self.equity_ac = self.cash
-        for slot_idx in range(self.num_env_slots):
-            self.unrealized_pnl_ac[slot_idx] = Decimal('0.0')
-            units = self.current_positions_units[slot_idx]
-            if abs(units) > Decimal('1e-9'):
-                symbol = self.slot_to_symbol_map.get(slot_idx); avg_entry_qc = self.avg_entry_prices_qc[slot_idx]
-                if not symbol or not avg_entry_qc or avg_entry_qc <= Decimal('0'): continue # avg_entry_qc 在平倉後為0
-                details = self.instrument_details_map[symbol]; price_tuple = current_prices_map.get(symbol)
-                if not price_tuple: continue
-                current_bid_qc, current_ask_qc = price_tuple   # 提取買價和賣價
-                current_price_qc = current_bid_qc if units > 0 else current_ask_qc # Bid for long, Ask for short
-                if current_price_qc <= Decimal('0'): continue
-                # Oanda精確損益計算（考慮點差成本）
-                if units > 0:  # 多頭倉位
-                    pnl_per_unit_qc = current_bid_qc - avg_entry_qc  # 平倉用Bid價
-                else:  # 空頭倉位
-                    pnl_per_unit_qc = avg_entry_qc - current_ask_qc  # 平倉用Ask價
+            # Retrieve the data sample and timestamp
+            dataset_sample = self.dataset[safe_step_index]
+            current_timestamp = self.dataset.aligned_timestamps[safe_step_index]
+
+            # Shape of raw_prices is expected to be (num_symbols, timesteps, num_raw_features)
+            # We take the prices from the very last timestep in the history window.
+            latest_raw_prices_np = dataset_sample["raw_prices"][:, -1, :].numpy().astype(np.float64)
+            
+            prices_map: Dict[str, Tuple[Decimal, Decimal]] = {}
+            
+            # raw_price_columns_ordered: ['bid_close', 'ask_close', 'bid_high', 'bid_low', 'ask_high', 'ask_low']
+            # We need bid_close (index 0) and ask_close (index 1)
+            for i, symbol_name in enumerate(self.dataset.symbols):
+                bid_price = Decimal(str(latest_raw_prices_np[i, 0]))
+                ask_price = Decimal(str(latest_raw_prices_np[i, 1]))
                 
-                # 點差成本（Oanda實際收取） - 使用已定義的變量
-                spread_cost = (current_ask_qc - current_bid_qc) * abs(units) * Decimal('0.5')  # 50%點差成本
-                total_pnl_qc = pnl_per_unit_qc * abs(units) - spread_cost
-                pnl_in_ac = total_pnl_qc
-                if details.quote_currency != ACCOUNT_CURRENCY:
-                    # 修正：使用内部方法獲取匯率
-                    exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, current_prices_map)
-                    pnl_in_ac = total_pnl_qc * exchange_rate_qc_to_ac
-                self.unrealized_pnl_ac[slot_idx] = pnl_in_ac
-                self.equity_ac += pnl_in_ac
-        self.portfolio_value_ac = self.equity_ac # 淨值等於權益
+                if bid_price > 0 and ask_price > 0 and ask_price >= bid_price:
+                    prices_map[symbol_name] = (bid_price, ask_price)
+                else:
+                    # Assign a default of (0, 0) for invalid prices and log it for debugging.
+                    prices_map[symbol_name] = (Decimal('0.0'), Decimal('0.0'))
+                    logger.debug(f"Symbol {symbol_name} at step {self.current_step_in_dataset} (safe_index: {safe_step_index}) has invalid prices: bid={latest_raw_prices_np[i, 0]}, ask={latest_raw_prices_np[i, 1]}")
 
-    def _execute_trade(self, slot_idx: int, units_to_trade: Decimal, trade_price_qc: Decimal, current_timestamp: pd.Timestamp, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Tuple[Decimal, Decimal]:
-        symbol = self.slot_to_symbol_map[slot_idx]
-        if not symbol:
-            logger.error(f"嘗試在無效槽位 {slot_idx} 執行交易。")
-            return Decimal('0.0'), Decimal('0.0')
+            return prices_map, current_timestamp
 
-        details = self.instrument_details_map[symbol]
-        current_units = self.current_positions_units[slot_idx]
-        avg_entry_qc = self.avg_entry_prices_qc[slot_idx]
-        commission_ac = Decimal('0.0')
-        realized_pnl_ac = Decimal('0.0')
-        trade_type = "UNKNOWN"
-        
-        # 計算交易名義價值 (報價貨幣和賬戶貨幣)
-        nominal_value_qc = abs(units_to_trade) * trade_price_qc
-        exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
-        if exchange_rate_qc_to_ac <= Decimal('0'):
-            logger.warning(f"無法獲取 {details.quote_currency} 到 {ACCOUNT_CURRENCY} 的匯率，取消交易。")
-            return Decimal('0.0'), Decimal('0.0')
-        nominal_value_ac = nominal_value_qc * exchange_rate_qc_to_ac
-
-        # 計算手續費並從 cash 中扣除
-        commission_ac = nominal_value_ac * self.commission_percentage
-        if self.cash < commission_ac:
-            logger.warning(f"現金不足支付手續費 {commission_ac:.2f} AC，取消交易。")
-            return Decimal('0.0'), Decimal('0.0')
-        self.cash -= commission_ac
-
-        # 處理開倉/平倉/加倉/減倉/反向開倉
-        new_units = current_units + units_to_trade
-
-        if abs(current_units) < Decimal('1e-9'): # 當前無倉位
-            trade_type = "OPEN"
-            self.avg_entry_prices_qc[slot_idx] = trade_price_qc
-        elif current_units.copy_sign(Decimal('1')) == units_to_trade.copy_sign(Decimal('1')): # 同向加倉
-            trade_type = "ADD"
-            # 重新計算加權平均價
-            total_value_at_old_avg = current_units * avg_entry_qc
-            total_value_at_new_trade = units_to_trade * trade_price_qc
-            
-            # 防止除零錯誤：檢查new_units是否為零
-            if abs(new_units) > Decimal('1e-9'):
-                self.avg_entry_prices_qc[slot_idx] = (total_value_at_old_avg + total_value_at_new_trade) / new_units
-            else:
-                # 如果new_units接近零，保持原有的平均入場價格
-                logger.warning(f"new_units接近零 ({new_units})，保持原有平均入場價格: {self.avg_entry_prices_qc[slot_idx]}")
-        else: # 反向交易 (平倉或反向開倉)
-            if abs(units_to_trade) >= abs(current_units): # 完全平倉或反向開倉
-                trade_type = "CLOSE_AND_REVERSE" if abs(units_to_trade) > abs(current_units) else "CLOSE"
-                # 計算已實現盈虧
-                pnl_per_unit_qc = (trade_price_qc - avg_entry_qc) if current_units > 0 else (avg_entry_qc - trade_price_qc)
-                realized_pnl_qc = pnl_per_unit_qc * abs(current_units)
-                realized_pnl_ac = realized_pnl_qc * exchange_rate_qc_to_ac
-                self.cash += realized_pnl_ac
-                if abs(new_units) < Decimal('1e-9'): # 完全平倉
-                    self.avg_entry_prices_qc[slot_idx] = Decimal('0.0')
-                else: # 反向開倉
-                    self.avg_entry_prices_qc[slot_idx] = trade_price_qc
-            else: # 部分平倉
-                trade_type = "REDUCE"
-                # 計算已實現盈虧 (只針對平倉部分)
-                pnl_per_unit_qc = (trade_price_qc - avg_entry_qc) if current_units > 0 else (avg_entry_qc - trade_price_qc)
-                realized_pnl_qc = pnl_per_unit_qc * abs(units_to_trade)
-                realized_pnl_ac = realized_pnl_qc * exchange_rate_qc_to_ac
-                self.cash += realized_pnl_ac
-                # 平均入場價不變
-
-        self.current_positions_units[slot_idx] = new_units
-
-        # 更新該倉位的已用保證金 (根據新的持倉單位、實際交易價格和保證金率)
-        current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
-        
-        # 修復：使用實際交易價格而非中間價計算保證金
-        if abs(new_units) > Decimal('1e-9') and trade_price_qc > Decimal('0'):            # 使用Oanda官方保證金計算公式 (符合官方規範)
-            # 公式: Margin_Used = Margin_Rate × Trade_Quantity × Instrument_To_Home_Currency_Conversion_Rate
-            # 其中保證金率 = 1 / 槓桿比例 (例如0.03333對應30倍槓桿)
-            margin_required_qc = abs(new_units) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
-            
-            # 轉換為賬戶貨幣 (Oanda官方標準：不需要額外的波動性調整或安全緩衝)
-            self.margin_used_per_position_ac[slot_idx] = margin_required_qc * exchange_rate_qc_to_ac
-        else:
-            self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
-
-        # 記錄到 trade_log
-        trade_direction = "LONG" if units_to_trade > 0 else "SHORT"
-        position_direction = "LONG" if new_units > 0 else ("SHORT" if new_units < 0 else "FLAT")
-        self.trade_log.append({
-            "step": self.episode_step_count,
-            "timestamp": current_timestamp.isoformat(),
-            "symbol": symbol,
-            "trade_type": trade_type,
-            "trade_direction": trade_direction,
-            "position_direction": position_direction,
-            "units_traded": float(units_to_trade),
-            "trade_price_qc": float(trade_price_qc),
-            "trade_price_ac": float(trade_price_qc * exchange_rate_qc_to_ac), # 這裡的交易價格是QC，轉換為AC
-            "realized_pnl_ac": float(realized_pnl_ac),
-            "commission_ac": float(commission_ac),
-            "current_position_units": float(new_units),
-            "avg_entry_price_qc": float(self.avg_entry_prices_qc[slot_idx]),
-            "margin_used_ac": float(self.margin_used_per_position_ac[slot_idx]),
-            "cash_after_trade": float(self.cash),
-            "equity_after_trade": float(self.equity_ac + realized_pnl_ac - commission_ac) # 這裡的equity_after_trade是預估值，最終會在_update_portfolio_and_equity_value更新
-        })
-        self.last_trade_step_per_slot[slot_idx] = self.episode_step_count
-          # Log trade to shared data manager for real-time monitoring
-        if self.shared_data_manager is not None:
-            # Calculate global training step
-            global_training_step = self.training_step_offset + self.episode_step_count
-            
-            # Determine action for shared data manager with detailed format: [Long/Short] - [Trade Type]
-            position_direction = "Long" if units_to_trade > 0 else "Short"
-            
-            # Map trade_type to user-friendly terms
-            trade_type_mapping = {
-                "OPEN": "Open",
-                "ADD": "Add", 
-                "REDUCE": "Reduce",
-                "CLOSE": "Close",
-                "CLOSE_AND_REVERSE": "Close & Reverse"
-            }
-            trade_action = trade_type_mapping.get(trade_type, trade_type)
-            
-            action_str = f"{position_direction} - {trade_action}"
-            
-            # Convert price to account currency for consistency
-            trade_price_ac = float(trade_price_qc * exchange_rate_qc_to_ac)
-            
-            # Log trade with training step as primary time axis
-            self.shared_data_manager.add_trade_record(
-                symbol=symbol,
-                action=action_str,
-                price=trade_price_ac,  # Price in account currency
-                quantity=float(abs(units_to_trade)),
-                profit_loss=float(realized_pnl_ac),
-                training_step=global_training_step,  # Primary time axis
-                timestamp=current_timestamp.to_pydatetime()  # Auxiliary time information
-            )
-        
-        logger.info(f"執行交易: {symbol}, 類型: {trade_type}, 單位: {units_to_trade:.2f}, 價格: {trade_price_qc:.5f} QC, 手續費: {commission_ac:.2f} AC, 實現盈虧: {realized_pnl_ac:.2f} AC, 現金: {self.cash:.2f} AC, 新倉位: {new_units:.2f}")
-        return units_to_trade, commission_ac
-
-    def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
-        _step_time_start = time.perf_counter()
-        logger.debug(f"--- Step {self.episode_step_count} Start ---")
-
-        self.episode_step_count += 1
-        
-        _t_get_prices = time.perf_counter()
-        all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
-        logger.debug(f"Step {self.episode_step_count}: _get_current_raw_prices_for_all_dataset_symbols took {time.perf_counter() - _t_get_prices:.6f}s")
-        
-        # 更新價格歷史
-        for symbol in self.active_symbols_for_episode:
-            if symbol in all_prices_map:
-                bid, ask = all_prices_map[symbol]
-                mid_price = (bid + ask) / Decimal('2')
-                self.price_history[symbol].append(mid_price)
-        
-        prev_portfolio_value_ac = self.portfolio_value_ac
-        
-        _t_update_atr_sl = time.perf_counter()
-        self._update_atr_values(all_prices_map); self._update_stop_loss_prices(all_prices_map)
-        logger.debug(f"Step {self.episode_step_count}: _update_atr_values & _update_stop_loss_prices took {time.perf_counter() - _t_update_atr_sl:.6f}s")
-        
-        total_commission_this_step_ac = Decimal('0.0')
-
-        # 1. 處理止損
-        _t_apply_sl = time.perf_counter()
-        commission_from_sl = self._apply_stop_loss(all_prices_map, current_timestamp)
-        total_commission_this_step_ac += commission_from_sl
-        logger.debug(f"Step {self.episode_step_count}: _apply_stop_loss took {time.perf_counter() - _t_apply_sl:.6f}s, commission: {commission_from_sl}")
-
-        # 2. 處理保證金追繳 (如果止損後仍觸發)
-        _t_handle_mc = time.perf_counter()
-        commission_from_mc = self._handle_margin_call(all_prices_map, current_timestamp)
-        total_commission_this_step_ac += commission_from_mc
-        logger.debug(f"Step {self.episode_step_count}: _handle_margin_call took {time.perf_counter() - _t_handle_mc:.6f}s, commission: {commission_from_mc}")
-
-        # 3. 執行智能體動作
-        _t_agent_actions_start = time.perf_counter()
-        for slot_idx in self.current_episode_tradable_slot_indices:
-            _t_slot_action_start = time.perf_counter()
-            symbol = self.slot_to_symbol_map.get(slot_idx)
-            if not symbol: continue
-
-            details = self.instrument_info_manager.get_details(symbol)
-            current_units = self.current_positions_units[slot_idx]
-            current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
-            
-            if current_bid_qc <= Decimal('0') or current_ask_qc <= Decimal('0'):
-                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid current prices.")
-                continue            # 計算目標單位數 (target_units)
-            risk_per_unit_qc = self.atr_values_qc[slot_idx] * self.stop_loss_atr_multiplier
-            if risk_per_unit_qc <= Decimal('0'):
-                logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to zero ATR risk.")
-                continue
-
-            exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
-            if exchange_rate_qc_to_ac <= Decimal('0'):
-                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Cannot get exchange rate for {details.quote_currency} to {ACCOUNT_CURRENCY}, skipping trade.")
-                continue
-            
-            risk_per_unit_ac = risk_per_unit_qc * exchange_rate_qc_to_ac
-            if risk_per_unit_ac <= Decimal('0'):
-                logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to zero risk per unit in AC.")
-                continue
-
-            max_risk_capital = self.equity_ac * self.max_account_risk_per_trade
-            max_units_by_risk = (max_risk_capital / risk_per_unit_ac).quantize(Decimal('1'), rounding=ROUND_DOWN)
-
-            target_position_ratio = Decimal(str(action[slot_idx]))
-            
-            # 🔧 修復關鍵風險管理缺陷：先應用最大持倉限制，再應用動作值
-            # 原來：target_nominal_value_ac = abs(target_position_ratio) * self.equity_ac
-            # 修復後：先限制最大持倉比例，再應用SAC動作比例
-            max_position_value_ac = self.equity_ac * self.max_position_size_percentage
-            target_nominal_value_ac = abs(target_position_ratio) * max_position_value_ac
-            
-            current_mid_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2')
-
-            if current_mid_price_qc <= Decimal('0'):
-                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid mid price.")
-                continue
-
-            # 計算目標交易單位數，應用多層風險控制
-            target_units_raw = (target_nominal_value_ac / (current_mid_price_qc * exchange_rate_qc_to_ac)).quantize(Decimal('1e-9'), rounding=ROUND_HALF_UP)
-            
-            # 應用風險管理層次：
-            # 1. 最大持倉限制 (已在 target_nominal_value_ac 中應用)
-            # 2. 單筆交易風險限制 (ATR-based)
-            # 3. 最終取最小值確保安全
-            target_units_final = min(target_units_raw, max_units_by_risk)
-            target_units_final = target_units_final.copy_sign(target_position_ratio)
-            target_units = details.round_units(target_units_final)
-            units_to_trade = target_units - current_units
-            
-            # Oanda倉位控制規則
-            min_size = details.minimum_trade_size
-            max_size = details.max_trade_units if details.max_trade_units is not None else Decimal('1000000')  # 修正屬性名並處理None情況
-            
-            if abs(units_to_trade) < min_size:
-                logger.debug(f"交易單位 {units_to_trade} 低於最小值 {min_size}，取消交易")
-                continue
-                
-            if abs(units_to_trade) > max_size:
-                logger.info(f"交易單位 {units_to_trade} 超過最大值 {max_size}，自動調整")
-                units_to_trade = max_size.copy_sign(units_to_trade)
-                
-            # 確定交易價格（用於保證金計算）
-            trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
-            if trade_price_qc <= Decimal('0'):
-                logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Skipping trade due to invalid trade price.")
-                continue            # 精確保證金檢查（Oanda官方標準）
-            # 使用Oanda官方保證金計算公式 (符合官方規範)
-            margin_required_qc = abs(units_to_trade) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
-            # 轉換為賬戶貨幣 (不需要額外的波動性調整)
-            margin_required_ac = margin_required_qc * exchange_rate_qc_to_ac
-            
-            if margin_required_ac > self.cash * Decimal('0.9'):  # 保留10%現金緩衝
-                logger.warning(f"保證金不足: 需要{margin_required_ac:.2f} AC, 可用{self.cash:.2f} AC")
-                continue
-            
-            _t_margin_check_start = time.perf_counter()
-            projected_new_units = current_units + units_to_trade
-            projected_margin_required_qc = abs(projected_new_units) * details.contract_size * trade_price_qc * Decimal(str(details.margin_rate))
-            projected_margin_required_ac = projected_margin_required_qc * exchange_rate_qc_to_ac
-            current_margin_for_slot_ac = self.margin_used_per_position_ac[slot_idx]
-            projected_total_margin_used_ac = self.total_margin_used_ac - current_margin_for_slot_ac + projected_margin_required_ac
-            # projected_commission_ac = abs(units_to_trade) * trade_price_qc * exchange_rate_qc_to_ac * self.commission_percentage # Already calculated in _execute_trade
-
-            if units_to_trade.copy_sign(Decimal('1')) == projected_new_units.copy_sign(Decimal('1')) or abs(current_units) < Decimal('1e-9'):
-                margin_safety_buffer = Decimal('0.1')
-                safe_margin_threshold = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) + margin_safety_buffer
-                
-                if projected_total_margin_used_ac > self.equity_ac * (Decimal('1.0') - safe_margin_threshold):
-                    logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Insufficient margin for {units_to_trade:.2f} units. Projected total margin {projected_total_margin_used_ac:.2f} AC, Equity {self.equity_ac:.2f} AC. Reducing trade size.")
-                    max_affordable_margin_ac = self.equity_ac * (Decimal('1.0') - safe_margin_threshold)
-                    if max_affordable_margin_ac <= Decimal('0'):
-                        logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Cannot afford any margin, cancelling trade.")
-                        continue
-                    
-                    max_units_by_margin_ac = (max_affordable_margin_ac / (trade_price_qc * Decimal(str(details.margin_rate)) * exchange_rate_qc_to_ac)).quantize(Decimal('1'), rounding=ROUND_DOWN)
-                    
-                    if abs(projected_new_units) > max_units_by_margin_ac:
-                        if abs(current_units) < Decimal('1e-9'):
-                            units_to_trade = max_units_by_margin_ac.copy_sign(units_to_trade)
-                        else:
-                            units_can_add = max_units_by_margin_ac - abs(current_units)
-                            units_to_trade = units_can_add.copy_sign(units_to_trade)
-                        
-                        units_to_trade = details.round_units(units_to_trade)
-                        if abs(units_to_trade) < details.minimum_trade_size:
-                            logger.warning(f"Step {self.episode_step_count} Symbol {symbol}: Reduced units {units_to_trade:.2f} less than min trade size, cancelling trade.")
-                            continue
-                        logger.info(f"Step {self.episode_step_count} Symbol {symbol}: Trade size reduced to {units_to_trade:.2f} due to margin requirements.")
-            logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Margin check took {time.perf_counter() - _t_margin_check_start:.6f}s")
-
-            if abs(units_to_trade) > Decimal('0'):
-                _t_execute_trade_start = time.perf_counter()
-                traded_units, commission = self._execute_trade(slot_idx, units_to_trade, trade_price_qc, current_timestamp, all_prices_map)
-                total_commission_this_step_ac += commission
-                logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: _execute_trade for {traded_units} units took {time.perf_counter() - _t_execute_trade_start:.6f}s")
-            # else:
-                # logger.debug(f"Step {self.episode_step_count} Slot {slot_idx} ({symbol}): No trade needed.")
-            logger.debug(f"Step {self.episode_step_count} Symbol {symbol}: Action processing for slot took {time.perf_counter() - _t_slot_action_start:.6f}s")
-        logger.debug(f"Step {self.episode_step_count}: Agent actions loop took {time.perf_counter() - _t_agent_actions_start:.6f}s")
-
-        _t_update_portfolio_final = time.perf_counter()
-        self.total_margin_used_ac = sum(self.margin_used_per_position_ac) # Recalculate after all trades in loop
-        self._update_portfolio_and_equity_value(all_prices_map)
-        self.portfolio_value_history.append(float(self.portfolio_value_ac))
-        logger.debug(f"Step {self.episode_step_count}: Final _update_portfolio_and_equity_value took {time.perf_counter() - _t_update_portfolio_final:.6f}s")
-        
-        _t_calc_reward = time.perf_counter()
-        reward = self._calculate_reward(prev_portfolio_value_ac, total_commission_this_step_ac)
-        logger.debug(f"Step {self.episode_step_count}: _calculate_reward took {time.perf_counter() - _t_calc_reward:.6f}s")
-        
-        # Get the next observation FIRST
-        _t_get_obs_early = time.perf_counter()
-        next_observation = self._get_observation()
-        logger.debug(f"Step {self.episode_step_count}: Early _get_observation took {time.perf_counter() - _t_get_obs_early:.6f}s")
-
-        # Corrected check for NaN/Inf in observation components.
-        for key, obs_component_value in next_observation.items():
-            if isinstance(obs_component_value, np.ndarray) and np.issubdtype(obs_component_value.dtype, np.floating):
-                if np.any(np.isnan(obs_component_value)) or np.any(np.isinf(obs_component_value)):
-                    logger.error(f"NaN or Inf detected in floating-point observation component '{key}' within step method. Data sample (first 100 chars): {str(obs_component_value)[:100]}")
-                    # Optional: Implement imputation here if desired
-            # No explicit check for non-float/non-bool numpy arrays with np.isnan/isinf, as these functions
-            # would typically raise an error or return False for integer arrays.
-            # Boolean arrays don't carry NaN/Inf in the same way.
-
-        # Check for termination or truncation
-        self.current_step_in_dataset += 1
-        
-        _t_check_term = time.perf_counter()
-        terminated, truncated = self._check_termination_truncation()
-        logger.debug(f"Step {self.episode_step_count}: _check_termination_truncation took {time.perf_counter() - _t_check_term:.6f}s")
-          # next_observation was already fetched, no need to call _get_observation() again here
-        # _t_get_obs = time.perf_counter()
-        # next_observation = self._get_observation() # THIS LINE IS REMOVED / COMMENTED OUT
-        info = self._get_info()
-        info["reward_this_step"] = reward
-        logger.debug(f"--- Step {self.episode_step_count} End. Total time: {time.perf_counter() - _step_time_start:.6f}s ---")
-        return next_observation, reward, terminated, truncated, info
-
-    def _calculate_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
-        """
-        計算強化學習獎勵函數，支援三階段漸進式、增強版與傳統獎勵計算
-        
-        優先級順序：
-        1. 漸進式獎勵計算器（三階段自適應獎勵系統）
-        2. 增強版獎勵計算器（固定增強獎勵機制）
-        3. 傳統風險調整獎勵計算
-        """
-        
-        # 優先使用漸進式獎勵計算器（如果可用且啟用）
-        if self.use_progressive_rewards and self.progressive_reward_calculator is not None:
-            try:
-                # 準備持倉數據，格式化為 ProgressiveRewardCalculator 所需的格式
-                positions_data = {'positions': {}}
-                  # 轉換持倉資料格式
-                for slot_idx in self.current_episode_tradable_slot_indices:
-                    if abs(self.current_positions_units[slot_idx]) > Decimal('1e-9'):
-                        symbol = self.slot_to_symbol_map[slot_idx]
-                        if symbol is not None:
-                            positions_data['positions'][symbol] = {
-                                'units': self.current_positions_units[slot_idx],
-                                'unrealized_pnl': self.unrealized_pnl_ac[slot_idx],
-                                'hold_duration': self.episode_step_count - self.last_trade_step_per_slot[slot_idx] 
-                                               if self.last_trade_step_per_slot[slot_idx] >= 0 
-                                               else 0
-                            }
-                
-                # 準備市場數據
-                market_data = {
-                    'atr_values': self.atr_values_qc,
-                    'atr_penalty_threshold': self.atr_penalty_threshold,
-                    'current_step': self.episode_step_count
-                }
-                  # 調用漸進式獎勵計算
-                progressive_reward_info = self.progressive_reward_calculator.calculate_reward(
-                    current_portfolio_value=self.portfolio_value_ac,
-                    prev_portfolio_value=prev_portfolio_value_ac,
-                    commission_this_step=commission_this_step_ac,
-                    trade_log=self.trade_log,
-                    positions_data=positions_data,
-                    market_data=market_data,
-                    episode_step=self.episode_step_count
-                )
-                
-                # 提取總獎勵值
-                progressive_reward = progressive_reward_info['total_reward']
-                  # 記錄漸進式獎勵組件
-                if not hasattr(self, 'progressive_reward_components_history'):
-                    self.progressive_reward_components_history = []
-                
-                # 直接使用返回的獎勵信息
-                self.progressive_reward_components_history.append(progressive_reward_info)
-                
-                # 記錄階段變化
-                current_stage = self.progressive_reward_calculator.get_current_stage()
-                if not hasattr(self, 'last_reward_stage'):
-                    self.last_reward_stage = current_stage
-                elif self.last_reward_stage != current_stage:
-                    logger.info(f"獎勵系統階段切換 at step {self.episode_step_count}: {self.last_reward_stage} -> {current_stage}")
-                    self.last_reward_stage = current_stage
-                
-                return progressive_reward
-                
-            except Exception as e:
-                logger.error(f"Progressive reward calculation failed: {e}. Falling back to enhanced calculation.")
-                # 如果漸進式計算失敗，回退到增強版計算
-                self.use_progressive_rewards = False
-        
-        # 回退到增強版獎勵計算器（如果可用且啟用）
-        if self.use_enhanced_rewards and self.enhanced_reward_calculator is not None:
-            try:
-                # 準備增強版獎勵計算所需的數據
-                reward_data = {
-                    'current_portfolio_value': self.portfolio_value_ac,
-                    'previous_portfolio_value': prev_portfolio_value_ac,
-                    'commission_this_step': commission_this_step_ac,
-                    'returns_history': self.returns_history,
-                    'unrealized_pnl_per_slot': self.unrealized_pnl_ac,
-                    'current_positions': self.current_positions_units,
-                    'last_trade_steps': self.last_trade_step_per_slot,
-                    'current_step': self.episode_step_count,
-                    'max_episode_steps': self.max_episode_steps,
-                    'peak_portfolio_value': self.peak_portfolio_value_episode,
-                    'max_drawdown': self.max_drawdown_episode,
-                    'equity': self.equity_ac,
-                    'total_margin_used': self.total_margin_used_ac,
-                    'trade_log': self.trade_log,
-                    'active_slot_indices': self.current_episode_tradable_slot_indices,
-                    'atr_values': self.atr_values_qc,
-                    'atr_penalty_threshold': self.atr_penalty_threshold
-                }
-                
-                enhanced_reward = self.enhanced_reward_calculator.calculate_reward(reward_data)
-                
-                # 記錄增強版獎勵組件（如果有的話）
-                if hasattr(self.enhanced_reward_calculator, 'last_reward_components'):
-                    if not hasattr(self, 'enhanced_reward_components_history'):
-                        self.enhanced_reward_components_history = []
-                    
-                    self.enhanced_reward_components_history.append({
-                        'step': self.episode_step_count,
-                        **self.enhanced_reward_calculator.last_reward_components
-                    })
-                
-                return enhanced_reward
-                
-            except Exception as e:
-                logger.error(f"Enhanced reward calculation failed: {e}. Falling back to standard calculation.")
-                # 如果增強版計算失敗，回退到傳統計算
-                self.use_enhanced_rewards = False
-        
-        # 傳統獎勵計算（改進版）
-        return self._calculate_standard_reward(prev_portfolio_value_ac, commission_this_step_ac)
-    
-    def _calculate_standard_reward(self, prev_portfolio_value_ac: Decimal, commission_this_step_ac: Decimal) -> float:
-        """
-        傳統獎勵計算方法，包含一些改進的參數調整
-        
-        核心理念：
-        1. 風險控制優先：重視風險調整後的收益而非絕對收益
-        2. 穩定淨值增長：獎勵平穩的收益，懲罰過度波動
-        3. 讓利潤奔跑，快速止損：實現交易原則
-        4. 避免人為限制，讓模型探索更優策略
-        """
-        
-        # === 1. 基礎收益計算 ===
-        log_return = Decimal('0.0')
-        if prev_portfolio_value_ac > Decimal('0'): 
-            log_return = (self.portfolio_value_ac / prev_portfolio_value_ac).ln()
-        
-        # 更新收益歷史序列（用於風險調整計算）- 使用更大的窗口
-        self.returns_history.append(log_return)
-        enhanced_window_size = 50  # 增加窗口大小以提高穩定性
-        if len(self.returns_history) > enhanced_window_size:
-            self.returns_history.pop(0)
-        
-        # === 2. 風險調整後收益（改進的夏普比率） ===
-        risk_adjusted_reward = Decimal('0.0')
-        if len(self.returns_history) >= 10:  # 減少最小數據點要求
-            returns_array = [float(r) for r in self.returns_history]
-            mean_return = Decimal(str(sum(returns_array) / len(returns_array)))
-            
-            # 計算標準差
-            variance = sum([(Decimal(str(r)) - mean_return) ** 2 for r in returns_array]) / Decimal(str(len(returns_array)))
-            std_return = variance.sqrt() if variance > Decimal('0') else Decimal('1e-6')
-            
-            # 風險調整收益 = 平均收益 / 標準差（簡化夏普比率）
-            risk_adjusted_return = mean_return / (std_return + Decimal('1e-6'))
-            # 使用更積極的風險調整因子
-            enhanced_risk_factor = Decimal('1.2')  # 從0.5提升到1.2
-            risk_adjusted_reward = enhanced_risk_factor * risk_adjusted_return
-        else:
-            # 數據不足時使用基礎對數收益
-            risk_adjusted_reward = self.reward_config["portfolio_log_return_factor"] * log_return
-        
-        reward_val = risk_adjusted_reward
-        
-        # === 3. 手續費懲罰（鼓勵減少過度交易） - 調整為動態懲罰 ===
-        # 根據近期收益調整手續費懲罰強度
-        recent_performance = Decimal('1.0')
-        if len(self.returns_history) >= 5:
-            recent_returns = self.returns_history[-5:]
-            recent_performance = max(Decimal('0.5'), sum(recent_returns) / Decimal('5') + Decimal('1.0'))
-        
-        dynamic_commission_factor = self.reward_config["commission_penalty_factor"] / recent_performance
-        commission_penalty = dynamic_commission_factor * (commission_this_step_ac / self.initial_capital)
-        reward_val -= commission_penalty
-        
-        # === 4. 最大回撤懲罰（強化風險控制） - 調整懲罰強度 ===
-        self.peak_portfolio_value_episode = max(self.peak_portfolio_value_episode, self.portfolio_value_ac)
-        current_dd = (self.peak_portfolio_value_episode - self.portfolio_value_ac) / (self.peak_portfolio_value_episode + Decimal('1e-9'))
-        
-        enhanced_dd_factor = Decimal('1.5')  # 從2.0降低到1.5，減少過度懲罰
-        if current_dd > self.max_drawdown_episode:
-            # 新的最大回撤發生時給予較重懲罰
-            dd_penalty = enhanced_dd_factor * (current_dd - self.max_drawdown_episode)
-            reward_val -= dd_penalty
-            self.max_drawdown_episode = current_dd
-        elif current_dd > Decimal('0'):
-            # 持續回撤時給予輕微懲罰
-            reward_val -= enhanced_dd_factor * current_dd * Decimal('0.05')  # 從0.1降低到0.05
-        
-        # === 5. 持倉時間獎勵機制（讓利潤奔跑） - 增強獎勵 ===
-        position_hold_reward = Decimal('0.0')
-        for slot_idx in self.current_episode_tradable_slot_indices:
-            units = self.current_positions_units[slot_idx]
-            if abs(units) > Decimal('1e-9'):  # 有持倉
-                unrealized_pnl = self.unrealized_pnl_ac[slot_idx]
-                last_trade_step = self.last_trade_step_per_slot[slot_idx]
-                
-                if last_trade_step >= 0:
-                    hold_duration = self.episode_step_count - last_trade_step
-                    
-                    # 如果持倉時間較長且盈利，給予獎勵（讓利潤奔跑）
-                    if unrealized_pnl > Decimal('0') and hold_duration > 3:  # 降低持倉要求
-                        duration_factor = min(Decimal(str(hold_duration)) / Decimal('15'), Decimal('3.0'))  # 調整因子
-                        profit_ratio = unrealized_pnl / self.initial_capital
-                        enhanced_profit_bonus = Decimal('0.3')  # 從0.1提升到0.3
-                        position_hold_reward += enhanced_profit_bonus * profit_ratio * duration_factor
-                    
-                    # 如果持倉時間較短但虧損較大，輕微懲罰（快速止損相關）
-                    elif unrealized_pnl < Decimal('0') and hold_duration > 8:  # 稍微降低止損要求
-                        loss_ratio = abs(unrealized_pnl) / self.initial_capital
-                        if loss_ratio > Decimal('0.003'):  # 從0.005降低到0.003
-                            reduced_hold_penalty = Decimal('0.0005')  # 從0.001減半
-                            position_hold_reward -= reduced_hold_penalty * loss_ratio
-        
-        reward_val += position_hold_reward
-        
-        # === 6. ATR波動性調整（控制過度風險） ===
-        volatility_penalty = Decimal('0.0')
-        active_positions = 0
-        total_atr_ratio = Decimal('0.0')
-        
-        for slot_idx in self.current_episode_tradable_slot_indices:
-            units = self.current_positions_units[slot_idx]
-            if abs(units) > Decimal('1e-9'):
-                active_positions += 1
-                symbol = self.slot_to_symbol_map.get(slot_idx)
-                if symbol:
-                    atr_qc = self.atr_values_qc[slot_idx]
-                    details = self.instrument_details_map[symbol]
-                    avg_entry = self.avg_entry_prices_qc[slot_idx]
-                    
-                    if atr_qc > Decimal('0') and avg_entry > Decimal('0'):
-                        atr_ratio = atr_qc / avg_entry  # ATR相對於入場價格的比例
-                        total_atr_ratio += atr_ratio
-        
-        if active_positions > 0:
-            avg_atr_ratio = total_atr_ratio / Decimal(str(active_positions))
-            if avg_atr_ratio > self.atr_penalty_threshold:
-                # 當平均ATR比例過高時（市場過於波動），給予懲罰
-                volatility_penalty = enhanced_risk_factor * (avg_atr_ratio - self.atr_penalty_threshold) * Decimal('0.3')  # 從0.5降低到0.3
-                reward_val -= volatility_penalty
-          # === 7. 保證金追繳懲罰（強化風險管理） ===
-        if self.total_margin_used_ac > Decimal('0'):
-            margin_level = self.equity_ac / self.total_margin_used_ac
-            # 提高警告水平到70%，給予更多緩衝時間
-            margin_warning_level = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL)) * Decimal('1.4')  # 70%水平開始警告
-            
-            if margin_level < margin_warning_level:
-                # 使用更平滑的懲罰曲線
-                margin_shortage = margin_warning_level - margin_level
-                # 懲罰隨著接近強平水平而急劇增加
-                margin_risk_penalty = margin_shortage * margin_shortage * Decimal('0.1')  # 平方懲罰，更平滑
-                reward_val -= margin_risk_penalty
-        
-        # === 記錄詳細信息用於監控 ===
-        if not hasattr(self, 'reward_components_history'):
-            self.reward_components_history = []
-        
-        self.reward_components_history.append({
-            'step': self.episode_step_count,
-            'risk_adjusted_reward': float(risk_adjusted_reward),
-            'commission_penalty': float(commission_penalty),
-            'position_hold_reward': float(position_hold_reward),
-            'volatility_penalty': float(volatility_penalty),
-            'total_reward': float(reward_val),
-            'reward_type': 'standard_enhanced'
-        })
-        
-        return float(reward_val)
-
-    def _apply_stop_loss(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], current_timestamp: pd.Timestamp) -> Decimal:
-        """
-        檢查並執行止損。
-        返回因止損而產生的總手續費。
-        """
-        commission_from_sl = Decimal('0.0')
-        for slot_idx in self.current_episode_tradable_slot_indices:
-            units = self.current_positions_units[slot_idx]
-            stop_loss_price_qc = self.stop_loss_prices_qc[slot_idx]
-            symbol = self.slot_to_symbol_map.get(slot_idx)
-
-            if symbol and abs(units) > Decimal('1e-9') and stop_loss_price_qc > Decimal('0'):
-                current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
-                
-                if current_bid_qc <= Decimal('0') or current_ask_qc <= Decimal('0'):
-                    logger.warning(f"止損檢查: {symbol} 的當前價格無效。")
-                    continue
-
-                closed_by_sl = False
-                trade_price_for_sl = Decimal('0.0')
-
-                if units > 0: # 多頭倉位
-                    if current_bid_qc <= stop_loss_price_qc:
-                        closed_by_sl = True
-                        trade_price_for_sl = current_bid_qc # 賣出平倉用 Bid
-                elif units < 0: # 空頭倉位
-                    if current_ask_qc >= stop_loss_price_qc:
-                        closed_by_sl = True
-                        trade_price_for_sl = current_ask_qc # 買入平倉用 Ask
-                
-                if closed_by_sl and trade_price_for_sl > Decimal('0'):
-                    logger.info(f"止損觸發 for {symbol} at step {self.episode_step_count}. 價格: {trade_price_for_sl:.5f} QC, 止損價: {stop_loss_price_qc:.5f} QC.")
-                    # 調用 _execute_trade 進行平倉
-                    # units_to_trade 應該是 -current_units (反向平倉所有單位)
-                    traded_units, commission = self._execute_trade(slot_idx, -units, trade_price_for_sl, current_timestamp, all_prices_map)
-                    commission_from_sl += commission
-                    # 止損後，該倉位的保證金會被釋放，_execute_trade 會處理
-                    # 平均入場價也會被重置為 0，_execute_trade 會處理
-        return commission_from_sl
-
-    def _handle_margin_call(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], current_timestamp: pd.Timestamp) -> Decimal:
-        """
-        處理保證金追繳。如果保證金水平低於 OANDA_MARGIN_CLOSEOUT_LEVEL，則強制平倉。
-        返回因強平而產生的總手續費。
-        """
-        commission_from_mc = Decimal('0.0')
-        oanda_closeout_level_decimal = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL))
-        
-        # 重新計算總保證金使用量和權益，因為止損可能已經改變了它們
-        self._update_portfolio_and_equity_value(all_prices_map)
-        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
-
-        if self.total_margin_used_ac <= Decimal('0'):
-            return Decimal('0.0') # 沒有保證金使用，無需處理強平
-
-        margin_level = self.equity_ac / self.total_margin_used_ac
-
-        if margin_level < oanda_closeout_level_decimal:
-            logger.warning(f"強制平倉觸發! Equity={self.equity_ac:.2f}, MarginUsed={self.total_margin_used_ac:.2f}, Level={margin_level:.2%}. 開始平倉。")
-            
-            # 獲取所有持倉，按未實現虧損排序 (虧損最大的先平)
-            positions_to_close = []
-            for slot_idx in self.current_episode_tradable_slot_indices:
-                units = self.current_positions_units[slot_idx]
-                if abs(units) > Decimal('1e-9'):
-                    symbol = self.slot_to_symbol_map[slot_idx]
-                    unrealized_pnl = self.unrealized_pnl_ac[slot_idx] # 這是負數表示虧損
-                    positions_to_close.append((unrealized_pnl, slot_idx, symbol, units))
-            
-            # 按未實現盈虧升序排序 (虧損最大的在前面)
-            positions_to_close.sort(key=lambda x: x[0])
-
-            for pnl, slot_idx, symbol, units_to_close in positions_to_close:
-                # 重新檢查保證金水平，如果已經恢復則停止平倉
-                self._update_portfolio_and_equity_value(all_prices_map)
-                self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
-                if self.total_margin_used_ac > Decimal('0') and (self.equity_ac / self.total_margin_used_ac) >= oanda_closeout_level_decimal:
-                    logger.info(f"保證金水平已恢復 ({self.equity_ac / self.total_margin_used_ac:.2%})，停止強平。")
-                    break
-                
-                # 確定平倉價格
-                current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
-                trade_price_for_mc = Decimal('0.0')
-                if units_to_close > 0: # 多頭倉位，賣出平倉
-                    trade_price_for_mc = current_bid_qc
-                elif units_to_close < 0: # 空頭倉位，買入平倉
-                    trade_price_for_mc = current_ask_qc
-                
-                if trade_price_for_mc <= Decimal('0'):
-                    logger.warning(f"強平: {symbol} 的交易價格無效，無法平倉。")
-                    continue
-
-                logger.info(f"強平 {symbol}: 平倉 {units_to_close:.2f} 單位，價格 {trade_price_for_mc:.5f} QC。")
-                traded_units, commission = self._execute_trade(slot_idx, -units_to_close, trade_price_for_mc, current_timestamp, all_prices_map)
-                commission_from_mc += commission
-                
-                # 每次平倉後更新權益和保證金使用情況
-                self._update_portfolio_and_equity_value(all_prices_map)
-                self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
-                
-                # 如果所有倉位都平了，也停止
-                if all(abs(u) < Decimal('1e-9') for u in self.current_positions_units):
-                    logger.info("所有倉位已平倉，停止強平。")
-                    break
-            
-            # 如果強平後保證金水平仍未恢復，則可能需要額外處理 (例如，直接終止 episode)
-            self._update_portfolio_and_equity_value(all_prices_map)
-            self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
-            if self.total_margin_used_ac > Decimal('0') and (self.equity_ac / self.total_margin_used_ac) < oanda_closeout_level_decimal:
-                logger.error(f"強平後保證金水平仍未恢復! Equity={self.equity_ac:.2f}, MarginUsed={self.total_margin_used_ac:.2f}, Level={self.equity_ac / self.total_margin_used_ac:.2%}. Episode 將終止。")
-                # 環境將在 _check_termination_truncation 中被標記為 terminated
-            
-            # 懲罰：強平會導致一個大的負獎勵
-            # 這裡不直接返回懲罰，而是讓 _check_termination_truncation 觸發 terminated，然後在 _calculate_reward 中處理
-            # 但可以在 info 中標記強平事件
-            # self.reward_config["margin_call_penalty"] 可以在 _calculate_reward 中使用
-        return commission_from_mc
-
-    def _check_termination_truncation(self) -> Tuple[bool, bool]:
-        terminated = False
-        oanda_closeout_level_decimal = Decimal(str(OANDA_MARGIN_CLOSEOUT_LEVEL))
-
-        # 檢查權益是否過低
-        if self.portfolio_value_ac < self.initial_capital * oanda_closeout_level_decimal * Decimal('0.4'):
-            logger.warning(f"Episode terminated: Portfolio value ({self.portfolio_value_ac:.2f}) too low."); terminated = True
-        
-        # 檢查保證金水平是否觸發強平
-        self.total_margin_used_ac = sum(self.margin_used_per_position_ac)
-        if self.total_margin_used_ac > Decimal('0'):
-            margin_level = self.equity_ac / self.total_margin_used_ac
-            if margin_level < oanda_closeout_level_decimal:
-                logger.warning(f"強制平倉觸發! Equity={self.equity_ac:.2f}, MarginUsed={self.total_margin_used_ac:.2f}, Level={margin_level:.2%}. Episode 將終止。")
-                terminated = True
-        
-        truncated = self.episode_step_count >= self.max_episode_steps
-        if self.current_step_in_dataset >= len(self.dataset):
-            truncated = True
-            terminated = True if not terminated else True # 如果已經終止，保持終止狀態
-        
-        return terminated, truncated
+        except IndexError as e:
+            logger.error(f"IndexError in _get_current_raw_prices_for_all_dataset_symbols at step {self.current_step_in_dataset}: {e}", exc_info=True)
+            # Fallback for index errors (e.g., empty aligned_timestamps)
+            return {}, pd.Timestamp.now(tz=timezone.utc)
+        except Exception as e:
+            logger.error(f"Unexpected error in _get_current_raw_prices_for_all_dataset_symbols: {e}", exc_info=True)
+            # General fallback for any other unexpected errors to ensure stability.
+            return {}, pd.Timestamp.now(tz=timezone.utc)
 
     def _get_observation(self) -> Dict[str, np.ndarray]:
         """
-        為 EnhancedTransformerFeatureExtractor 準備觀測數據。
-        返回一個包含 'market_features' 和 'context_features' 的字典。
+        Constructs the observation dictionary for the agent.
+        This includes market features, context features, and symbol IDs.
         """
-        # 初始化 context_features 數組
-        context_features = np.zeros((self.num_env_slots, self.num_context_features), dtype=np.float32)
-
-        dataset_sample = self.dataset[min(self.current_step_in_dataset, len(self.dataset)-1)]
-        features_raw = dataset_sample["features"].numpy()
+        safe_step_index = min(max(0, self.current_step_in_dataset), len(self.dataset) - 1)
         
-        # 臨時存儲從數據集提取的完整時間序列特徵
-        obs_f_full = np.zeros((self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol), dtype=np.float32)
-        
-        current_prices_map, _ = self._get_current_raw_prices_for_all_dataset_symbols()
+        # 1. Get Market Features from the dataset
+        # This should be the pre-calculated features for the *current* step
+        try:
+            dataset_sample = self.dataset[safe_step_index]
+            # The shape of features is (num_dataset_symbols, timesteps, num_features)
+            # We need the features of the last point in time for each symbol
+            market_features_all_symbols = dataset_sample["features"][:, -1, :].numpy().astype(np.float32)
+        except IndexError:
+            # This can happen if the dataset is shorter than the history length.
+            market_features_all_symbols = np.zeros((len(self.dataset.symbols), self.dataset.num_features_per_symbol), dtype=np.float32)
 
-        # 計算全局上下文特徵：保證金水平
-        # 將其廣播到每個槽位，因為它是一個賬戶級別的特徵
-        margin_level_val = float(self.equity_ac / (self.total_margin_used_ac + Decimal('1e-9')))
-        # 正規化保證金水平 (例如，假設 10.0 (1000%) 是非常健康的水平)
-        normalized_margin_level = min(1.0, margin_level_val / 10.0)
+
+        # Create a mapping from dataset symbol order to env slot order
+        market_features_padded = np.zeros((self.num_env_slots, self.dataset.num_features_per_symbol), dtype=np.float32)
+        
+        dataset_symbol_to_idx_map = {symbol: i for i, symbol in enumerate(self.dataset.symbols)}
 
         for slot_idx in range(self.num_env_slots):
             symbol = self.slot_to_symbol_map.get(slot_idx)
+            if symbol and symbol in dataset_symbol_to_idx_map:
+                dataset_idx = dataset_symbol_to_idx_map[symbol]
+                market_features_padded[slot_idx, :] = market_features_all_symbols[dataset_idx, :]
+
+        # 2. Construct Context Features
+        context_features = np.zeros((self.num_env_slots, self.num_context_features), dtype=np.float32)
+        
+        all_prices_map, _ = self._get_current_raw_prices_for_all_dataset_symbols()
+
+        for slot_idx in range(self.num_env_slots):
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if not symbol:
+                continue
+
+            # a) Position Ratio (normalized by max allowed size)
+            current_units = self.current_positions_units[slot_idx]
+            _, ask_price_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
             
-            pos_ratio = 0.0
-            pnl_ratio = 0.0
-            time_since_trade = 1.0 # 默認為最大值 (表示從未交易)
-            volatility = 0.0
+            pos_ratio = Decimal('0.0')
+            if ask_price_qc > 0 and self.equity_ac > 0:
+                details = self.instrument_details_map[symbol]
+                exchange_rate = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+                position_value_ac = abs(current_units) * ask_price_qc * exchange_rate
+                if self.equity_ac > 0:
+                    pos_ratio = position_value_ac / self.equity_ac
+            
+            normalized_pos_ratio = pos_ratio / self.max_position_size_percentage if self.max_position_size_percentage > 0 else Decimal('0.0')
+            final_pos_ratio = float(normalized_pos_ratio.copy_sign(current_units))
 
-            if symbol and symbol in self.dataset.symbols:
-                try:
-                    dataset_symbol_idx = self.dataset.symbols.index(symbol)
-                    
-                    # 1. 提取市場特徵 (Market Features)
-                    feature_slice = features_raw[dataset_symbol_idx, :, :]
-                    # ... (此處省略維度匹配的修正代碼，假設其存在且有效) ...
-                    obs_f_full[slot_idx, :, :] = feature_slice
+            # b) PnL Ratio
+            pnl_ac = self.unrealized_pnl_ac[slot_idx]
+            pnl_ratio = float(pnl_ac / self.equity_ac) if self.equity_ac > 0 else 0.0
 
-                    # 2. 計算每個槽位的上下文特徵 (Context Features)
-                    units = self.current_positions_units[slot_idx]
-                    details = self.instrument_details_map[symbol]
-                    current_bid_qc, current_ask_qc = current_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            # c) Time Since Last Trade (normalized)
+            time_since_trade = (self.episode_step_count - self.last_trade_step_per_slot[slot_idx]) / self.max_episode_steps if self.max_episode_steps > 0 else 0.0
 
-                    # a) 持倉比例 (Position Ratio)
-                    price_for_value_calc_qc = (current_bid_qc + current_ask_qc) / Decimal('2') if current_bid_qc > 0 and current_ask_qc > 0 else Decimal('0.0')
-                    if price_for_value_calc_qc > 0:
-                        nominal_value_qc = abs(units) * price_for_value_calc_qc
-                        exchange_rate = self._get_exchange_rate_to_account_currency(details.quote_currency, current_prices_map)
-                        nominal_value_ac = nominal_value_qc * exchange_rate if exchange_rate > 0 else Decimal('0.0')
-                        pos_ratio = float((nominal_value_ac / self.equity_ac) * units.copy_sign(Decimal('1')))
-                    
-                    # b) 盈虧比例 (PnL Ratio)
-                    pnl_ratio = float(self.unrealized_pnl_ac[slot_idx] / self.equity_ac) if self.equity_ac > 0 else 0.0
+            # d) Volatility (ATR as a percentage of price)
+            atr_qc = self.atr_values_qc[slot_idx]
+            bid_price_qc, _ = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            mid_price_qc = (bid_price_qc + ask_price_qc) / Decimal('2')
+            volatility = float(atr_qc / mid_price_qc) if mid_price_qc > 0 else 0.0
 
-                    # c) 距離上次交易時間 (Time Since Last Trade)
-                    if self.last_trade_step_per_slot[slot_idx] >= 0 and self.episode_step_count > 0:
-                        steps_since_last = self.episode_step_count - self.last_trade_step_per_slot[slot_idx]
-                        # 正規化，例如除以一個預期的平均持有周期 (e.g., 200 steps)
-                        time_since_trade = min(1.0, steps_since_last / 200.0)
+            # e) Margin Level Proxy (margin for this position / total equity)
+            margin_used_ac = self.margin_used_per_position_ac[slot_idx]
+            margin_level_proxy = float(margin_used_ac / self.equity_ac) if self.equity_ac > 0 else 0.0
 
-                    # d) 波動率 (Volatility)
-                    atr_value = self.atr_values_qc[slot_idx]
-                    if price_for_value_calc_qc > Decimal('0') and atr_value > Decimal('0'):
-                        rel_volatility = atr_value / price_for_value_calc_qc
-                        # 正規化，假設相對波動率的 5% 是一個較高的值
-                        volatility = min(1.0, float(rel_volatility / Decimal('0.05')))
+            context_features[slot_idx, :] = [
+                np.clip(final_pos_ratio, -1.0, 1.0),
+                np.clip(pnl_ratio, -1.0, 1.0),
+                np.clip(time_since_trade, 0.0, 1.0),
+                np.clip(volatility, 0.0, 1.0),
+                np.clip(margin_level_proxy, 0.0, 1.0)
+            ]
 
-                except ValueError:
-                    logger.warning(f"Symbol {symbol} in slot_map but not in dataset.symbols for observation.")
-                    # 保持所有特徵為0
+        # 3. Get Symbol IDs
+        symbol_ids = np.full(self.num_env_slots, self.padding_symbol_id, dtype=np.int32)
+        for slot_idx in range(self.num_env_slots):
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if symbol and symbol in self.symbol_to_global_id_map:
+                symbol_id = self.symbol_to_global_id_map[symbol]
+                # Defensive check: ensure the generated ID is within the expected range.
+                if symbol_id >= self.num_universe_symbols:
+                    logger.warning(
+                        f"Generated symbol_id {symbol_id} for symbol '{symbol}' is out of bounds "
+                        f"(>= num_universe_symbols {self.num_universe_symbols}). This indicates a mapping mismatch. "
+                        f"Using padding ID {self.padding_symbol_id} as a fallback for this step."
+                    )
+                    symbol_ids[slot_idx] = self.padding_symbol_id
+                else:
+                    symbol_ids[slot_idx] = symbol_id
+            # For non-active slots, the ID remains the padding_symbol_id, which is correct.
 
-            # 填充 context_features 數組
-            context_features[slot_idx, 0] = pos_ratio
-            context_features[slot_idx, 1] = pnl_ratio
-            context_features[slot_idx, 2] = time_since_trade
-            context_features[slot_idx, 3] = volatility
-            context_features[slot_idx, 4] = normalized_margin_level # 廣播的賬戶級特徵
-
-        # 從完整時間序列中提取最新的市場特徵
-        market_features = obs_f_full[:, -1, :].copy()
-
-        # 確保特徵不包含 NaN 或 inf
-        market_features = np.nan_to_num(market_features, nan=0.0, posinf=1e5, neginf=-1e5)
-        context_features = np.nan_to_num(context_features, nan=0.0, posinf=1e5, neginf=-1e5)
-
-        # 返回符合 new observation space 的字典
-        return {
-            "market_features": market_features.astype(np.float32),
-            "context_features": context_features.astype(np.float32)
+        observation = {
+            "market_features": market_features_padded,
+            "context_features": context_features,
+            "symbol_id": symbol_ids
         }
+        
+        return observation
 
     def _get_info(self) -> Dict[str, Any]:
         """
-        獲取環境信息
+        Returns a dictionary with auxiliary information about the environment's state.
         """
-        return {
-            "cash_ac": float(self.cash),
+        active_positions = {}
+        for slot_idx in self.current_episode_tradable_slot_indices:
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if symbol and abs(self.current_positions_units[slot_idx]) > 0:
+                active_positions[symbol] = {
+                    "units": float(self.current_positions_units[slot_idx]),
+                    "avg_entry_price_qc": float(self.avg_entry_prices_qc[slot_idx]),
+                    "unrealized_pnl_ac": float(self.unrealized_pnl_ac[slot_idx]),
+                    "margin_used_ac": float(self.margin_used_per_position_ac[slot_idx]),
+                    "atr_qc": float(self.atr_values_qc[slot_idx]),
+                    "stop_loss_price_qc": float(self.stop_loss_prices_qc[slot_idx]),
+                }
+
+        info = {
+            "episode_step": self.episode_step_count,
+            "dataset_step": self.current_step_in_dataset,
+            "timestamp": self.dataset.aligned_timestamps[min(self.current_step_in_dataset, len(self.dataset)-1)].isoformat() if len(self.dataset) > 0 and self.current_step_in_dataset < len(self.dataset.aligned_timestamps) else None,
             "portfolio_value_ac": float(self.portfolio_value_ac),
             "equity_ac": float(self.equity_ac),
+            "cash_ac": float(self.cash),
             "total_margin_used_ac": float(self.total_margin_used_ac),
-            "episode_step": self.episode_step_count,
-            "max_drawdown": float(self.max_drawdown_episode),
-            "peak_portfolio_value": float(self.peak_portfolio_value_episode),
-            "active_positions": sum(1 for units in self.current_positions_units if abs(units) > Decimal('1e-9')),
-            "trade_count": len(self.trade_log)
+            "margin_level": float(self.equity_ac / self.total_margin_used_ac) if self.total_margin_used_ac > 0 else float('inf'),
+            "max_drawdown_episode": float(self.max_drawdown_episode),
+            "active_positions_count": len(active_positions),
+            "active_positions": active_positions,
+            "total_trades_in_episode": len(self.trade_log),
+            "active_symbols_for_episode": self.active_symbols_for_episode,
+            "num_tradable_symbols_this_episode": self.num_tradable_symbols_this_episode,
         }
-    
-    def get_current_info(self) -> Dict[str, Any]:
-        """
-        獲取當前環境的詳細信息，供訓練監控使用
-        
-        Returns:
-            包含當前狀態詳細信息的字典
-        """
-        info = {
-            'episode_reward': float(sum(self.reward_history)) if self.reward_history else 0.0,
-            'portfolio_value_ac': float(self.portfolio_value_ac),
-            'equity_ac': float(self.equity_ac),
-            'cash_ac': float(self.cash),
-            'total_margin_used_ac': float(self.total_margin_used_ac),
-            'episode_step': self.episode_step_count,
-            'max_drawdown': float(self.max_drawdown_episode),
-            'peak_portfolio_value': float(self.peak_portfolio_value_episode),
-            'active_positions': sum(1 for units in self.current_positions_units if abs(units) > Decimal('1e-9')),
-            'trade_count': len(self.trade_log),
-            'symbol_stats': {}
-        }
-        
-        # 計算每個symbol的統計信息
-        symbol_trades = {}
-        for trade in self.trade_log:
-            symbol = trade['symbol']
-            if symbol not in symbol_trades:
-                symbol_trades[symbol] = {
-                    'trades': [],
-                    'pnl': []
-                }
-            symbol_trades[symbol]['trades'].append(trade)
-            if trade['realized_pnl_ac'] != 0:
-                symbol_trades[symbol]['pnl'].append(trade['realized_pnl_ac'])
-        
-        # 計算統計指標
-        for symbol, data in symbol_trades.items():
-            trades = data['trades']
-            pnl_list = data['pnl']
-            
-            stats = {
-                'trades': len(trades),
-                'win_rate': 0,
-                'avg_return': 0,
-                'max_return': 0,
-                'max_loss': 0,
-                'sharpe_ratio': 0,
-                'returns': []
-            }
-            
-            if pnl_list:
-                wins = sum(1 for p in pnl_list if p > 0)
-                stats['win_rate'] = (wins / len(pnl_list)) * 100 if pnl_list else 0
-                
-                # 計算收益率
-                returns = []
-                for i, trade in enumerate(trades):
-                    if trade['trade_type'] in ['CLOSE', 'REDUCE', 'CLOSE_AND_REVERSE']:
-                        # 計算收益率
-                        if trade['avg_entry_price_qc'] > 0:
-                            if trade['position_direction'] == 'LONG':
-                                ret = ((trade['trade_price_qc'] - trade['avg_entry_price_qc']) / trade['avg_entry_price_qc']) * 100
-                            else:
-                                ret = ((trade['avg_entry_price_qc'] - trade['trade_price_qc']) / trade['avg_entry_price_qc']) * 100
-                            returns.append(ret)
-                
-                if returns:
-                    stats['returns'] = returns
-                    stats['avg_return'] = np.mean(returns)
-                    stats['max_return'] = max(returns)
-                    stats['max_loss'] = min(returns)
-                    
-                    # 簡化的夏普比率計算
-                    if len(returns) > 1:
-                        returns_std = np.std(returns)
-                        if returns_std > 0:
-                            stats['sharpe_ratio'] = stats['avg_return'] / returns_std
-            
-            info['symbol_stats'][symbol] = stats
-        
         return info
-
-# --- if __name__ == "__main__": 測試塊 (與V4.8版本相同) ---
-if __name__ == "__main__":
-    # ... (與您上一個版本 UniversalTradingEnvV4.8 __main__ 測試塊相同的代碼) ...
-    logger.info("正在直接運行 UniversalTradingEnvV4.py 進行測試...")
-    if 'OANDA_API_KEY' not in globals() or globals().get('OANDA_API_KEY') is None: logger.error("OANDA_API_KEY 未配置。"); sys.exit(1)
-    if 'format_datetime_for_oanda' not in globals() or globals().get('format_datetime_for_oanda') is None: logger.error("format_datetime_for_oanda 未定義。"); sys.exit(1)
-    if 'manage_data_download_for_symbols' not in globals() or globals().get('manage_data_download_for_symbols') is None: logger.error("manage_data_download_for_symbols 未定義。"); sys.exit(1)
-    if 'UniversalMemoryMappedDataset' not in globals() or globals().get('UniversalMemoryMappedDataset') is None: logger.error("UniversalMemoryMappedDataset 未定義。"); sys.exit(1)
-    if 'InstrumentInfoManager' not in globals() or globals().get('InstrumentInfoManager') is None: logger.error("InstrumentInfoManager 未定義。"); sys.exit(1)
-    logger.info("MMap數據集和InstrumentInfo準備...")
-    test_symbols_list_main = ["EUR_USD", "USD_JPY", "AUD_USD"]
-    try:
-        test_start_datetime_main = datetime(2024, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
-        test_end_datetime_main = datetime(2024, 5, 22, 11, 0, 0, tzinfo=timezone.utc)
-    except ValueError as e_date_main: logger.error(f"測試用的固定日期時間無效: {e_date_main}", exc_info=True); sys.exit(1)
-    if test_start_datetime_main >= test_end_datetime_main: logger.error("測試時間範圍無效：開始時間必須早於結束時間。"); sys.exit(1)
-    test_start_iso_str_main = format_datetime_for_oanda(test_start_datetime_main)
-    test_end_iso_str_main = format_datetime_for_oanda(test_end_datetime_main)
-    test_granularity_val_main = "S5"; test_timesteps_history_val_main = TIMESTEPS
-    logger.info(f"測試參數: symbols={test_symbols_list_main}, start={test_start_iso_str_main}, end={test_end_iso_str_main}, granularity={test_granularity_val_main}, history_len={test_timesteps_history_val_main}")
-    logger.info("確保數據庫中有測試時間段的數據 (如果沒有則下載)...")
-    manage_data_download_for_symbols(symbols=test_symbols_list_main, overall_start_str=test_start_iso_str_main, overall_end_str=test_end_iso_str_main, granularity=test_granularity_val_main)
-    logger.info("數據庫數據準備完成/已檢查。")
-    test_dataset_main = UniversalMemoryMappedDataset(symbols=test_symbols_list_main, start_time_iso=test_start_iso_str_main, end_time_iso=test_end_iso_str_main, granularity=test_granularity_val_main, timesteps_history=test_timesteps_history_val_main, force_reload=False)
-    if len(test_dataset_main) == 0: logger.error("測試數據集為空!"); sys.exit(1)
-    instrument_manager_main = InstrumentInfoManager(force_refresh=False)
-    active_episode_symbols_main = ["EUR_USD", "USD_JPY"]
-    account_currency_upper_main = ACCOUNT_CURRENCY.upper()
-    symbols_needed_for_details = list(set(active_episode_symbols_main + [sym for sym in test_symbols_list_main if account_currency_upper_main in sym.upper().split("_") or "USD" in sym.upper().split("_") or sym == f"{account_currency_upper_main}_USD" or sym == f"USD_{account_currency_upper_main}"]))
-    logger.info(f"為環境準備InstrumentDetails的Symbols列表: {symbols_needed_for_details}")
-    logger.info("創建測試環境實例 (UniversalTradingEnvV4)...")
-    env_main = UniversalTradingEnvV4(dataset=test_dataset_main, instrument_info_manager=instrument_manager_main, active_symbols_for_episode=active_episode_symbols_main)
-    logger.info("重置環境...")
-    obs_main, info_reset_main = env_main.reset()
-    logger.info(f"初始觀察 keys: {list(obs_main.keys())}"); logger.info(f"初始信息: {info_reset_main}")
-    logger.info("\n執行一個隨機動作步驟...")
-    action_main_raw = env_main.action_space.sample()
-    action_to_apply_main = np.zeros_like(action_main_raw)
-    for i_main_slot_idx in env_main.current_episode_tradable_slot_indices:
-        action_to_apply_main[i_main_slot_idx] = action_main_raw[i_main_slot_idx]
-    logger.info(f"執行動作 (僅對活躍槽位，基於槽位索引): {action_to_apply_main.round(3)}")
-    obs_main_step, reward_main, terminated_main, truncated_main, info_main = env_main.step(action_to_apply_main)
-    logger.info(f"  獎勵: {reward_main:.4f}, 終止: {terminated_main}, 截斷: {truncated_main}"); logger.info(f"  信息: {info_main}")
-    env_main.close(); test_dataset_main.close()
-    logger.info("UniversalTradingEnvV4.py 測試執行完畢。")

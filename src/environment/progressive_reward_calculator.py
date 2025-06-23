@@ -523,7 +523,8 @@ class ProgressiveRewardCalculator:
             profit_factor = avg_profit / avg_loss if avg_loss != 0 else Decimal('1.0')
             self.performance_metrics['profit_factors'].append(float(profit_factor))
         
-        return reward_info
+        # Return the final float reward value, not the info dict
+        return total_reward
     
     # === 輔助計算函數 ===
     

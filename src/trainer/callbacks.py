@@ -425,34 +425,33 @@ class UniversalCheckpointCallback(BaseCallback):
         # # --- 自定義梯度裁剪邏輯結束 ---
         
         # 5. 定期NaN檢查
-        if self.stability_monitor.should_check_nans(self.num_timesteps):
-            try:
-                nan_detected = False
+        try:
+            nan_detected = False
+            
+            # 檢查策略網絡
+            if hasattr(self.model, 'policy') and self.model.policy is not None:
+                if hasattr(self.model.policy, 'actor') and self.model.policy.actor is not None:
+                    if self.stability_monitor.check_for_nans(self.model.policy.actor, "policy.actor", self.num_timesteps):
+                        nan_detected = True
                 
-                # 檢查策略網絡
-                if hasattr(self.model, 'policy') and self.model.policy is not None:
-                    if hasattr(self.model.policy, 'actor') and self.model.policy.actor is not None:
-                        if self.stability_monitor.check_for_nans(self.model.policy.actor, "policy.actor"):
-                            nan_detected = True
-                    
-                    if hasattr(self.model.policy, 'critic') and self.model.policy.critic is not None:
-                        if self.stability_monitor.check_for_nans(self.model.policy.critic, "policy.critic"):
-                            nan_detected = True
-                    
-                    if hasattr(self.model.policy, 'features_extractor') and self.model.policy.features_extractor is not None:
-                        if self.stability_monitor.check_for_nans(self.model.policy.features_extractor, "policy.features_extractor"):
-                            nan_detected = True
+                if hasattr(self.model.policy, 'critic') and self.model.policy.critic is not None:
+                    if self.stability_monitor.check_for_nans(self.model.policy.critic, "policy.critic", self.num_timesteps):
+                        nan_detected = True
                 
-                if nan_detected:
-                    logger.error("檢測到NaN值在步驟 %s，這可能導致訓練不穩定", self.num_timesteps)
-                    self.nan_reset_count += 1
-                    
-                    # 記錄到監控系統
-                    if hasattr(self.model, 'logger'):
-                        self.model.logger.record("train/nan_detections", self.stability_monitor.nan_detections)
+                if hasattr(self.model.policy, 'features_extractor') and self.model.policy.features_extractor is not None:
+                    if self.stability_monitor.check_for_nans(self.model.policy.features_extractor, "policy.features_extractor", self.num_timesteps):
+                        nan_detected = True
+            
+            if nan_detected:
+                logger.error("檢測到NaN值在步驟 %s，這可能導致訓練不穩定", self.num_timesteps)
+                self.nan_reset_count += 1
                 
-            except Exception as e_nan:
-                logger.warning("NaN檢查過程中發生錯誤", exc_info=e_nan)
+                # 記錄到監控系統
+                if hasattr(self.model, 'logger'):
+                    self.model.logger.record("train/nan_detections", self.stability_monitor.get_stats().get('nan_count', 0))
+            
+        except Exception as e_nan:
+            logger.warning(f"NaN檢查過程中發生錯誤", exc_info=e_nan)
         
         # 6. 記錄穩定性統計
         if self.n_calls > 0 and self.n_calls % self.log_transformer_norm_freq == 0:

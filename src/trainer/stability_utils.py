@@ -112,18 +112,19 @@ class NumericalStabilityMonitor:
         """
         return step % self.nan_check_frequency == 0
 
-    def check_for_nans(self, model: nn.Module, step: int) -> bool:
+    def check_for_nans(self, model: nn.Module, model_name: str, step: int) -> bool:
         """
         Check for NaN or Infinity values in model parameters and gradients.
         
         Args:
             model: The neural network model
+            model_name: The name of the model being checked (for logging)
             step: Current training step
             
         Returns:
             True if NaN/Inf detected, False otherwise
         """
-        if step % self.nan_check_frequency != 0:
+        if not self.should_check_nans(step):
             return False
         
         self.total_checks += 1
@@ -134,29 +135,29 @@ class NumericalStabilityMonitor:
         for name, param in model.named_parameters():
             if param is not None:
                 if torch.isnan(param).any():
-                    logger.warning(f"NaN detected in parameter {name} at step {step}")
+                    logger.warning(f"NaN detected in parameter {name} of model {model_name} at step {step}")
                     nan_detected = True
                     self.nan_count += 1
                 
                 if torch.isinf(param).any():
-                    logger.warning(f"Infinity detected in parameter {name} at step {step}")
+                    logger.warning(f"Infinity detected in parameter {name} of model {model_name} at step {step}")
                     inf_detected = True
                     self.inf_count += 1
                 
                 # Check gradients if they exist
                 if param.grad is not None:
                     if torch.isnan(param.grad).any():
-                        logger.warning(f"NaN detected in gradient of {name} at step {step}")
+                        logger.warning(f"NaN detected in gradient of {name} of model {model_name} at step {step}")
                         nan_detected = True
                         self.nan_count += 1
                     
                     if torch.isinf(param.grad).any():
-                        logger.warning(f"Infinity detected in gradient of {name} at step {step}")
+                        logger.warning(f"Infinity detected in gradient of {name} of model {model_name} at step {step}")
                         inf_detected = True
                         self.inf_count += 1
         
         if nan_detected or inf_detected:
-            logger.error(f"Numerical instability detected at step {step}")
+            logger.error(f"Numerical instability detected in {model_name} at step {step}")
             return True
         
         return False

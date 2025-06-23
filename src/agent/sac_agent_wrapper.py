@@ -126,16 +126,26 @@ class QuantumEnhancedSAC:
             self.tensorboard_log_path = tensorboard_log_path
             self.session_subdir = ""        # 準備 policy_kwargs，合併用戶提供的和默認的設置
         from src.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
-        default_policy_kwargs = dict(
-            net_arch=dict(pi=[256, 256], qf=[256, 256]),
-            features_extractor_class=EnhancedTransformerFeatureExtractor,
-            features_extractor_kwargs={"model_config_path": "configs/enhanced_model_config.json"},
-        )
         
-        # 如果用戶提供了 policy_kwargs，則合併
-        if policy_kwargs is not None:
-            default_policy_kwargs.update(policy_kwargs)
-        self.policy_kwargs = default_policy_kwargs        # 優化設備配置
+        # The config is imported as EnhancedModelConfig at the top of the file
+        default_policy_kwargs = {
+            "net_arch": dict(pi=[256, 256], qf=[256, 256]),
+            "features_extractor_class": EnhancedTransformerFeatureExtractor,
+            # Pass the actual config dictionary, not the path
+            "features_extractor_kwargs": {"model_config": EnhancedModelConfig},
+        }
+        
+        # Deep merge user-provided policy_kwargs
+        final_policy_kwargs = default_policy_kwargs.copy()
+        if policy_kwargs:
+            # Special handling for nested features_extractor_kwargs
+            if 'features_extractor_kwargs' in policy_kwargs and 'features_extractor_kwargs' in final_policy_kwargs:
+                # Merge the inner dictionaries
+                final_policy_kwargs['features_extractor_kwargs'].update(policy_kwargs.pop('features_extractor_kwargs'))
+            # Update with any remaining top-level keys
+            final_policy_kwargs.update(policy_kwargs)
+
+        self.policy_kwargs = final_policy_kwargs        # 優化設備配置
         self.device = self._setup_device(device)
         
         logger.info(f"量子增強SAC: 使用設備 {self.device}, 混合精度訓練: {self.use_amp}")
@@ -507,13 +517,14 @@ class QuantumEnhancedSAC:
             if hasattr(self.agent.policy, 'quantum_policy_layer') and hasattr(self.agent.policy.quantum_policy_layer, 'optimizer'):
                 del self.agent.policy.quantum_policy_layer.optimizer
 
-    def load(self, path: Union[str, Path], env: Optional[DummyVecEnv] = None, policy_kwargs: Optional[Dict[str, Any]] = None):
+    def load(self, path: Union[str, Path], env: Optional[DummyVecEnv] = None, custom_objects: Optional[Dict[str, Any]] = None, policy_kwargs: Optional[Dict[str, Any]] = None):
         """
         加載智能體模型，並允許覆蓋 policy_kwargs。
 
         Args:
             path (Union[str, Path]): 模型文件路徑。
             env (Optional[DummyVecEnv], optional): 環境實例。如果為 None，則使用初始化時的環境。
+            custom_objects (Optional[Dict[str, Any]], optional): 自定義對象字典。
             policy_kwargs (Optional[Dict[str, Any]], optional): 
                 要覆蓋的策略關鍵字參數。這對於在加載時啟用或禁用
                 symbol_embedding, msfe, cts_fusion 等高級特徵至關重要。
@@ -521,11 +532,21 @@ class QuantumEnhancedSAC:
         """
         try:
             # 確定要使用的 policy_kwargs
-            # 優先使用方法調用時傳入的，其次是 wrapper 實例自身的
-            final_policy_kwargs = policy_kwargs if policy_kwargs is not None else self.policy_kwargs
-            
+            # 進行深度合併，確保 features_extractor_kwargs 被正確更新，而不是完全替換。
+            # 這允許在加載時僅修改特定參數（如 use_symbol_embedding）。
+            final_policy_kwargs = self.policy_kwargs.copy()
+            if policy_kwargs:
+                logger.info(f"正在使用傳入的 policy_kwargs 覆蓋加載設置: {policy_kwargs}")
+                # 深度合併 features_extractor_kwargs
+                user_fex_kwargs = policy_kwargs.pop('features_extractor_kwargs', {})
+                if user_fex_kwargs and isinstance(final_policy_kwargs.get('features_extractor_kwargs'), dict):
+                    final_policy_kwargs['features_extractor_kwargs'].update(user_fex_kwargs)
+
+                # 合併頂層鍵
+                final_policy_kwargs.update(policy_kwargs)
+
             logger.info(f"正在從 {path} 加載模型...")
-            logger.info(f"加載時使用的 policy_kwargs: {final_policy_kwargs}")
+            logger.info(f"加載時使用的最終 policy_kwargs: {final_policy_kwargs}")
 
             # 在加載時傳遞 policy_kwargs 來覆蓋已保存的參數
             self.agent = SAC.load(
