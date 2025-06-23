@@ -461,32 +461,26 @@ class UniversalMemoryMappedDataset(Dataset):
         log_func = current_logger_instance.info if logger_available else lambda msg: print(f"INFO (UniversalMemoryMappedDataset.close fallback): {msg}", file=sys.stderr)
         
         dataset_id_to_log = getattr(self, 'dataset_id', 'UnknownDatasetID_in_close')
-        log_func(f"Closing memory-mapped files for dataset {dataset_id_to_log}...") # Translated to English
+        log_func(f"Closing memory-mapped files for dataset {dataset_id_to_log}...")
 
-        symbols_to_iterate = getattr(self, 'symbols', [])
-        processed_features_memmaps_dict = getattr(self, 'processed_features_memmaps', {})
-        raw_prices_memmaps_dict = getattr(self, 'raw_prices_memmaps', {})
+        # Directly set references to None to allow garbage collection
+        for symbol in getattr(self, 'symbols', []):
+            if hasattr(self, 'processed_features_memmaps') and self.processed_features_memmaps and self.processed_features_memmaps.get(symbol) is not None:
+                self.processed_features_memmaps[symbol] = None
+            if hasattr(self, 'raw_prices_memmaps') and self.raw_prices_memmaps and self.raw_prices_memmaps.get(symbol) is not None:
+                self.raw_prices_memmaps[symbol] = None
 
-        for symbol_item in symbols_to_iterate:
-            if processed_features_memmaps_dict.get(symbol_item) is not None:
-                # Ensure the memmap object itself is deleted to close the file
-                try:
-                    del processed_features_memmaps_dict[symbol_item] # This should trigger __del__ on memmap if ref count is 0
-                except Exception as e:
-                    print(f"FALLBACK_CLOSE_ERROR: Error deleting processed_features_memmap for {symbol_item}: {e}")
-                self.processed_features_memmaps[symbol_item] = None # Explicitly set to None
+        # Clear the dictionaries to remove all references from this object
+        if hasattr(self, 'processed_features_memmaps'):
+            self.processed_features_memmaps.clear()
+        if hasattr(self, 'raw_prices_memmaps'):
+            self.raw_prices_memmaps.clear()
 
-            if raw_prices_memmaps_dict.get(symbol_item) is not None:
-                try:
-                    del raw_prices_memmaps_dict[symbol_item] # This should trigger __del__ on memmap if ref count is 0
-                except Exception as e:
-                    print(f"FALLBACK_CLOSE_ERROR: Error deleting raw_prices_memmap for {symbol_item}: {e}")
-                self.raw_prices_memmaps[symbol_item] = None # Explicitly set to None
+        # Explicitly trigger garbage collection to release file handles
+        import gc
+        gc.collect()
         
-        # import gc # Generally not needed here, __del__ of memmap objects handles file closing.
-        # gc.collect()
-        
-        log_func(f"Memory-mapped files for dataset {dataset_id_to_log} have been closed.") # Translated to English
+        log_func(f"Memory-mapped file references for dataset {dataset_id_to_log} have been cleared. GC triggered.")
         
         # 從活躍數據集列表中移除
         try:

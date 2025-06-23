@@ -37,7 +37,7 @@ class SharedTrainingDataManager:
             cls._manager = multiprocessing.Manager()
         return cls._manager
 
-    def __init__(self, max_metrics=2000, max_trades=10000, max_diagnostics=500):
+    def __init__(self, max_metrics=2000, max_trades=10000, max_diagnostics=5000):
         """
         初始化共享數據管理器
         
@@ -330,6 +330,17 @@ class SharedTrainingDataManager:
                 return []
             # Return the most recent 'count' records
             return list(self.diagnostics_queue)[-count:]
+
+    def get_and_clear_latest_diagnostics(self) -> List[Dict[str, Any]]:
+        """獲取所有診斷記錄並清除隊列 - 由 UI 調用"""
+        self._pull_data_from_mp_queues() # Ensure internal deques are updated
+        with self.lock:
+            if not self.diagnostics_queue:
+                return []
+            # Return all records and clear the deque
+            records = list(self.diagnostics_queue)
+            self.diagnostics_queue.clear()
+            return records
 
     def get_latest_trades(self, count: int = 100) -> List[Dict[str, Any]]:
         """獲取最新的交易記錄 - 由 UI 調用"""
