@@ -1,0 +1,7 @@
+oandapyV20
+streamlit
+pandas
+python-dotenv
+pytest
+torch
+scikit-learn

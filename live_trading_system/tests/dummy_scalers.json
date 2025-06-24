@@ -1,0 +1,10 @@
+{
+    "feature1": {
+        "mean": 0.5,
+        "scale": 1.5
+    },
+    "feature2": {
+        "mean": -0.2,
+        "scale": 0.8
+    }
+}
