@@ -360,23 +360,31 @@ class UniversalCheckpointCallback(BaseCallback):
                 
                 activations = self.model.policy.features_extractor.transformer.activations
                 if activations:
-                    # Detach, move to CPU, and convert to numpy for serialization
-                    diagnostics_payload['transformer_activations'] = [
-                        act.detach().cpu().numpy() if hasattr(act, 'detach') else act 
-                        for act in activations
-                    ]
-                    logger.debug(f"Collected {len(activations)} transformer activation layers.")
+                    # Process activations to match UI expectations: calculate mean activation per neuron
+                    processed_activations = []
+                    for act in activations:
+                        if hasattr(act, 'detach') and act.ndim >= 2:
+                            # Calculate mean activation per neuron (feature) across batch and sequence length
+                            mean_act = act.mean(dim=(0, 1)).detach().cpu().numpy()
+                            processed_activations.append({'mean': mean_act})
+                        else:
+                            # Fallback for non-tensor or unexpected-shape data
+                            processed_activations.append({'mean': np.array([])}) # Send empty array on failure
 
-            # Get Enhanced Strategy Superposition (ESS) Diagnostics from the actor
+                    diagnostics_payload['transformer_activations'] = processed_activations
+                    logger.debug(f"Collected and processed {len(activations)} transformer activation layers.")
+
+            # Get Quantum Strategy Pool Diagnostics from the actor
             if hasattr(self.model.policy, 'actor') and hasattr(self.model.policy.actor, 'get_ess_diagnostics'):
                 ess_diagnostics = self.model.policy.actor.get_ess_diagnostics()
                 if ess_diagnostics:
                     # Detach, move to CPU, and convert to numpy for serialization
-                    diagnostics_payload['ess_diagnostics'] = {
+                    # RENAME KEY to match UI expectations
+                    diagnostics_payload['strategy_pool'] = {
                         k: v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v
                         for k, v in ess_diagnostics.items()
                     }
-                    logger.debug(f"Collected ESS diagnostics: {list(ess_diagnostics.keys())}")
+                    logger.debug(f"Collected strategy_pool diagnostics: {list(ess_diagnostics.keys())}")
 
             # If we have diagnostics, send them to the data manager
             if diagnostics_payload and self.shared_data_manager is not None:

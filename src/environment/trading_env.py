@@ -555,11 +555,35 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         # NEW: Send trade record to the shared data manager for UI display
         if self.shared_data_manager:
             try:
+                # Determine detailed action string for UI display
+                action_str = ""
+                TOLERANCE = Decimal('1e-9')
+                is_current_flat = abs(current_units) < TOLERANCE
+
+                if is_current_flat:
+                    action_str = "Open - Long" if units_to_trade > 0 else "Open - Short"
+                else:  # Position exists
+                    is_long_position = current_units > 0
+                    
+                    # Case 1: Adding to existing position
+                    if np.sign(units_to_trade) == np.sign(current_units):
+                        action_str = "Add - Long" if is_long_position else "Add - Short"
+                    # Case 2: Reducing, closing, or flipping position
+                    else:
+                        is_full_close = abs(abs(units_to_trade) - abs(current_units)) < TOLERANCE
+                        is_flip = abs(units_to_trade) > abs(current_units)
+
+                        if is_flip or is_full_close:
+                            # For both flips and full closes, the action is to close the original position
+                            action_str = "Close - Long" if is_long_position else "Close - Short"
+                        else:  # is_reduce
+                            action_str = "Reduce - Long" if is_long_position else "Reduce - Short"
+
                 self.shared_data_manager.add_trade_record(
                     symbol=symbol,
-                    action="buy" if units_to_trade > 0 else "sell",
+                    action=action_str,
                     price=float(trade_price_qc),
-                    quantity=float(abs(units_to_trade)), # Ensure quantity is always positive
+                    quantity=float(abs(units_to_trade)),
                     profit_loss=float(realized_pnl_ac),
                     training_step=self.training_step_offset + self.episode_step_count,
                     timestamp=timestamp.to_pydatetime()
