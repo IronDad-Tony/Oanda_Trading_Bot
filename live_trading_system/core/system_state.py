@@ -30,6 +30,15 @@ class SystemState:
         self.ui_controls_enabled = True
         self.last_error: str | None = None
         self.status_message = "系統已就緒，等待啟動。"
+        self.selected_instruments: list[str] = [] # 新增
+
+    def set_selected_instruments(self, instruments: list[str]):
+        """設置當前選擇的交易標的。"""
+        self.selected_instruments = instruments
+
+    def get_selected_instruments(self) -> list[str]:
+        """獲取當前選擇的交易標的。"""
+        return self.selected_instruments
 
     def start(self):
         """請求啟動交易循環。"""

@@ -11,8 +11,6 @@ import json
 from typing import Dict, List, Any
 from datetime import datetime, timezone, timedelta
 import logging
-from sklearn.preprocessing import StandardScaler
-from tenacity import retry, stop_after_attempt, wait_fixed
 
 logger = logging.getLogger("LiveTradingSystem")
 
@@ -20,38 +18,40 @@ class LivePreprocessor:
     """
     對即時數據進行預處理，使其符合模型輸入要求。
     
-    關鍵在於，此預處理器使用在訓練階段就已保存的 scaler 參數 (mean, std)
-    來對新數據進行標準化，而不是對新數據進行擬合 (fit)。
+    此預處理器嚴格複製訓練階段的特徵工程、標準化和數據處理邏輯，
+    以確保模型在推論時接收到的數據分佈與訓練時完全一致。
+    它使用在訓練階段保存的 scaler 參數 (mean, std) 來對新數據進行標準化。
     """
     def __init__(self, scalers_path: str, config: Dict[str, Any]):
         """
         初始化預處理器。
         
         Args:
-            scalers_path (str): 指向保存了 scaler 參數 (mean, std) 的 JSON 檔案路徑。
-            config (Dict[str, Any]): 系統設定檔，用於獲取新鮮度閾值。
+            scalers_path (str): 指向保存了 scaler 參數的 JSON 檔案路徑。
+            config (Dict[str, Any]): 系統設定檔。
         """
         self.scalers = self._load_scalers(scalers_path)
         self.freshness_threshold_minutes = config.get('data_freshness_threshold_minutes', 10)
+        self.model_lookback_window = config.get('model_lookback_window', 128)
         logger.info(f"預處理器已成功從 {scalers_path} 載入 Scaler 參數。")
         logger.info(f"數據新鮮度檢查閾值設定為 {self.freshness_threshold_minutes} 分鐘。")
+        logger.info(f"模型所需的回看窗口長度為 {self.model_lookback_window}。")
 
-    def _load_scalers(self, path: str) -> Dict[str, Dict[str, float]]:
+    def _load_scalers(self, path: str) -> Dict[str, Dict[str, Dict[str, List[float]]]]:
         """
-        從 JSON 檔案載入均值和標準差。
-        預期的 JSON 格式: {"feature_name": {"mean": 0.1, "std": 1.2}, ...}
+        從 JSON 檔案載入每個 symbol 的均值和標準差。
+        預期的 JSON 格式: 
+        {
+            "EUR_USD": {
+                "bid_close_log_ret": {"mean": [0.1], "scale": [1.2]}, 
+                ...
+            },
+            "USD_JPY": { ... }
+        }
         """
         try:
             with open(path, 'r') as f:
-                scalers_json = json.load(f)
-            # 將 list 轉換為 numpy array
-            scalers = {}
-            for feature, params in scalers_json.items():
-                scalers[feature] = {
-                    'mean': np.array(params['mean']),
-                    'scale': np.array(params['scale'])
-                }
-            return scalers
+                return json.load(f)
         except FileNotFoundError:
             logger.error(f"Scaler 檔案未找到: {path}")
             raise
@@ -62,20 +62,16 @@ class LivePreprocessor:
             logger.error(f"載入 Scaler 檔案時發生未知錯誤: {e}")
             raise
 
-    def _calculate_log_returns(self, series: pd.Series) -> pd.Series:
-        """計算單個價格序列的對數回報率。 log(price_t / price_{t-1})"""
-        return np.log(series / series.shift(1)).fillna(0.0)
+    def _calculate_log_returns(self, series: pd.Series, epsilon: float = 1e-9) -> pd.Series:
+        """計算單個價格序列的對數回報率，並處理無效值，與訓練代碼一致。"""
+        shifted_series = series.shift(1)
+        valid_mask = (series > epsilon) & (shifted_series > epsilon)
+        log_ret = pd.Series(np.nan, index=series.index, dtype=np.float64)
+        log_ret[valid_mask] = np.log(series[valid_mask] / shifted_series[valid_mask])
+        return log_ret.fillna(0.0)
 
     def _is_data_fresh(self, last_candle_time: pd.Timestamp) -> bool:
-        """
-        檢查數據是否新鮮。
-
-        Args:
-            last_candle_time (pd.Timestamp): 最新一根 K 線的時間。
-
-        Returns:
-            bool: 如果數據在設定的閾值內則返回 True，否則返回 False。
-        """
+        """檢查數據是否新鮮。"""
         if last_candle_time.tzinfo is None:
             last_candle_time = last_candle_time.tz_localize('UTC')
         
@@ -91,94 +87,129 @@ class LivePreprocessor:
             )
         return is_fresh
 
-    def transform(self, raw_candles: List[Dict[str, Any]]) -> np.ndarray:
+    def transform(self, raw_candles: List[Dict[str, Any]], instrument: str) -> np.ndarray:
         """
         將從 Oanda API 獲取的原始蠟燭圖數據列表轉換為模型輸入的 NumPy 陣列。
-
-        Args:
-            raw_candles (List[Dict[str, Any]]): Oanda API 返回的蠟燭圖字典列表。
-
-        Returns:
-            np.ndarray: 預處理和標準化後的特徵陣列，形狀為 (timesteps, features)。
+        此方法現在完全複製訓練時的特徵工程和標準化流程。
         """
-        if not raw_candles:
-            logger.warning("收到的蠟燭圖數據為空，無法進行預處理。")
+        if not raw_candles or len(raw_candles) < 2: # 計算回報率至少需要2個點
+            logger.warning(f"[{instrument}] 原始蠟燭數據不足 ({len(raw_candles)}條)，無法進行轉換。")
             return np.array([])
 
-        # 0. 數據新鮮度檢查
-        last_candle_time = pd.to_datetime(raw_candles[-1]['time'])
-        if not self._is_data_fresh(last_candle_time):
-            return np.array([])
-
-        # 1. 將原始數據轉換為 DataFrame
+        # 1. 將原始蠟燭圖轉換為 DataFrame
         df = pd.DataFrame(raw_candles)
+        if 'mid' in df.columns and isinstance(df['mid'].iloc[0], dict):
+            df = df.join(pd.json_normalize(df['mid']).add_prefix('mid_'))
+        if 'bid' in df.columns and isinstance(df['bid'].iloc[0], dict):
+            df = df.join(pd.json_normalize(df['bid']).add_prefix('bid_'))
+        if 'ask' in df.columns and isinstance(df['ask'].iloc[0], dict):
+            df = df.join(pd.json_normalize(df['ask']).add_prefix('ask_'))
+        
+        rename_map = {
+            'mid_o': 'mid_open', 'mid_h': 'mid_high', 'mid_l': 'mid_low', 'mid_c': 'mid_close',
+            'bid_o': 'bid_open', 'bid_h': 'bid_high', 'bid_l': 'bid_low', 'bid_c': 'bid_close',
+            'ask_o': 'ask_open', 'ask_h': 'ask_high', 'ask_l': 'ask_low', 'ask_c': 'ask_close',
+        }
+        df.rename(columns=rename_map, inplace=True)
         df['time'] = pd.to_datetime(df['time'])
-        
-        # 處理價格數據，通常 Oanda 返回的 mid, bid, ask 是字典
-        price_types = ['mid', 'bid', 'ask']
-        for p_type in price_types:
-            if p_type in df.columns and isinstance(df[p_type].iloc[0], dict):
-                price_df = df[p_type].apply(pd.Series).astype(float)
-                price_df.columns = [f"{p_type}_{col}" for col in price_df.columns]
-                df = pd.concat([df, price_df], axis=1)
-        df = df.drop(columns=price_types, errors='ignore')
-        df['volume'] = df['volume'].astype(float)
+        df.set_index('time', inplace=True)
 
-        # 2. 計算特徵 (與訓練時保持一致)
+        # 數據新鮮度檢查
+        if not self._is_data_fresh(df.index[-1]):
+            return np.array([])
+
+        # 2. 特徵工程 (完全鏡像 `src/feature_engineer/preprocessor.py`)
         processed_df = pd.DataFrame(index=df.index)
-        features_to_standardize = []
-
-        # 計算價格回報率
-        for col in df.columns:
-            if "_o" in col or "_h" in col or "_l" in col or "_c" in col:
-                ret_col_name = f"{col}_log_ret"
-                processed_df[ret_col_name] = self._calculate_log_returns(df[col])
-                features_to_standardize.append(ret_col_name)
-
-        # 處理成交量
-        if 'volume' in df.columns:
-            vol_col_name = "volume_log"
-            processed_df[vol_col_name] = np.log1p(df['volume'])
-            features_to_standardize.append(vol_col_name)
-
-        # 3. 使用載入的 Scaler 進行標準化
-        for feature in features_to_standardize:
-            if feature in self.scalers:
-                mean = self.scalers[feature]['mean']
-                scale = self.scalers[feature]['scale']
-                if scale == 0: # 避免除以零
-                    scale = 1e-9
-                processed_df[feature] = (processed_df[feature] - mean) / scale
-                # 裁剪極端值
-                processed_df[feature] = np.clip(processed_df[feature], -5.0, 5.0)
-            else:
-                logger.warning(f"特徵 '{feature}' 在 Scaler 檔案中未找到，將不會被標準化。")
-                # 如果某个特徵在 scaler 中不存在，可以選擇填充0或從特徵列表中移除
-                processed_df[feature] = 0 
-
-        # 確保特徵順序與訓練時一致
-        final_features = [f for f in self.scalers.keys() if f in processed_df.columns]
-        processed_df = processed_df[final_features]
         
-        # 刪除因 shift(1) 操作產生的第一行 NaN
-        processed_df = processed_df.iloc[1:]
+        price_feature_cols = []
+        # 訓練時主要使用 bid/ask，這裡保持一致
+        for col_type in ['bid', 'ask']:
+            for ohlc in ['open', 'high', 'low', 'close']:
+                price_col = f"{col_type}_{ohlc}"
+                if price_col in df.columns:
+                    return_col_name = f"{price_col}_log_ret"
+                    processed_df[return_col_name] = self._calculate_log_returns(df[price_col])
+                    price_feature_cols.append(return_col_name)
 
-        logger.info(f"數據預處理完成。最終特徵形狀: {processed_data.shape}")
-        return processed_df.values
+        volume_feature_col = None
+        if 'volume' in df.columns:
+            volume_col_name = "volume_log"
+            processed_df[volume_col_name] = np.log1p(df['volume'])
+            volume_feature_col = volume_col_name
+
+        features_to_process = price_feature_cols + ([volume_feature_col] if volume_feature_col else [])
+        
+        if not features_to_process:
+            logger.warning(f"[{instrument}] 沒有生成任何特徵。")
+            return np.array([])
+
+        # 3. 使用已載入的 Scaler 進行標準化
+        instrument_scalers = self.scalers.get(instrument)
+        if not instrument_scalers:
+            logger.error(f"[{instrument}] 找不到該交易對的 Scaler。無法進行標準化。")
+            raise ValueError(f"Scaler for {instrument} not found in scalers file.")
+
+        expected_feature_order = list(instrument_scalers.keys())
+
+        for feature_col in expected_feature_order:
+            if feature_col in processed_df.columns:
+                scaler_params = instrument_scalers[feature_col]
+                mean = scaler_params.get('mean', [0.0])[0] # 從list中獲取
+                scale = scaler_params.get('scale', [1.0])[0] # 從list中獲取
+
+                if scale < 1e-9: scale = 1.0 # 防止除以零
+
+                series_to_scale = processed_df[feature_col].values
+                standardized_series = (series_to_scale - mean) / scale
+                
+                # 4. 裁剪 (與訓練時一致)
+                processed_df[feature_col] = np.clip(standardized_series, -5.0, 5.0)
+            else:
+                logger.warning(f"[{instrument}] 預期特徵 '{feature_col}' 未在處理過程中生成，將以 0 填充。")
+                processed_df[feature_col] = 0.0
+        
+        # 確保所有預期特徵都存在且順序正確
+        final_df = processed_df[expected_feature_order]
+
+        # 移除因計算log return而在開頭產生的NaN值
+        final_df.dropna(inplace=True)
+
+        if final_df.empty:
+            logger.warning(f"[{instrument}] 預處理後數據為空（可能因dropna）。")
+            return np.array([])
+            
+        # 5. 確保返回的數據長度與模型回看窗口一致
+        if len(final_df) > self.model_lookback_window:
+            final_df = final_df.tail(self.model_lookback_window)
+        elif len(final_df) < self.model_lookback_window:
+            logger.warning(f"[{instrument}] 預處理後的數據長度 ({len(final_df)}) 小於模型所需的回看窗口 ({self.model_lookback_window})。上層調用者需處理填充。")
+            # 在此處不進行填充，讓上層調用者(如PredictionService)決定如何處理長度不足的情況
+            # 因為可能需要組合多個標的，統一進行padding
+            pass
+
+        logger.info(f"[{instrument}] 成功將 {len(raw_candles)} 條蠟燭數據轉換為 {final_df.shape[0]}x{final_df.shape[1]} 的特徵矩陣。")
+        
+        return final_df.values
 
 # --- 範例 ---
 if __name__ == '__main__':
     # 假設我們有一個從訓練中保存的 scaler 檔案
     dummy_scalers = {
-        "mid_c_log_ret": {"mean": 1.2e-05, "scale": 0.00015},
-        "volume_log": {"mean": 8.5, "scale": 1.2}
+        "EUR_USD": {
+            "bid_close_log_ret": {"mean": [1.2e-05], "scale": [0.00015]},
+            "volume_log": {"mean": [8.5], "scale": [1.2]}
+        },
+        "USD_JPY": {
+            "bid_close_log_ret": {"mean": [1.1e-05], "scale": [0.0001]},
+            "volume_log": {"mean": [7.5], "scale": [1.1]}
+        }
     }
     scaler_file = "dummy_scalers.json"
     with open(scaler_file, 'w') as f:
         json.dump(dummy_scalers, f)
 
     # 創建一個預處理器實例
-    config = {"data_freshness_threshold_minutes": 10}
+    config = {"data_freshness_threshold_minutes": 10, "model_lookback_window": 128}
     preprocessor = LivePreprocessor(scaler_file, config)
 
     # 模擬從 Oanda API 收到的數據
@@ -189,7 +220,7 @@ if __name__ == '__main__':
     ]
 
     # 進行轉換
-    processed_data = preprocessor.transform(mock_api_data)
+    processed_data = preprocessor.transform(mock_api_data, "EUR_USD")
 
     logger.info("轉換後的數據 (Numpy Array):")
     logger.info(processed_data)
