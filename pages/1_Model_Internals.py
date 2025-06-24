@@ -108,7 +108,5 @@ def update_dashboard():
         else:
             st.info("Waiting for data from the training process...")
 
-# Main loop to auto-refresh
-while True:
-    update_dashboard()
-    time.sleep(5) # Refresh every 5 seconds
+# The page will now update on reload.
+update_dashboard()
