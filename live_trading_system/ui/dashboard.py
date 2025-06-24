@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 from typing import List, Dict, Any
@@ -7,16 +6,80 @@ from ..core.system_state import SystemState
 from ..trading.position_manager import PositionManager
 from ..database.database_manager import DatabaseManager
 
+def display_instrument_status(instrument_monitor: Any):
+    """Placeholder for displaying live instrument data."""
+    st.header("Instrument Monitor")
+    st.info("Live instrument status display is under development.")
+
+# 將 streamlit_app_complete.py 中的分類邏輯移植過來
+def get_categorized_instruments(state: SystemState) -> Dict[str, List[str]]:
+    """
+    獲取所有 OANDA 標的並進行分類。
+    利用 SystemState 快取結果以避免重複 API 調用。
+    """
+    if state.categorized_instruments:
+        return state.categorized_instruments
+
+    iim = state.get_instrument_manager()
+    all_symbols = iim.get_all_available_symbols()
+    
+    categorized = {
+        'Major Pairs': [], 'Minor Pairs': [], 'Precious Metals': [], 'Indices': [],
+        'Energy': [], 'Commodities': [], 'Crypto': [], 'Bonds': []
+    }
+    major_pairs = {'EUR_USD', 'USD_JPY', 'GBP_USD', 'AUD_USD', 'USD_CHF', 'USD_CAD', 'NZD_USD'}
+    
+    # 關鍵字可以根據需要擴充
+    index_keywords = ["SPX", "NAS", "US30", "UK100", "DE30", "JP225"]
+    metal_keywords = ["XAU", "XAG", "GOLD", "SILVER"]
+    energy_keywords = ["OIL", "BRENT", "NATGAS"]
+
+    for sym in all_symbols:
+        details = iim.get_details(sym)
+        if not details:
+            continue
+        
+        symbol = details.symbol
+        display_name = details.display_name
+        
+        # 簡易分類邏輯
+        if symbol in major_pairs:
+            categorized['Major Pairs'].append(symbol)
+        elif any(k in symbol for k in index_keywords):
+            categorized['Indices'].append(symbol)
+        elif any(k in symbol for k in metal_keywords):
+            categorized['Precious Metals'].append(symbol)
+        elif any(k in symbol for k in energy_keywords):
+            categorized['Energy'].append(symbol)
+        elif details.type == 'CURRENCY':
+            categorized['Minor Pairs'].append(symbol)
+        elif details.type == 'CFD':
+             if 'BOND' in display_name.upper():
+                 categorized['Bonds'].append(symbol)
+             else:
+                 categorized['Commodities'].append(symbol)
+        elif details.type == 'CRYPTO':
+            categorized['Crypto'].append(symbol)
+
+    # 移除空的分類並快取結果
+    state.categorized_instruments = {k: sorted(v) for k, v in categorized.items() if v}
+    return state.categorized_instruments
+
+
 def display_system_status(state: SystemState):
     """Displays the current status of the trading system."""
     st.header("System Status")
-    status = "Running" if state.is_running() else "Stopped"
-    instrument = state.get_current_instrument() or "Not Selected"
+    status = "Running" if state.is_running else "Stopped"
+    instruments = state.get_selected_instruments()
+    instruments_str = ", ".join(instruments) if instruments else "Not Selected"
     model = state.get_current_model() or "Not Loaded"
     
     col1, col2, col3 = st.columns(3)
     col1.metric("System Control", status)
-    col2.metric("Active Instrument", instrument)
+    # 顯示多個標的，如果太長則截斷
+    if len(instruments_str) > 30:
+        instruments_str = f"{len(instruments)} selected"
+    col2.metric("Active Instruments", instruments_str)
     col3.metric("Active Model", model)
 
 def display_open_positions(position_manager: PositionManager):
@@ -62,43 +125,84 @@ def display_performance_metrics():
     # col2.metric("Win Rate", "62%")
     # col3.metric("Sharpe Ratio", "1.8")
 
-def create_control_panel(system_state: SystemState, main_logic_thread_func):
+def create_control_panel(system_state: SystemState, start_func, stop_func):
     """Creates control buttons for the system."""
     st.sidebar.header("Control Panel")
     
     # --- System Control ---
-    if not system_state.is_running():
-        if st.sidebar.button("Start System"):
-            system_state.set_running(True)
-            main_logic_thread_func()
+    # 增加一個禁言狀態，防止在選擇過程中誤觸
+    ui_enabled = not system_state.is_running
+
+    if ui_enabled:
+        if st.sidebar.button("▶️ Start System", disabled=not system_state.get_selected_instruments()):
+            start_func()
             st.sidebar.success("System started!")
-            st.experimental_rerun()
+            st.rerun()
     else:
-        if st.sidebar.button("Stop System"):
-            system_state.set_running(False)
+        if st.sidebar.button("⏹️ Stop System"):
+            stop_func()
             st.sidebar.warning("System stopping...")
-            st.experimental_rerun()
+            st.rerun()
 
     # --- Instrument and Model Selection ---
     st.sidebar.subheader("Configuration")
-    # In a real app, this list would come from a config file or an API
-    available_instruments = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD"]
-    selected_instrument = st.sidebar.selectbox(
-        "Select Instrument", 
-        options=available_instruments, 
-        index=available_instruments.index(system_state.get_current_instrument() or "EUR_USD")
-    )
-    if selected_instrument != system_state.get_current_instrument():
-        system_state.set_current_instrument(selected_instrument)
-        st.experimental_rerun()
+    
+    # 獲取分類好的標的
+    categorized_instruments = get_categorized_instruments(system_state)
+    
+    # 使用 session state 來保存展開狀態
+    if 'expanded_categories' not in st.session_state:
+        st.session_state.expanded_categories = set()
 
-    # This would also be dynamic in a full implementation
-    available_models = ["model_v1.pth", "model_v2_lstm.pth"]
+    # 顯示分類選擇器
+    selected_instruments = []
+    for category, instruments in categorized_instruments.items():
+        # 檢查是否有任何已選中的標的屬於此類別，以決定是否預設展開
+        is_expanded = any(item in system_state.get_selected_instruments() for item in instruments)
+        
+        with st.sidebar.expander(f"{category} ({len(instruments)})", expanded=is_expanded):
+            selections = st.multiselect(
+                f"Select from {category}",
+                options=instruments,
+                default=[inst for inst in instruments if inst in system_state.get_selected_instruments()],
+                key=f"multiselect_{category}",
+                disabled=not ui_enabled
+            )
+            selected_instruments.extend(selections)
+
+    # 檢查選擇是否有變化
+    if set(selected_instruments) != set(system_state.get_selected_instruments()):
+        system_state.set_selected_instruments(selected_instruments)
+        st.rerun()
+
+    # --- 動態模型選擇 ---
+    num_selected = len(system_state.get_selected_instruments())
+    
+    # 根據選擇的標的數量決定可用的模型
+    if num_selected == 0:
+        available_models = []
+        st.sidebar.warning("Please select at least one instrument.")
+    elif num_selected == 1:
+        available_models = ["single_instrument_model_v1.pth", "single_instrument_model_v2.pth"]
+    else: # num_selected > 1
+        available_models = ["multi_instrument_model_v1.pth", "multi_instrument_model_v2.pth"]
+
+    # 確保當前模型在可用列表中，如果不在，則選擇第一個作為預設
+    current_model = system_state.get_current_model()
+    if not current_model or current_model not in available_models:
+        current_model = available_models[0] if available_models else None
+        if current_model:
+             system_state.set_current_model(current_model)
+
+
     selected_model = st.sidebar.selectbox(
         "Select Model", 
         options=available_models,
-        index=available_models.index(system_state.get_current_model() or "model_v1.pth")
+        index=available_models.index(current_model) if current_model and available_models else 0,
+        key="model_select",
+        disabled=not ui_enabled or not available_models
     )
-    if selected_model != system_state.get_current_model():
+    
+    if selected_model and selected_model != system_state.get_current_model():
         system_state.set_current_model(selected_model)
-        st.experimental_rerun()
+        st.rerun()

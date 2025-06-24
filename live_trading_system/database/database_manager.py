@@ -3,6 +3,7 @@ import logging
 import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+import os # Import the os module
 
 class DatabaseManager:
     """
@@ -11,22 +12,28 @@ class DatabaseManager:
     """
     def __init__(self, db_path: str):
         """
-        Initializes the DatabaseManager and creates necessary tables.
+        Initializes the DatabaseManager.
 
         Args:
-            db_path (str): The file path for the SQLite database.
+            db_path (str): The full path to the SQLite database file.
         """
-        self.logger = logging.getLogger(__name__)
         self.db_path = db_path
-        self.conn: Optional[sqlite3.Connection] = None
+        self.conn = None
+        self.logger = logging.getLogger(__name__)
         try:
+            # Ensure the directory for the database file exists
+            db_dir = os.path.dirname(self.db_path)
+            if not os.path.exists(db_dir):
+                os.makedirs(db_dir)
+                self.logger.info(f"Created database directory: {db_dir}")
+
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-            # Return rows as dictionaries
-            self.conn.row_factory = sqlite3.Row
             self.logger.info(f"Successfully connected to database at {self.db_path}")
             self._create_tables()
         except sqlite3.Error as e:
-            self.logger.critical(f"Database connection failed: {e}", exc_info=True)
+            self.logger.error(f"Database connection failed: {e}", exc_info=True)
+            # Re-raise the exception to be caught by the main initializer
+            raise
 
     def _create_tables(self):
         """

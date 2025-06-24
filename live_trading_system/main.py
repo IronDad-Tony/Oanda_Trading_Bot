@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from typing import Dict, Any, Optional
+from dotenv import load_dotenv
 
 # Add project root to sys.path to allow direct imports
 project_root = os.path.abspath(os.path.dirname(__file__))
@@ -22,6 +23,7 @@ from live_trading_system.trading.order_manager import OrderManager
 from live_trading_system.trading.position_manager import PositionManager
 from live_trading_system.trading.risk_manager import RiskManager
 from live_trading_system.database.database_manager import DatabaseManager
+from dotenv import load_dotenv
 
 def load_config() -> Optional[Dict[str, Any]]:
     """Loads the live_config.json file."""
@@ -45,6 +47,12 @@ def initialize_system(
     Initializes all components of the trading system.
     Allows injecting mock components for testing purposes.
     """
+    # Load environment variables from .env file at the project root
+    # The project root is the parent directory of the 'live_trading_system' directory
+    project_root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    dotenv_path = os.path.join(project_root_path, '.env')
+    load_dotenv(dotenv_path=dotenv_path)
+    
     setup_logger()
     config = load_config()
     if not config:
@@ -52,9 +60,29 @@ def initialize_system(
 
     try:
         # --- Core Components ---
-        client = mock_client if mock_client else OandaClient(config)
-        system_state = SystemState() # Corrected: Singleton does not take config
-        db_manager = mock_db_manager if mock_db_manager else DatabaseManager(config.get('database_path', 'trading_data.db'))
+        oanda_api_key = os.getenv("OANDA_API_KEY")
+        oanda_account_id = os.getenv("OANDA_ACCOUNT_ID")
+        oanda_environment = os.getenv("OANDA_ENVIRONMENT", "practice")
+
+        if not oanda_api_key or not oanda_account_id:
+            logging.critical("CRITICAL: OANDA_API_KEY or OANDA_ACCOUNT_ID not found in .env file.")
+            logging.critical(f"Attempted to load .env from: {dotenv_path}")
+            return None
+
+        # Correctly initialize OandaClient with individual arguments
+        client = mock_client if mock_client else OandaClient(
+            api_key=oanda_api_key,
+            account_id=oanda_account_id,
+            environment=oanda_environment
+        )
+        
+        system_state = SystemState()
+        
+        # Construct absolute path for the database
+        db_path_from_config = config.get('database', {}).get('path', 'database/trading_history.db')
+        db_full_path = os.path.join(project_root_path, db_path_from_config)
+        db_manager = mock_db_manager if mock_db_manager else DatabaseManager(db_path=db_full_path)
+
         instrument_monitor = InstrumentMonitor(client, system_state, config)
 
         # --- Data and Model Components ---

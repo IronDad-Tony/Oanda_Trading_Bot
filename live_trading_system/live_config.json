@@ -4,5 +4,11 @@
   "model_lookback_window": 100,
   "max_position_size_per_trade": 1000,
   "max_total_risk_pct": 2.0,
-  "daily_loss_limit_pct": 5.0
+  "daily_loss_limit_pct": 5.0,
+  "database": {
+    "path": "database/trading_history.db"
+  },
+  "preprocessor": {
+    "scalers_path": "live_trading_system/tests/dummy_scalers.json"
+  }
 }

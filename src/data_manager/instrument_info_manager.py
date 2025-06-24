@@ -91,16 +91,27 @@ class InstrumentInfoManager:
             cls._instance = super(InstrumentInfoManager, cls).__new__(cls)
             cls._instance._initialized = False
         return cls._instance
-    def __init__(self, force_refresh: bool = False):
+    def __init__(self, api_key: Optional[str] = None, account_id: Optional[str] = None, base_url: Optional[str] = None, force_refresh: bool = False):
         if hasattr(self, '_initialized') and self._initialized and not force_refresh: return
-        if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
-            msg = "OANDA_API_KEY 或 OANDA_ACCOUNT_ID 未配置。InstrumentInfoManager 無法工作。"
-            logger.critical(msg); self._instrument_cache = {}; self._initialized = True; return
+        
+        # Use provided credentials, otherwise fall back to config file from common.config
+        self.api_key = api_key or OANDA_API_KEY
+        self.account_id = account_id or OANDA_ACCOUNT_ID
+        self.base_url = base_url or OANDA_BASE_URL
+
+        if not self.api_key or not self.account_id or not self.base_url:
+            msg = "OANDA_API_KEY, OANDA_ACCOUNT_ID, or OANDA_BASE_URL not configured. InstrumentInfoManager cannot work."
+            logger.critical(msg)
+            self._instrument_cache = {}
+            self._initialized = True
+            return
+            
         self._api_session = requests.Session()
-        self._api_session.headers.update({"Authorization": f"Bearer {OANDA_API_KEY}", "Content-Type": "application/json"})
+        self._api_session.headers.update({"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
         if force_refresh or self._is_cache_expired(): self._fetch_all_instruments_details()
         self._initialized = True
-        logger.info(f"InstrumentInfoManager 初始化完成。緩存中包含 {len(self._instrument_cache)} 個交易品種信息。")
+        logger.info(f"InstrumentInfoManager initialized. Cache contains {len(self._instrument_cache)} instruments.")
+
     def _is_cache_expired(self) -> bool:
         if self._last_fetch_time is None: return True
         return (time.time() - self._last_fetch_time) > self._cache_expiry_seconds
@@ -111,7 +122,7 @@ class InstrumentInfoManager:
     #                     # 對於Singleton，這通常沒問題，但對於類級別的緩存，要小心
     #                     # 這裡我們用時間戳來控制緩存刷新，lru_cache可能不是最必要的
     def _fetch_all_instruments_details(self) -> None:
-        endpoint = f"{OANDA_BASE_URL}/accounts/{OANDA_ACCOUNT_ID}/instruments"
+        endpoint = f"{self.base_url}/accounts/{self.account_id}/instruments"
         logger.info(f"正在從OANDA API獲取所有交易品種詳細信息: {endpoint}")
         temp_instrument_cache: Dict[str, InstrumentDetails] = {}
         try:
