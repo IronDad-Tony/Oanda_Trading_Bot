@@ -59,7 +59,7 @@ def display_transformer_activations(diagnostics_data):
             st.write(f"**Layer {i+1} Activations (Mean):**")
             fig = px.imshow([layer_activation["mean"]], text_auto=True, aspect="auto", labels=dict(x="Neuron", y="Batch Item", color="Activation"))
             fig.update_layout(title=f"Layer {i+1} Mean Activations Heatmap")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"transformer_activation_{i}")
         else:
             st.write(f"Data for layer {i+1} is not in the expected format.")
 
@@ -80,12 +80,12 @@ def display_quantum_strategy_pool(diagnostics_data):
     if weights is not None:
         st.write("**Strategy Weights:**")
         fig = px.bar(x=[f"Strategy {i}" for i in range(len(weights))], y=weights, labels={'x': 'Strategy', 'y': 'Weight'}, title="Strategy Pool Weights")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="q_weights")
 
     if activations is not None:
         st.write("**Strategy Activations:**")
         fig = px.imshow([activations], text_auto=True, aspect="auto", labels=dict(x="Strategy", y="Batch Item", color="Activation"), title="Strategy Pool Activations")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="q_activations")
 
 
 def update_dashboard():
