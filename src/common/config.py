@@ -217,9 +217,9 @@ AMP_CONVERSION_LOG_INTERVAL = 100   # 每 N 次 AMP 轉換才記錄一次日誌�
 # --- 風險管理參數 ---
 MAX_ACCOUNT_RISK_PERCENTAGE = 0.02  # 單筆交易最大可承受賬戶風險百分比 (例如 2%)
 MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY = 0.10 # 單個倉位最大名義價值佔總淨值的百分比 (例如 10%)
-ATR_PERIOD = 14                     # 計算ATR的週期
-ATR_STOP_LOSS_MULTIPLIER = 2.0      # ATR止損倍數
-STOP_LOSS_ATR_MULTIPLIER = 2.0      # ATR止損倍數 <--- 確保這一行存在且未註釋!
+ATR_PERIOD = 28                     # 計算ATR的週期
+ATR_STOP_LOSS_MULTIPLIER = 3.5      # ATR止損倍數
+STOP_LOSS_ATR_MULTIPLIER = 3.5      # ATR止損倍數 <--- 確保這一行存在且未註釋!
 # DEFAULT_PIP_VALUE = {               # 主要貨幣對的近似點值 (相對於USD, 1標準手)
 #     "AUD_USD": 10.0, "EUR_USD": 10.0, "GBP_USD": 10.0,
 #     "USD_CAD": 7.0, "USD_CHF": 10.0, "USD_JPY": 9.0, # 近似值，實際會變化
