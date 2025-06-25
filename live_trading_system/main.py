@@ -87,7 +87,8 @@ def initialize_system(
 
         # --- Data and Model Components ---
         scalers_path = config.get('preprocessor', {}).get('scalers_path', 'path/to/default/scalers.json')
-        preprocessor = LivePreprocessor(scalers_path, config)
+        model_config_path = os.path.join(project_root_path, 'configs', 'enhanced_model_config.json')
+        preprocessor = LivePreprocessor(scalers_path, config, model_config_path)
         prediction_service = mock_prediction_service if mock_prediction_service else PredictionService(config)
 
         # --- Trading Components ---

@@ -1,7 +1,7 @@
 {
   "trading_instruments": ["EUR_USD", "USD_JPY"],
   "trading_granularity": "S5",
-  "model_lookback_window": 100,
+  "model_lookback_window": 128,
   "max_position_size_per_trade": 1000,
   "max_total_risk_pct": 2.0,
   "daily_loss_limit_pct": 5.0,

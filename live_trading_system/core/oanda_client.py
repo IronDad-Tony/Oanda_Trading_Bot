@@ -28,15 +28,27 @@ class OandaClient:
     """
     def __init__(self, api_key: str, account_id: str, environment: str = "practice"):
         self.account_id = account_id
+        self.last_transaction_id: Optional[str] = None # <--- 新增：保存最後的交易ID
         if not api_key or not account_id:
             logger.critical("OANDA_ACCOUNT_ID 或 OANDA_API_KEY 未提供。")
             raise ValueError("API credentials must be provided")
         
         try:
             self.client = oandapyV20.API(access_token=api_key, environment=environment)
+            self.initialize_transaction_id() # <--- 新增：初始化時獲取ID
         except Exception as e:
             logger.critical(f"無法初始化 Oanda API 客戶端: {e}")
             raise
+
+    def initialize_transaction_id(self):
+        """在啟動時獲取一次帳戶摘要，以初始化 last_transaction_id。"""
+        logger.info("正在初始化 last_transaction_id...")
+        summary = self.get_account_summary()
+        if summary and 'account' in summary and 'lastTransactionID' in summary['account']:
+            self.last_transaction_id = summary['account']['lastTransactionID']
+            logger.info(f"last_transaction_id 初始化成功: {self.last_transaction_id}")
+        else:
+            logger.warning("無法在啟動時初始化 last_transaction_id。後續的 AccountChanges 請求可能會失敗。")
 
     @classmethod
     def from_env(cls):
@@ -59,7 +71,6 @@ class OandaClient:
         如果請求失敗，會根據 tenacity 配置進行重試。
         """
         try:
-            # Use type(endpoint).__name__ to get the class name for logging
             endpoint_name = type(endpoint).__name__
             logger.debug(f"Executing OANDA request: {endpoint_name}")
             response = self.client.request(endpoint)
@@ -74,17 +85,20 @@ class OandaClient:
             raise
 
     def get_account_summary(self) -> Optional[Dict[str, Any]]:
-        """獲取帳戶摘要資訊。"""
+        """獲取帳戶摘要資訊，並更新 last_transaction_id。"""
         endpoint = accounts.AccountSummary(self.account_id)
         try:
-            return self._request(endpoint)
+            response = self._request(endpoint)
+            if response and 'account' in response and 'lastTransactionID' in response['account']:
+                self.last_transaction_id = response['account']['lastTransactionID']
+                logger.debug(f"last_transaction_id 已更新為: {self.last_transaction_id}")
+            return response
         except V20Error:
             return None
 
     def get_candles(self, instrument: str, count: int = 100, granularity: str = "S5", price: str = "M") -> Optional[List[Dict[str, Any]]]:
         """
-        獲取最新的蠟燭圖數據。 price: 'M' (Midpoint), 'B' (Bid), 'A' (Ask)
-        修正參數順序與型別，確保 granularity 為字串、count 為整數。
+        獲取最新的蠟燭圖數據。
         """
         params = {"granularity": granularity, "count": int(count), "price": price}
         endpoint = instruments.InstrumentsCandles(instrument=instrument, params=params)
@@ -101,7 +115,7 @@ class OandaClient:
                 "instrument": instrument,
                 "units": str(units),
                 "type": "MARKET",
-                "timeInForce": "FOK",  # Fill or Kill
+                "timeInForce": "FOK",
                 "positionFill": "DEFAULT"
             }
         }
@@ -125,19 +139,32 @@ class OandaClient:
         except V20Error:
             return None
             
-    def get_equity_history(self, period: str = "7D") -> Optional[Dict[str, Any]]:
-        """獲取帳戶淨值歷史數據"""
-        params = {"period": period}
+    def get_account_changes(self) -> Optional[Dict[str, Any]]: # <--- 原 get_equity_history, 更名並修改
+        """獲取自上次查詢以來的帳戶變動。"""
+        if not self.last_transaction_id:
+            logger.warning("last_transaction_id 未設定，無法獲取 AccountChanges。請先調用 get_account_summary()。")
+            # 或者，可以選擇在這裡調用一次 get_account_summary() 來初始化
+            self.initialize_transaction_id()
+            if not self.last_transaction_id:
+                 return None
+
+        params = {"sinceTransactionID": self.last_transaction_id}
         endpoint = accounts.AccountChanges(self.account_id, params=params)
         try:
-            return self._request(endpoint)
+            response = self._request(endpoint)
+            # 在成功獲取後，更新 last_transaction_id
+            if response and 'lastTransactionID' in response:
+                new_last_id = response['lastTransactionID']
+                if self.last_transaction_id != new_last_id:
+                    self.last_transaction_id = new_last_id
+                    logger.debug(f"AccountChanges 成功，last_transaction_id 更新為: {self.last_transaction_id}")
+            return response
         except V20Error:
             return None
 
     def close_position(self, instrument: str, long_units: Optional[str] = None, short_units: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         關閉一個商品的未平倉部位。
-        需明確指定關閉多頭或空頭部位。
         """
         data = {}
         if long_units:
@@ -168,25 +195,21 @@ if __name__ == '__main__':
     account_summary = client.get_account_summary()
     if account_summary:
         logger.info(f"帳戶資訊獲取成功: Balance = {account_summary['account']['balance']}")
+        logger.info(f"Last Transaction ID: {client.last_transaction_id}")
     else:
         logger.error("帳戶資訊獲取失敗。")
 
+    # 測試獲取帳戶變動
+    changes = client.get_account_changes()
+    if changes:
+        logger.info(f"獲取到 {len(changes.get('changes', {}).get('ordersCreated', []))} 個新訂單。")
+        logger.info(f"Last Transaction ID after changes: {client.last_transaction_id}")
+    else:
+        logger.warning("帳戶變動資訊獲取失敗 (可能是因為沒有變動)。")
+
     # 測試獲取蠟燭圖
-    candles = client.get_candles("EUR_USD", "M5", count=5)
+    candles = client.get_candles("EUR_USD", granularity="M5", count=5)
     if candles:
         logger.info(f"獲取到 {len(candles)} 根 EUR_USD M5 蠟燭圖數據。")
-        logger.info(f"最新一根蠟燭圖: {candles[-1]}")
     else:
         logger.error("蠟燭圖數據獲取失敗。")
-
-    # 測試獲取倉位
-    positions = client.get_open_positions()
-    if positions is not None:
-        if positions:
-            logger.info(f"當前持有 {len(positions)} 個倉位。")
-            for pos in positions:
-                logger.info(f"  - {pos['instrument']}: {pos['long']['units']} (L) / {pos['short']['units']} (S)")
-        else:
-            logger.info("當前無任何倉位。")
-    else:
-        logger.error("倉位資訊獲取失敗。")
