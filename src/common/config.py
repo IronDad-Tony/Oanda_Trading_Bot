@@ -72,7 +72,7 @@ MMAP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 # 為了快速啟動，先用幾個常見的，您可以後續修改或通過UI傳入
 DEFAULT_SYMBOLS = ["EUR_USD", "USD_JPY", "GBP_USD", "AUD_USD", "XAU_USD"]
 GRANULARITY = "S5" # 數據時間粒度
-MAX_SYMBOLS_ALLOWED = 5 # UI允許選擇的最大交易對數量 (用於Transformer輸入維度等)
+MAX_SYMBOLS_ALLOWED = 10 # UI允許選擇的最大交易對數量 (用於Transformer輸入維度等)
 PRICE_COLUMNS = ['bid_open', 'bid_high', 'bid_low', 'bid_close',
                  'ask_open', 'ask_high', 'ask_low', 'ask_close', 'volume']
 PRICE_TYPES = {'open': ['bid_open', 'ask_open'],

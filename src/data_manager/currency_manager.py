@@ -14,6 +14,15 @@ class CurrencyDependencyManager:
         self.apply_oanda_markup = apply_oanda_markup
         self.oanda_markup = Decimal('0.005')  # 0.5% markup
     
+    @staticmethod
+    def normalize_symbol_format(symbol: str) -> str:
+        """
+        將 symbol 格式正規化，將 'EUR/USD' 轉為 'EUR_USD'，確保與 Oanda 標準一致。
+        """
+        if isinstance(symbol, str) and "/" in symbol:
+            return symbol.replace("/", "_").upper()
+        return symbol.upper() if isinstance(symbol, str) else symbol
+
     def get_midpoint_rate(self, bid: Decimal, ask: Decimal) -> Decimal:
         """計算中間價格"""
         # 確保輸入是 Decimal 類型
@@ -44,6 +53,10 @@ class CurrencyDependencyManager:
         獲取特定貨幣對的匯率，支持交叉匯率計算
         添加遞迴深度限制、循環檢測和多層中介貨幣支持
         """
+        # 先正規化 symbol 格式，確保都是 Oanda 標準
+        base_curr = self.normalize_symbol_format(base_curr)
+        quote_curr = self.normalize_symbol_format(quote_curr)
+        
         # 最大遞迴深度保護 (防止無限遞迴)
         MAX_DEPTH = 4
         if depth > MAX_DEPTH:
@@ -53,20 +66,18 @@ class CurrencyDependencyManager:
         if visited is None:
             visited = set()
             
-        base_upper = base_curr.upper()
-        quote_upper = quote_curr.upper()
-        pair = (base_upper, quote_upper)
+        pair = (base_curr, quote_curr)
         
         # 防止循環處理相同貨幣對
         if pair in visited:
             return None
         visited.add(pair)
           # 相同貨幣直接返回1.0
-        if base_upper == quote_upper:
+        if base_curr == quote_curr:
             return Decimal('1.0')
         
         # 嘗試直接貨幣對
-        direct_pair = f"{base_upper}_{quote_upper}"
+        direct_pair = f"{base_curr}_{quote_curr}"
         if direct_pair in current_prices_map:
             bid, ask = current_prices_map[direct_pair]
             if ask > 0:
@@ -79,7 +90,7 @@ class CurrencyDependencyManager:
                     return ask
         
         # 嘗試反向貨幣對
-        reverse_pair = f"{quote_upper}_{base_upper}"
+        reverse_pair = f"{quote_curr}_{base_curr}"
         if reverse_pair in current_prices_map:
             bid, ask = current_prices_map[reverse_pair]
             if bid > 0:
@@ -95,24 +106,24 @@ class CurrencyDependencyManager:
         # 嘗試通過中介貨幣轉換 (USD, EUR, GBP, JPY, AUD, CAD)
         intermediates = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD"]
         for intermediate in intermediates:            # 跳過與查詢貨幣相同的仲介貨幣
-            if intermediate == base_upper or intermediate == quote_upper:
+            if intermediate == base_curr or intermediate == quote_curr:
                 continue
                 
             # 獲取基礎貨幣對中介貨幣的匯率
             base_to_intermediate = self.get_specific_rate(
-                base_upper, intermediate, current_prices_map, visited.copy(), depth+1, is_for_conversion
+                base_curr, intermediate, current_prices_map, visited.copy(), depth+1, is_for_conversion
             )
             
             # 獲取目標貨幣對中介貨幣的匯率
             quote_to_intermediate = self.get_specific_rate(
-                quote_upper, intermediate, current_prices_map, visited.copy(), depth+1, is_for_conversion
+                quote_curr, intermediate, current_prices_map, visited.copy(), depth+1, is_for_conversion
             )
             
             if base_to_intermediate is not None and quote_to_intermediate is not None:
                 if quote_to_intermediate != 0:                    # 計算交叉匯率: (base/intermediate) / (quote/intermediate)
                     return base_to_intermediate / quote_to_intermediate
         
-        logger.debug(f"無法找到 {base_upper}_{quote_upper} 的轉換路徑")
+        logger.debug(f"無法找到 {base_curr}_{quote_curr} 的轉換路徑")
         return None
 
     def convert_to_account_currency(self, from_currency: str, 
@@ -122,15 +133,16 @@ class CurrencyDependencyManager:
         將任意貨幣轉換為賬戶貨幣（符合Oanda規則）
         is_credit: True為獲利轉換，False為虧損轉換
         """
-        from_upper = from_currency.upper()
+        # 先正規化 symbol 格式
+        from_currency = self.normalize_symbol_format(from_currency)
         
         # 相同貨幣直接返回1.0
-        if from_upper == self.account_currency:
+        if from_currency == self.account_currency:
             return Decimal('1.0')
         
         # 使用標記表示這是貨幣轉換，需要應用markup
         rate = self.get_specific_rate(
-            from_upper,
+            from_currency,
             self.account_currency,
             current_prices_map,
             visited=None,
@@ -142,7 +154,7 @@ class CurrencyDependencyManager:
             return rate
         
         # 如果直接轉換失敗，嘗試反向轉換
-        reverse_rate = self.get_specific_rate(self.account_currency, from_upper, current_prices_map,
+        reverse_rate = self.get_specific_rate(self.account_currency, from_currency, current_prices_map,
                                             visited=None, depth=0, is_for_conversion=True)
         if reverse_rate and reverse_rate > 0:
             return Decimal('1.0') / reverse_rate
@@ -167,6 +179,10 @@ class CurrencyDependencyManager:
               Returns:
             交易匯率，如果無法獲取則返回None
         """
+        # 先正規化 symbol 格式
+        base_curr = self.normalize_symbol_format(base_curr)
+        quote_curr = self.normalize_symbol_format(quote_curr)
+        
         return self.get_specific_rate(
             base_curr, quote_curr, current_prices_map,
             visited=None, depth=0, is_for_conversion=False
@@ -233,7 +249,7 @@ def ensure_currency_data_for_trading(trading_symbols: List[str], account_currenc
     """
     确保交易所需的所有货币数据已下载，包括汇率转换所需的额外货币对
     
-    所有额外货幣對將按照訓練symbols的標準下載完整的價量信息（包括開盤價、最高價、最低價、收盤價、成交量等），
+    所有额外貨幣對將按照訓練symbols的標準下載完整的價量信息（包括開盤價、最高價、最低價、收盤價、成交量等），
     並存儲到數據庫中。這樣如果這些貨幣對後續被選為訓練symbol，就不需要重新下載。
     
     返回:
