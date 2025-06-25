@@ -81,9 +81,12 @@ class OandaClient:
         except V20Error:
             return None
 
-    def get_candles(self, instrument: str, granularity: str, count: int = 100, price: str = "M") -> Optional[List[Dict[str, Any]]]:
-        """獲取最新的蠟燭圖數據。 price: 'M' (Midpoint), 'B' (Bid), 'A' (Ask)"""
-        params = {"granularity": granularity, "count": count, "price": price}
+    def get_candles(self, instrument: str, count: int = 100, granularity: str = "S5", price: str = "M") -> Optional[List[Dict[str, Any]]]:
+        """
+        獲取最新的蠟燭圖數據。 price: 'M' (Midpoint), 'B' (Bid), 'A' (Ask)
+        修正參數順序與型別，確保 granularity 為字串、count 為整數。
+        """
+        params = {"granularity": granularity, "count": int(count), "price": price}
         endpoint = instruments.InstrumentsCandles(instrument=instrument, params=params)
         try:
             data = self._request(endpoint)

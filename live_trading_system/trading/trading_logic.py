@@ -80,78 +80,76 @@ class TradingLogic:
 
     def execute_trade_cycle(self):
         """
-        Executes a single cycle of the trading logic for the currently selected instrument.
+        執行所有當前選擇標的的單次交易循環。
+        會遍歷 SystemState 中所有已選擇的 instrument，對每個 instrument 執行一次 cycle。
         """
-        instrument = self.system_state.get_current_instrument()
-        if not instrument:
-            self.logger.debug("No instrument currently selected in UI. Skipping trade cycle.")
+        instruments = self.system_state.get_selected_instruments()
+        if not instruments:
+            self.logger.debug("目前未選擇任何交易標的，跳過本次交易循環。")
             return
 
-        # Dynamically create and initialize buffer if it\'s the first time seeing this instrument.
-        if instrument not in self.data_buffers:
-            self.logger.info(f"Data buffer for new instrument \'{instrument}\' not found. Creating and initializing.")
-            self.data_buffers[instrument] = collections.deque(maxlen=self.lookback_window)
-            self._fill_buffer(instrument)
-            # If filling fails, the buffer will be empty and logic below will handle it.
-
-        self.logger.info(f"Running logic cycle for {instrument}.")
-
-        try:
-            # Check if buffer is ready, if not, try to initialize it
-            if len(self.data_buffers[instrument]) < self.lookback_window:
-                self.logger.warning(f"Data buffer for {instrument} is not ready. Attempting to re-initialize.")
+        for instrument in instruments:
+            # 若首次遇到該 instrument，動態建立 buffer 並初始化
+            if instrument not in self.data_buffers:
+                self.logger.info(f"Data buffer for new instrument '{instrument}' not found. Creating and initializing.")
+                self.data_buffers[instrument] = collections.deque(maxlen=self.lookback_window)
                 self._fill_buffer(instrument)
-                # Skip this cycle if buffer is still not ready
+
+            self.logger.info(f"Running logic cycle for {instrument}.")
+
+            try:
+                # 檢查 buffer 是否已準備好
                 if len(self.data_buffers[instrument]) < self.lookback_window:
-                    self.logger.warning(f"Skipping cycle for {instrument}, buffer still not ready.")
-                    return
-            
-            # Fetch the latest candle to keep the buffer fresh
-            latest_candles = self.client.get_candles(instrument, 2, self.granularity) # Fetch 2 to be safe
-            if not latest_candles:
-                self.logger.warning(f"Could not fetch latest candle for {instrument}. Skipping.")
-                return
+                    self.logger.warning(f"Data buffer for {instrument} is not ready. Attempting to re-initialize.")
+                    self._fill_buffer(instrument)
+                    if len(self.data_buffers[instrument]) < self.lookback_window:
+                        self.logger.warning(f"Skipping cycle for {instrument}, buffer still not ready.")
+                        continue
 
-            # Update buffer only with new candles
-            last_buffered_time = self.data_buffers[instrument][-1]['time']
-            new_candle = latest_candles[-1]
-            if new_candle['time'] > last_buffered_time:
-                self.data_buffers[instrument].append(new_candle)
-                self.logger.debug(f"Appended new candle for {instrument} from {new_candle['time']}.")
-            else:
-                self.logger.debug(f"No new candle data for {instrument}. Last known time: {last_buffered_time}")
-                return # No new data, skip to next instrument
+                # 取得最新 K 線，保持 buffer 新鮮
+                latest_candles = self.client.get_candles(instrument, 2, self.granularity)
+                if not latest_candles:
+                    self.logger.warning(f"Could not fetch latest candle for {instrument}. Skipping.")
+                    continue
 
-            # 2. Preprocess Data
-            self.logger.debug(f"Preprocessing data for {instrument}.")
-            # The preprocessor needs a list, not a deque
-            features = self.preprocessor.transform(list(self.data_buffers[instrument]))
-            if features is None:
-                self.logger.error(f"Data preprocessing failed for {instrument}.")
-                return
+                last_buffered_time = self.data_buffers[instrument][-1]['time']
+                new_candle = latest_candles[-1]
+                if new_candle['time'] > last_buffered_time:
+                    self.data_buffers[instrument].append(new_candle)
+                    self.logger.debug(f"Appended new candle for {instrument} from {new_candle['time']}.")
+                else:
+                    self.logger.debug(f"No new candle data for {instrument}. Last known time: {last_buffered_time}")
+                    continue
 
-            # 3. Get Prediction
-            self.logger.debug(f"Getting prediction for {instrument} from model.")
-            prediction = self.prediction_service.predict(instrument, features)
-            if prediction is None:
-                self.logger.error(f"Failed to get a prediction for {instrument}.")
-                return
+                # 特徵工程
+                self.logger.debug(f"Preprocessing data for {instrument}.")
+                features = self.preprocessor.transform(list(self.data_buffers[instrument]), instrument)
+                if features is None or features.size == 0:
+                    self.logger.error(f"Data preprocessing failed for {instrument}.")
+                    continue
 
-            signal = prediction.item() 
-            self.logger.info(f"Generated signal for {instrument}: {signal}")
+                # 模型推論
+                self.logger.debug(f"Getting prediction for {instrument} from model.")
+                prediction_map = self.prediction_service.predict({instrument: features})
+                if not prediction_map or instrument not in prediction_map:
+                    self.logger.error(f"Failed to get a prediction for {instrument}.")
+                    continue
 
-            # 4. Process Signal
-            last_candle = self.data_buffers[instrument][-1]
-            signal_info = {
-                "instrument": instrument,
-                "signal": signal,
-                "price": float(last_candle['mid']['c']),
-                "timestamp": last_candle['time']
-            }
-            self.order_manager.process_signal(signal_info)
+                signal = prediction_map[instrument]
+                self.logger.info(f"Generated signal for {instrument}: {signal}")
 
-        except Exception as e:
-            self.logger.critical(f"Critical error in logic cycle for {instrument}: {e}", exc_info=True)
+                # 處理交易訊號
+                last_candle = self.data_buffers[instrument][-1]
+                signal_info = {
+                    "instrument": instrument,
+                    "signal": signal,
+                    "price": float(last_candle['mid']['c']),
+                    "timestamp": last_candle['time']
+                }
+                self.order_manager.process_signal(signal_info)
+
+            except Exception as e:
+                self.logger.critical(f"Critical error in logic cycle for {instrument}: {e}", exc_info=True)
 
     def run(self):
         """
