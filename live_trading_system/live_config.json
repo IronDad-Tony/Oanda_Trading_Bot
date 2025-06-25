@@ -10,5 +10,8 @@
   },
   "preprocessor": {
     "scalers_path": "live_trading_system/tests/dummy_scalers.json"
+  },
+  "model": {
+    "path": "weights/sac_model_symbols5.zip"
   }
 }

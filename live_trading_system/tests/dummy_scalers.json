@@ -1,10 +1,13 @@
 {
-    "feature1": {
-        "mean": 0.5,
-        "scale": 1.5
-    },
-    "feature2": {
-        "mean": -0.2,
-        "scale": 0.8
-    }
+  "EUR_USD": {
+    "bid_open_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "bid_high_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "bid_low_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "bid_close_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "ask_open_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "ask_high_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "ask_low_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "ask_close_log_ret": {"mean": [0.0], "scale": [1.0]},
+    "volume_log": {"mean": [0.0], "scale": [1.0]}
+  }
 }
