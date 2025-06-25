@@ -22,16 +22,10 @@ class OrderManager:
         risk_manager: RiskManager,
         db_manager: DatabaseManager,
     ):
-        """
-        Initializes the OrderManager.
-
-        Args:
-            client: The OandaClient instance for API interaction.
-            system_state: The SystemState instance.
-            position_manager: The manager for tracking open positions.
-            risk_manager: The manager for assessing trade risk.
-            db_manager: The manager for database operations.
-        """
+        # 添加参数验证
+        if not all([client, system_state, position_manager, risk_manager, db_manager]):
+            raise ValueError("OrderManager missing required dependencies")
+        
         self.logger = logging.getLogger(__name__)
         self.client = client
         self.system_state = system_state

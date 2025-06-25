@@ -178,25 +178,32 @@ def create_control_panel(system_state: SystemState, start_func, stop_func):
     # --- 動態模型選擇 ---
     num_selected = len(system_state.get_selected_instruments())
     
-    # 根據選擇的標的數量決定可用的模型
+    # 動態讀取 weights 資料夾下所有模型，根據選擇的標的數量過濾可用模型
+    import os
+    import re
+    weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'weights')
+    available_models = []
+    model_pattern = re.compile(r'sac_model_symbols(\d+)\.zip')
     if num_selected == 0:
-        available_models = []
         st.sidebar.warning("Please select at least one instrument.")
-    elif num_selected == 1:
-        available_models = ["single_instrument_model_v1.pth", "single_instrument_model_v2.pth"]
-    else: # num_selected > 1
-        available_models = ["multi_instrument_model_v1.pth", "multi_instrument_model_v2.pth"]
+    else:
+        for fname in os.listdir(weights_dir):
+            match = model_pattern.match(fname)
+            if match:
+                max_symbols = int(match.group(1))
+                if max_symbols >= num_selected:
+                    available_models.append(fname)
+        available_models.sort(key=lambda x: int(model_pattern.match(x).group(1)))
 
     # 確保當前模型在可用列表中，如果不在，則選擇第一個作為預設
     current_model = system_state.get_current_model()
     if not current_model or current_model not in available_models:
         current_model = available_models[0] if available_models else None
         if current_model:
-             system_state.set_current_model(current_model)
-
+            system_state.set_current_model(current_model)
 
     selected_model = st.sidebar.selectbox(
-        "Select Model", 
+        "Select Model",
         options=available_models,
         index=available_models.index(current_model) if current_model and available_models else 0,
         key="model_select",

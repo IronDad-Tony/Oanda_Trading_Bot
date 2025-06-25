@@ -159,6 +159,29 @@ class DatabaseManager:
             self.logger.error(f"Failed to fetch last trade for {instrument}: {e}", exc_info=True)
             return None
 
+    def get_trade_history(self, limit=50):
+        """
+        Retrieves the most recent trade history records from the database.
+        Args:
+            limit (int): The maximum number of trade records to return.
+        Returns:
+            List[Dict[str, Any]]: List of trade records as dictionaries.
+        """
+        if not self.conn:
+            return []
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT * FROM trades ORDER BY close_timestamp DESC, open_timestamp DESC LIMIT ?",
+                (limit,)
+            )
+            rows = cursor.fetchall()
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+        except sqlite3.Error as e:
+            self.logger.error(f"Failed to fetch trade history: {e}", exc_info=True)
+            return []
+
     def close(self):
         """Closes the database connection."""
         if self.conn:

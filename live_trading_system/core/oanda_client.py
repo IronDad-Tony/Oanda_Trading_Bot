@@ -124,6 +124,15 @@ class OandaClient:
             return self._request(endpoint)
         except V20Error:
             return None
+            
+    def get_equity_history(self, period: str = "7D") -> Optional[Dict[str, Any]]:
+        """獲取帳戶淨值歷史數據"""
+        params = {"period": period}
+        endpoint = accounts.AccountChanges(self.account_id, params=params)
+        try:
+            return self._request(endpoint)
+        except V20Error:
+            return None
 
     def close_position(self, instrument: str, long_units: Optional[str] = None, short_units: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
