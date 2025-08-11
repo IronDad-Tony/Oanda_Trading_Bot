@@ -1,8 +1,8 @@
 import logging
 from typing import Dict, Any, Optional
 
-from .trading.position_manager import PositionManager, Position
-from .core.system_state import SystemState
+from .position_manager import PositionManager, Position
+from ..core.system_state import SystemState
 
 class RiskManager:
     """

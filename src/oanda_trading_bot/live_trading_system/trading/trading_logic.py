@@ -3,11 +3,11 @@ import time
 import collections
 from typing import Dict, Any, List
 
-from .core.oanda_client import OandaClient
-from .data.data_preprocessor import LivePreprocessor
-from .model.prediction_service import PredictionService
-from .core.system_state import SystemState
-from .trading.order_manager import OrderManager
+from ..core.oanda_client import OandaClient
+from ..data.data_preprocessor import LivePreprocessor
+from ..model.prediction_service import PredictionService
+from ..core.system_state import SystemState
+from .order_manager import OrderManager
 
 class TradingLogic:
     """

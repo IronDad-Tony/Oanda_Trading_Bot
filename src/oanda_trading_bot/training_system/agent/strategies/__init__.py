@@ -55,11 +55,11 @@ def _discover_strategies():
     current_dir = os.path.dirname(__file__)
     # Correctly determine the base package path for imports
     # Assumes the file is at src/agent/strategies/__init__.py
-    # and we want to import src.agent.strategies.*
+    # and we want to import oanda_trading_bot.training_system.agent.strategies.*
     
-    # To make this more robust, we could try to find the 'src' directory 
+    # To make this more robust, we could try to find the 'src' directory
     # and build the path from there, but for now, this is a common structure.
-    module_name_prefix = 'src.agent.strategies.'
+    module_name_prefix = 'oanda_trading_bot.training_system.agent.strategies.'
 
     logger.info(f"Starting strategy discovery in: {current_dir}")
     

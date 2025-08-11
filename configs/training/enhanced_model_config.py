@@ -1,5 +1,6 @@
 # Configuration for the Enhanced Transformer Model
-from src.common.config import MAX_SYMBOLS_ALLOWED
+# Adjusted import path to be an absolute path from the 'src' root
+from oanda_trading_bot.training_system.common.config import MAX_SYMBOLS_ALLOWED
 
 ModelConfig = {
     'hidden_dim': 256,

@@ -56,3 +56,5 @@ test_callback_saves/
 *.tmp
 *.log 
 src/common/trading_system_fallback.log* 
+.env
+.gitignore

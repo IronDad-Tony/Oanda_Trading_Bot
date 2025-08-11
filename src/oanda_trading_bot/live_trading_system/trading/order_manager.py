@@ -1,11 +1,11 @@
 import logging
 from typing import Dict, Any
 
-from .core.oanda_client import OandaClient
-from .trading.position_manager import PositionManager
-from .core.system_state import SystemState
-from .database.database_manager import DatabaseManager
-from .trading.risk_manager import RiskManager
+from ..core.oanda_client import OandaClient
+from .position_manager import PositionManager
+from ..core.system_state import SystemState
+from ..database.database_manager import DatabaseManager
+from .risk_manager import RiskManager
 
 
 class OrderManager:

@@ -87,7 +87,7 @@ try:
     # logger is already imported globally
     from oanda_trading_bot.training_system.common.config import ACCOUNT_CURRENCY, INITIAL_CAPITAL, DEVICE, USE_AMP, MAX_ACCOUNT_RISK_PERCENTAGE, ATR_STOP_LOSS_MULTIPLIER, MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY, MAX_SYMBOLS_ALLOWED
     from oanda_trading_bot.training_system.common.shared_data_manager import get_shared_data_manager
-    from oanda_trading_bot.training_system.data_manager.instrument_info_manager import InstrumentInfoManager
+    from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
     TRAINER_AVAILABLE = True
     # Removed logger.info("Successfully imported trainer and shared data manager") to reduce noise on re-runs
 except ImportError as e:

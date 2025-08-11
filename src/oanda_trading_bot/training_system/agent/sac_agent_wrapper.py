@@ -48,8 +48,13 @@ except ImportError as e:
     logger.warning(f"Importing QuantumEnhancedTransformer failed: {e}")
     QuantumEnhancedTransformer = None # Define as None if import fails
 
-# Import the new model configuration
-from configs.enhanced_model_config import ModelConfig as EnhancedModelConfig
+# Import the new model configuration by adding the project root to the path
+from pathlib import Path
+import sys
+project_root = Path(__file__).resolve().parents[4]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+from configs.training.enhanced_model_config import ModelConfig as EnhancedModelConfig
 
 class QuantumEnhancedSAC:
     def __init__(self,

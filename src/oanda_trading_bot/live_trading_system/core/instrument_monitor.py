@@ -5,8 +5,8 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from .core.oanda_client import OandaClient
-from .core.system_state import SystemState
+from .oanda_client import OandaClient
+from .system_state import SystemState
 
 class InstrumentMonitor:
     """
