@@ -14,9 +14,9 @@ from dotenv import load_dotenv
 # Path(__file__) 會獲取當前文件 (config.py) 的路徑
 # .resolve() 將路徑轉換為絕對路徑
 # .parent 指向上一級目錄 (common)
-# .parent.parent 指向更上一級目錄 (src 的父目錄，即專案根目錄)
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-# print(f"BASE_DIR in config.py: {BASE_DIR}") # 調試時使用
+# .parent.parent.parent.parent.parent 指向專案根目錄
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
+print(f"BASE_DIR in config.py: {BASE_DIR}") # 調試時使用
 
 # 新增：指向 enhanced_transformer_config.json 的路徑
 ENHANCED_TRANSFORMER_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_transformer_config.json"
@@ -40,9 +40,9 @@ QUANTUM_PERFORMANCE_EMA_ALPHA = 0.1 # EMA alpha for tracking strategy performanc
 dotenv_path = BASE_DIR / ".env"
 if dotenv_path.exists():
     load_dotenv(dotenv_path=dotenv_path)
-    # print(f".env file loaded from: {dotenv_path}") # 調試時使用
+    print(f".env file loaded from: {dotenv_path}") # 調試時使用
 else:
-    # print(f".env file not found at: {dotenv_path}, please create it.") # 調試時使用
+    print(f".env file not found at: {dotenv_path}, please create it.") # 調試時使用
     # 在實際部署或運行時，如果.env不存在，應該有更強的警告或錯誤處理
     pass
 
@@ -287,11 +287,11 @@ def get_granularity_seconds(granularity_str: str) -> int:
 GRANULARITY_SECONDS = get_granularity_seconds(GRANULARITY)
 
 # --- 輸出一些關鍵配置以供檢查 (可選) ---
-# print(f"Configuration loaded. Base directory: {BASE_DIR}")
-# print(f"Using device: {DEVICE}")
-# print(f"Database path: {DATABASE_PATH}")
-# print(f"Default symbols: {DEFAULT_SYMBOLS}")
-# print(f"Granularity: {GRANULARITY} ({GRANULARITY_SECONDS} seconds)")
+print(f"Configuration loaded. Base directory: {BASE_DIR}")
+print(f"Using device: {DEVICE}")
+print(f"Database path: {DATABASE_PATH}")
+print(f"Default symbols: {DEFAULT_SYMBOLS}")
+print(f"Granularity: {GRANULARITY} ({GRANULARITY_SECONDS} seconds)")
 
 # --- 在文件末尾導入日誌記錄器以避免循環導入 ---
 try:
