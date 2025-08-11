@@ -1,0 +1,40 @@
+# Core computation and data processing
+numpy
+pandas
+scipy
+
+# Machine Learning and Deep Learning
+torch==2.2.0
+torchvision
+torchaudio
+stable-baselines3[extra]
+gymnasium
+scikit-learn
+
+# API Interaction and Network Requests
+requests
+python-dotenv
+oandapyV20
+
+# Time processing
+python-dateutil
+
+# UI Framework (Streamlit)
+streamlit
+plotly
+matplotlib
+
+# Feature Engineering
+pywavelets
+pandas-ta
+
+# Serialization and Configuration
+pyyaml
+
+# Other utilities
+psutil
+einops
+
+# Testing
+pytest
+pytest-mock
