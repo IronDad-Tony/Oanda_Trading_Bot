@@ -19,6 +19,10 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN warnings
 os.environ['TF_DISABLE_DEPRECATED_WARNINGS'] = '1'  # Disable deprecated warnings
 os.environ['TF_ENABLE_DEPRECATED_WARNINGS'] = '0'  # Disable deprecated warnings
 
+# Workaround for Windows watchdog issue: use polling watcher to avoid
+# RuntimeError: dictionary changed size during iteration in event-based watcher
+os.environ.setdefault('STREAMLIT_SERVER_FILE_WATCHER_TYPE', 'poll')
+
 # Ensure 'src' (project code root) is on sys.path for absolute imports like 'oanda_trading_bot.*'
 try:
     script_path = Path(__file__).resolve()
@@ -53,6 +57,11 @@ except:
     pass
 
 import streamlit as st
+# Also set via Streamlit option (redundant, but safe if env var is ignored)
+try:
+    st.set_option('server.fileWatcherType', 'poll')
+except Exception:
+    pass
 
 from oanda_trading_bot.training_system.common.logger_setup import logger # This will run logger_setup.py
 
