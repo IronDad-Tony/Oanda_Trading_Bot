@@ -1,0 +1,19 @@
+{
+  "global_strategy_input_dim": null,
+  "ml_strategy_names": [
+    "ReinforcementLearningStrategy",
+    "EnsembleLearningStrategy",
+    "TransferLearningStrategy"
+  ],
+  "strategies": [
+    { "name": "MomentumStrategy", "params": { "short_sma_period": 12, "long_sma_period": 26 } },
+    { "name": "BreakoutStrategy", "params": { "window": 20, "z_threshold": 2.0 } },
+    { "name": "MeanReversionStrategy", "params": { "bb_period": 20, "bb_std_dev": 2.0 } },
+    { "name": "CointegrationStrategy", "params": { "half_life": 60 } },
+    { "name": "PairsTradeStrategy", "params": { "lookback": 30 } },
+    { "name": "ReinforcementLearningStrategy", "params": { "action_dim": 3 } },
+    { "name": "EnsembleLearningStrategy", "params": { "aggregation_method": "majority_vote" } },
+    { "name": "TransferLearningStrategy", "params": { "new_head_output_dim": 3, "freeze_base_model": true } }
+  ]
+}
+

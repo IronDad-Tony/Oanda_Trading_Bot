@@ -286,22 +286,33 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         num_embedding_symbols = self.num_universe_symbols
 
         obs_spaces = {
+            # Last-step snapshot per symbol (kept for UI/backward compatibility)
             "market_features": spaces.Box(
                 low=-np.inf, high=np.inf,
                 shape=(self.num_env_slots, self.dataset.num_features_per_symbol),
                 dtype=np.float32
             ),
+            # Rolling sequence per symbol for Transformer/strategies
+            "features_from_dataset": spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(self.num_env_slots, self.dataset.timesteps_history, self.dataset.num_features_per_symbol),
+                dtype=np.float32
+            ),
+            # Lightweight per-symbol context (positions, pnl, etc.)
             "context_features": spaces.Box(
                 low=-np.inf, high=np.inf,
                 shape=(self.num_env_slots, self.num_context_features),
                 dtype=np.float32
             ),
+            # Symbol token ids for embeddings and deriving padding
             "symbol_id": spaces.Box(
-                low=0, 
-                high=num_embedding_symbols, # The highest valid ID is the padding_symbol_id
+                low=0,
+                high=num_embedding_symbols,  # The highest valid ID is the padding_symbol_id
                 shape=(self.num_env_slots,),
                 dtype=np.int32
-            )
+            ),
+            # Padding mask to indicate active (1) vs dummy (0) slots
+            "padding_mask": spaces.MultiBinary(self.num_env_slots)
         }
         self.observation_space = spaces.Dict(obs_spaces)
 
@@ -1054,10 +1065,45 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                     symbol_ids[slot_idx] = symbol_id
             # For non-active slots, the ID remains the padding_symbol_id, which is correct.
 
+        # 4. Build features_from_dataset (sequence) padded to env slots
+        # dataset_sample provides features for the episode's active symbols only, in dataset order
+        # We must place each dataset symbol into the correct env slot
+        seq_len = self.dataset.timesteps_history if hasattr(self.dataset, 'timesteps_history') else 1
+        features_from_dataset_padded = np.zeros((self.num_env_slots, seq_len, self.dataset.num_features_per_symbol), dtype=np.float32)
+        if 'dataset_idx_to_slot_idx_map' in dir(self) and isinstance(self.dataset_idx_to_slot_idx_map, dict):
+            # If there is an explicit mapping prepared earlier, use it
+            for dataset_idx, slot_idx in self.dataset_idx_to_slot_idx_map.items():
+                if 0 <= dataset_idx < len(self.dataset.symbols) and 0 <= slot_idx < self.num_env_slots:
+                    try:
+                        features_from_dataset_padded[slot_idx, :, :] = dataset_sample["features"][dataset_idx, :, :].numpy().astype(np.float32)
+                    except Exception:
+                        # Fall back to zeros if any issue arises
+                        pass
+        else:
+            # Fallback: build a map using slot_to_symbol_map and dataset.symbols
+            sym_to_dataset_idx = {sym: i for i, sym in enumerate(getattr(self.dataset, 'symbols', []))}
+            for slot_idx in range(self.num_env_slots):
+                symbol = self.slot_to_symbol_map.get(slot_idx)
+                if symbol in sym_to_dataset_idx:
+                    dataset_idx = sym_to_dataset_idx[symbol]
+                    try:
+                        features_from_dataset_padded[slot_idx, :, :] = dataset_sample["features"][dataset_idx, :, :].numpy().astype(np.float32)
+                    except Exception:
+                        pass
+
+        # 5. Padding mask: 1 for active slots, 0 for dummy
+        padding_mask = np.zeros((self.num_env_slots,), dtype=np.int8)
+        for slot_idx in range(self.num_env_slots):
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if symbol is not None and symbol != "":
+                padding_mask[slot_idx] = 1
+
         observation = {
             "market_features": market_features_padded,
+            "features_from_dataset": features_from_dataset_padded,
             "context_features": context_features,
-            "symbol_id": symbol_ids
+            "symbol_id": symbol_ids,
+            "padding_mask": padding_mask,
         }
         
         return observation

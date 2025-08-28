@@ -7,6 +7,7 @@ import torch.nn.functional as F # Added F
 import sys # Added for dynamic module loading
 import logging # Added for logger
 from .base_strategy import BaseStrategy, StrategyConfig
+from . import register_strategy
 from typing import Dict, List, Any, Optional, Tuple # Added Optional, Tuple
 import importlib # Added for dynamic import of strategy classes
 import joblib # Added for joblib import
@@ -21,6 +22,7 @@ class Mish(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor: # Added type hints
         return x * torch.tanh(F.softplus(x)) # Use F.softplus
 
+@register_strategy("ReinforcementLearningStrategy")
 class ReinforcementLearningStrategy(BaseStrategy):
     """
     Reinforcement Learning Strategy.
@@ -263,6 +265,7 @@ class DeepLearningPredictionStrategy(BaseStrategy):
             
         return signal.reshape(batch_size, 1, 1)
 
+@register_strategy("EnsembleLearningStrategy")
 class EnsembleLearningStrategy(BaseStrategy):
     @staticmethod
     def default_config() -> StrategyConfig:
@@ -406,6 +409,7 @@ class EnsembleLearningStrategy(BaseStrategy):
 
         return final_signal.reshape(batch_size, 1, 1)
 
+@register_strategy("TransferLearningStrategy")
 class TransferLearningStrategy(BaseStrategy):
     @staticmethod
     def default_config() -> StrategyConfig:

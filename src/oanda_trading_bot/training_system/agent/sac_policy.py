@@ -144,8 +144,26 @@ class QuantumActor(Actor):
         if self.use_ess_layer:
             if not self.ess_config:
                 raise ValueError("ess_config must be provided if use_ess_layer is True.")
-            
-            ess_input_dim = features_dim
+
+            # Derive raw and transformer dims for routing
+            raw_dim = None
+            try:
+                if isinstance(self.observation_space, spaces.Dict) and 'features_from_dataset' in self.observation_space.spaces:
+                    raw_dim = int(self.observation_space.spaces['features_from_dataset'].shape[-1])
+                elif isinstance(self.observation_space, spaces.Dict) and 'market_features' in self.observation_space.spaces:
+                    raw_dim = int(self.observation_space.spaces['market_features'].shape[-1])
+            except Exception:
+                pass
+            # Transformer per-symbol output dim (fallback to constant)
+            transformer_per_symbol_dim = getattr(self.features_extractor, 'model_config', {}).get('output_dim', TRANSFORMER_OUTPUT_DIM_PER_SYMBOL) if hasattr(self.features_extractor, 'model_config') else TRANSFORMER_OUTPUT_DIM_PER_SYMBOL
+
+            # Inject routing dims to ESS config if not present
+            if raw_dim is not None:
+                self.ess_config.setdefault('classical_strategy_input_dim', raw_dim)
+                self.ess_config.setdefault('strategy_input_dim', raw_dim)  # backward-compat default
+            self.ess_config.setdefault('ml_strategy_input_dim', transformer_per_symbol_dim)
+
+            ess_input_dim = features_dim  # attention network input (pooled transformer features dim)
             self.ess_layer = EnhancedStrategySuperposition(
                 input_dim=ess_input_dim,
                 **self.ess_config
@@ -181,27 +199,74 @@ class QuantumActor(Actor):
         It uses the EnhancedStrategySuperposition layer if enabled.
         """
         if self.use_ess_layer and self.ess_layer is not None:
-            # 1. Extract high-level market state features using the main feature extractor.
-            market_state_features = self.extract_features(obs, self.features_extractor)
+            # 1. Extract portfolio-level transformer features as market state for ESS attention
+            market_state_features = self.extract_features(obs, self.features_extractor)  # [B, D_trans]
 
-            # 2. Get structured data directly from the observation dictionary.
-            asset_features_batch = obs.get('market_features')
+            # 2. Get per-asset raw features from observation (prefer sequences)
+            asset_features_batch = None
+            if isinstance(obs, dict):
+                if 'features_from_dataset' in obs:
+                    asset_features_batch = obs['features_from_dataset']  # expected [B, N, T, F_raw]
+                elif 'market_features' in obs:
+                    asset_features_batch = obs['market_features']  # [B, N, F_raw]
             if asset_features_batch is None:
-                raise ValueError("'market_features' not found in observation, but is required by the ESS layer.")
-            
-            current_positions_batch = obs.get('current_positions')
-            timestamps = obs.get('timestamps')
+                raise ValueError("Neither 'features_from_dataset' nor 'market_features' found in observation; ESS requires raw features.")
 
-            # 3. Pass the features to the ESS layer to get the mean actions.
+            # Ensure ESS receives [B, N, T, F_raw]
+            if asset_features_batch.dim() == 3:
+                # [B, N, F_raw] -> [B, N, 1, F_raw]
+                asset_features_batch = asset_features_batch.unsqueeze(2)
+
+            current_positions_batch = obs.get('current_positions')  # optional
+            timestamps = obs.get('timestamps')  # optional
+
+            # 2.5 Build transformer per-symbol features [B,N,D] using the same extractor internals
+            transformer_per_symbol_features = None
+            try:
+                # market_features: [B,N,F]
+                if isinstance(obs, dict) and 'market_features' in obs:
+                    market_features = obs['market_features']
+                    transformer_input = market_features
+
+                    src_key_padding_mask = None
+                    # If symbol embedding is enabled in the extractor, build embeddings and mask
+                    if hasattr(self.features_extractor, 'use_symbol_embedding') and self.features_extractor.use_symbol_embedding:
+                        if 'symbol_id' not in obs:
+                            raise ValueError("'symbol_id' not found in observation while use_symbol_embedding is True.")
+                        symbol_ids = obs['symbol_id'].long().clamp_min(0)
+                        # Derive padding mask by symbol_id == padding id if available, else from padding_mask key
+                        if hasattr(self.features_extractor, 'padding_symbol_id') and self.features_extractor.padding_symbol_id is not None:
+                            src_key_padding_mask = (symbol_ids == int(self.features_extractor.padding_symbol_id))
+                        elif 'padding_mask' in obs:
+                            # env padding_mask: 1=active, 0=dummy -> key padding mask True for dummy
+                            pm = obs['padding_mask']
+                            if pm.dtype != th.bool:
+                                pm = pm.bool()
+                            src_key_padding_mask = ~pm
+                        # Build symbol embeddings
+                        if hasattr(self.features_extractor, 'symbol_embedding') and self.features_extractor.symbol_embedding is not None:
+                            symbol_embeds = self.features_extractor.symbol_embedding(symbol_ids)
+                            transformer_input = th.cat([market_features, symbol_embeds], dim=-1)
+                    # Forward through transformer encoder to get per-symbol features
+                    if hasattr(self.features_extractor, 'transformer'):
+                        transformer_per_symbol_features = self.features_extractor.transformer(
+                            transformer_input, src_key_padding_mask=src_key_padding_mask
+                        )  # [B,N,D]
+            except Exception as e:
+                logger.error(f"Failed to compute transformer per-symbol features for ESS: {e}", exc_info=True)
+                transformer_per_symbol_features = None
+
+            # 3. Pass features to ESS to compute mean actions per asset
             mean_actions_presqueeze = self.ess_layer(
                 asset_features_batch=asset_features_batch,
                 market_state_features=market_state_features,
                 current_positions_batch=current_positions_batch,
-                timestamps=timestamps
-            )
-            
+                timestamps=timestamps,
+                transformer_per_symbol_features_batch=transformer_per_symbol_features
+            )  # [B, N, 1]
+
             # Squeeze the output to match the action space shape (batch_size, num_assets).
-            mean_actions = mean_actions_presqueeze.squeeze(-1)
+            mean_actions = mean_actions_presqueeze.squeeze(-1)  # [B, N]
 
             # 4. Return the computed mean and the state-independent, learnable log_std.
             # The log_std parameter needs to be expanded to the batch size.

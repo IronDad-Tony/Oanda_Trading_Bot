@@ -127,6 +127,17 @@ python verify_imports.py
 ```
 If the script runs without any errors and prints a success message, your environment is set up correctly.
 
+### Transformer/ESS Pipeline Sanity Check
+
+Run a quick validation of the transformer masking/pooling and strategy superposition wiring:
+
+```sh
+python scripts/validate_pipeline.py
+```
+This constructs a dummy observation with padding and verifies:
+- EnhancedTransformerFeatureExtractor returns a pooled feature vector with masked tokens ignored
+- ESS consumes per-asset features and produces an action tensor shaped `[batch, MAX_SYMBOLS_ALLOWED, 1]`
+
 
 ## 6. Spec Sheet / Key Components
 

@@ -4,6 +4,7 @@ import numpy as np
 import ta
 from ta.utils import dropna
 from .base_strategy import BaseStrategy, StrategyConfig
+from . import register_strategy
 from typing import Dict, List, Optional, Any, Tuple 
 import logging
 import sys
@@ -20,6 +21,7 @@ except ImportError:
     logging.getLogger(__name__).warning("Failed to import STRATEGY_REGISTRY via relative import. StatisticalArbitrageStrategy may not find sub-strategies.")
 
 
+@register_strategy("MeanReversionStrategy")
 class MeanReversionStrategy(BaseStrategy):
 
     @staticmethod
@@ -149,6 +151,7 @@ class MeanReversionStrategy(BaseStrategy):
         signals_df = pd.DataFrame(0.0, index=output_index, columns=['signal'])
         return signals_df
 
+@register_strategy("CointegrationStrategy")
 class CointegrationStrategy(BaseStrategy):
 
     @staticmethod
@@ -256,6 +259,7 @@ class CointegrationStrategy(BaseStrategy):
         if output_index is None: return pd.DataFrame(columns=['signal'])
         return pd.DataFrame(0.0, index=output_index, columns=['signal'])
 
+@register_strategy("PairsTradeStrategy")
 class PairsTradeStrategy(BaseStrategy):
     @staticmethod
     def default_config() -> StrategyConfig:

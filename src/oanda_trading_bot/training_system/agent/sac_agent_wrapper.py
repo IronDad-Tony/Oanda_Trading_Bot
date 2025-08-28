@@ -27,6 +27,7 @@ import logging # Ensure logging is imported
 
 # Remove the problematic try-except block for Config import
 from oanda_trading_bot.training_system.agent.sac_policy import CustomSACPolicy
+from oanda_trading_bot.training_system.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
 from oanda_trading_bot.training_system.agent.high_level_integration_system import HighLevelIntegrationSystem
 from oanda_trading_bot.training_system.agent.strategy_innovation_module import create_strategy_innovation_module
 from oanda_trading_bot.training_system.agent.market_state_awareness_system import MarketStateAwarenessSystem
@@ -40,6 +41,15 @@ from oanda_trading_bot.training_system.common.config import (
     ENHANCED_MODEL_CONFIG_PATH # Added missing config imports
 )
 from oanda_trading_bot.training_system.common.logger_setup import logger
+from oanda_trading_bot.training_system.common.config import (
+    QUANTUM_STRATEGY_NUM_STRATEGIES,
+    QUANTUM_STRATEGY_DROPOUT_RATE,
+    QUANTUM_STRATEGY_INITIAL_TEMPERATURE,
+    QUANTUM_STRATEGY_USE_GUMBEL_SOFTMAX,
+    QUANTUM_ADAPTIVE_LR,
+    QUANTUM_PERFORMANCE_EMA_ALPHA,
+    QUANTUM_STRATEGY_CONFIG_PATH,
+)
 
 # Attempt to import QuantumEnhancedTransformer, handling potential import errors
 try:
@@ -130,14 +140,26 @@ class QuantumEnhancedSAC:
         else:
             self.tensorboard_log_path = tensorboard_log_path
             self.session_subdir = ""        # 準備 policy_kwargs，合併用戶提供的和默認的設置
-        from oanda_trading_bot.training_system.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
-        
         # The config is imported as EnhancedModelConfig at the top of the file
         default_policy_kwargs = {
             "net_arch": dict(pi=[256, 256], qf=[256, 256]),
+            # Use enhanced transformer feature extractor (masked mean pooling + symbol embedding)
             "features_extractor_class": EnhancedTransformerFeatureExtractor,
-            # Pass the actual config dictionary, not the path
-            "features_extractor_kwargs": {"model_config": EnhancedModelConfig},
+            "features_extractor_kwargs": {
+                # Feed a python dict config rather than JSON file to avoid structure mismatch
+                "model_config": EnhancedModelConfig,
+            },
+            # Enable Enhanced Strategy Superposition (ESS) by default with sensible defaults
+            "use_ess_layer": True,
+            "ess_config": {
+                "num_strategies": QUANTUM_STRATEGY_NUM_STRATEGIES,
+                "strategy_config_file_path": str(QUANTUM_STRATEGY_CONFIG_PATH),
+                "dropout_rate": QUANTUM_STRATEGY_DROPOUT_RATE,
+                "initial_temperature": QUANTUM_STRATEGY_INITIAL_TEMPERATURE,
+                "use_gumbel_softmax": QUANTUM_STRATEGY_USE_GUMBEL_SOFTMAX,
+                "adaptive_learning_rate": QUANTUM_ADAPTIVE_LR,
+                "performance_ema_alpha": QUANTUM_PERFORMANCE_EMA_ALPHA,
+            },
         }
         
         # Deep merge user-provided policy_kwargs

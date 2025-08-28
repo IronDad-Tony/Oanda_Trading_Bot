@@ -1,5 +1,6 @@
 # src/agent/strategies/trend_strategies.py
 from .base_strategy import BaseStrategy, StrategyConfig
+from . import register_strategy
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Any, List, Tuple # MODIFIED: Added Tuple
@@ -17,6 +18,7 @@ except ImportError:
 
 # --- Trend Strategies ---
 
+@register_strategy("MomentumStrategy")
 class MomentumStrategy(BaseStrategy):
     """動量策略：基於價格動量進行交易"""
     
@@ -128,6 +130,7 @@ class MomentumStrategy(BaseStrategy):
 
         return signals_df[['signal']]
 
+@register_strategy("BreakoutStrategy")
 class BreakoutStrategy(BaseStrategy):
     """突破策略：識別並跟隨價格突破"""
 

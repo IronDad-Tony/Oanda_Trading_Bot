@@ -20,7 +20,12 @@ from stable_baselines3.common.type_aliases import PyTorchObs
 
 logger = logging.getLogger(__name__)
 
-MAX_SYMBOLS_ALLOWED = 10
+# Use central config where applicable (avoid local hardcoded constants)
+try:
+    from oanda_trading_bot.training_system.common.config import MAX_SYMBOLS_ALLOWED as _MAX_SYMBOLS_ALLOWED
+except Exception:
+    _MAX_SYMBOLS_ALLOWED = None  # Not strictly needed here; included for consistency
+
 TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
 
 class UniversalTransformer(nn.Module):
@@ -38,28 +43,26 @@ class UniversalTransformer(nn.Module):
         # This dictionary will hold the activations from each layer
         self.activations = {}
 
-    def forward(self, src: th.Tensor) -> th.Tensor:
+    def forward(self, src: th.Tensor, src_key_padding_mask: Optional[th.Tensor] = None) -> th.Tensor:
         """
-        Forward pass for the transformer. It processes the source tensor and
-        stores the output of each encoder layer in the self.activations dictionary.
+        Forward pass for the transformer over symbol tokens.
+        - src: [batch, num_symbols, input_dim]
+        - src_key_padding_mask: [batch, num_symbols] with True for padded tokens
+        Returns per-token output: [batch, num_symbols, output_dim]
         """
-        # Reset activations at the beginning of each forward pass
+        # Reset activations each pass
         self.activations = {}
-        
-        x = self.input_proj(src)
-        
-        # Iterate through encoder layers to capture activations
+
+        x = self.input_proj(src)  # [B, N, model_dim]
+
+        # Iterate through encoder layers and capture activations; pass key padding mask to each layer
+        # so that padded symbols are ignored by attention.
         for i, layer in enumerate(self.transformer_encoder.layers):
-            x = layer(x)
-            # Detach the tensor to prevent gradients from flowing back from this
-            # stored value during training, as it's for diagnostics only.
+            x = layer(x, src_key_padding_mask=src_key_padding_mask)
             self.activations[f'encoder_layer_{i}'] = x.detach()
 
-        # The final output is based on the last token's representation,
-        # which aggregates information from the sequence.
-        last_token_output = x[:, -1, :] 
-        output = self.output_proj(last_token_output)
-        return output
+        token_outputs = self.output_proj(x)  # [B, N, output_dim]
+        return token_outputs
 
 class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self,
@@ -86,6 +89,7 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         self.use_symbol_embedding = self.model_config.get('use_symbol_embedding', False)
         self.symbol_embedding_dim = 0
         self.symbol_vocab_size = 0
+        self.padding_symbol_id: Optional[int] = None
         if self.use_symbol_embedding:
             self.symbol_vocab_size = self.model_config.get('symbol_universe_size')
             if self.symbol_vocab_size is None:
@@ -93,8 +97,11 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
                 try:
                     # The space is Box(low, high, shape, dtype), high is inclusive.
                     max_id = int(observation_space.spaces['symbol_id'].high[0])
+                    # valid ids: [0 .. num_universe_symbols], where 'max_id' is padding id in env spec
+                    # We set embedding vocab = max_id + 1 and use padding_idx = max_id
                     self.symbol_vocab_size = max_id + 1
-                    logger.info(f"Inferred symbol_universe_size: {self.symbol_vocab_size}")
+                    self.padding_symbol_id = max_id
+                    logger.info(f"Inferred symbol_universe_size: {self.symbol_vocab_size - 1} (padding_id={self.padding_symbol_id})")
                 except (KeyError, AttributeError, IndexError) as e:
                     raise ValueError(f"Cannot determine symbol_universe_size. Must be in config or observation_space['symbol_id']. Error: {e}")
             
@@ -130,8 +137,10 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
 
         self.symbol_embedding = None
         if self.use_symbol_embedding:
-            self.symbol_embedding = nn.Embedding(self.symbol_vocab_size, self.symbol_embedding_dim)
-            logger.info(f"Symbol embedding enabled: vocab_size={self.symbol_vocab_size}, embedding_dim={self.symbol_embedding_dim}")
+            # padding_idx ensures padded symbol id produces a zero vector and receives no gradient
+            self.symbol_embedding = nn.Embedding(self.symbol_vocab_size, self.symbol_embedding_dim,
+                                                 padding_idx=(self.padding_symbol_id if self.padding_symbol_id is not None else None))
+            logger.info(f"Symbol embedding enabled: vocab_size={self.symbol_vocab_size}, embedding_dim={self.symbol_embedding_dim}, padding_idx={self.padding_symbol_id}")
 
         self.transformer = UniversalTransformer(
             input_dim=transformer_input_dim,
@@ -148,34 +157,48 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         logger.info(f"  Associated model_config: {json.dumps(self.model_config, indent=2)}")
 
     def forward(self, observations: PyTorchObs) -> th.Tensor:
-        market_features = observations['market_features']
+        """Extracts features from observation dict with masking over padded symbol slots.
+        Expected observation keys: 'market_features' [B,N,F], 'symbol_id' [B,N], plus auxiliary keys (flattened).
+        Returns: [B, features_dim] where features_dim = transformer_output_dim + sum(aux_dims).
+        """
+        market_features = observations['market_features']  # [B,N,F]
         transformer_input = market_features
 
+        # Build symbol embeddings and key padding mask if available
+        src_key_padding_mask: Optional[th.Tensor] = None
         if self.use_symbol_embedding:
             if 'symbol_id' not in observations:
-                 raise ValueError("'symbol_id' not in observations, but use_symbol_embedding is True.")
-            symbol_ids = observations['symbol_id'].long()
+                raise ValueError("'symbol_id' not in observations, but use_symbol_embedding is True.")
+            symbol_ids = observations['symbol_id'].long()  # [B,N]
 
-            max_id = symbol_ids.max().item()
-            if max_id >= self.symbol_vocab_size:
-                logger.error(f"Symbol ID {max_id} is out of bounds for embedding layer (size {self.symbol_vocab_size}). Clamping.")
+            # Clamp out-of-range IDs defensively
+            if symbol_ids.max().item() >= self.symbol_vocab_size:
+                logger.error(f"Symbol ID out of range for embedding (vocab={self.symbol_vocab_size}). Clamping.")
                 symbol_ids = th.clamp(symbol_ids, 0, self.symbol_vocab_size - 1)
 
-            symbol_embeds = self.symbol_embedding(symbol_ids)
-            
-            if len(symbol_embeds.shape) == 2:
-                symbol_embeds = symbol_embeds.unsqueeze(1)
-            
-            expanded_embeds = symbol_embeds.expand(-1, market_features.shape[1], -1)
-            transformer_input = th.cat([market_features, expanded_embeds], dim=-1)
+            # Create padding mask: True for padded slots
+            if self.padding_symbol_id is not None:
+                src_key_padding_mask = (symbol_ids == int(self.padding_symbol_id))
 
-        transformer_output = self.transformer(transformer_input)
-        
-        # After the forward pass, the transformer's activations are updated.
-        # Copy them to this class's attribute so a callback can access them.
+            symbol_embeds = self.symbol_embedding(symbol_ids)  # [B,N,E]
+            transformer_input = th.cat([market_features, symbol_embeds], dim=-1)  # [B,N,F+E]
+
+        # Transformer over symbol tokens → per-symbol outputs [B,N,D]
+        per_symbol_outputs = self.transformer(transformer_input, src_key_padding_mask=src_key_padding_mask)
+
+        # Masked mean pooling over symbols to obtain a single portfolio feature [B,D]
+        if src_key_padding_mask is not None:
+            valid_mask = (~src_key_padding_mask).float()  # [B,N]
+            # avoid division by zero: add epsilon
+            denom = valid_mask.sum(dim=1, keepdim=True).clamp(min=1e-6)  # [B,1]
+            pooled = (per_symbol_outputs * valid_mask.unsqueeze(-1)).sum(dim=1) / denom  # [B,D]
+        else:
+            pooled = per_symbol_outputs.mean(dim=1)
+
+        # Save layer activations for diagnostics
         self.activations = self.transformer.activations
 
-
+        # Collect auxiliary features (flatten anything except the main keys)
         aux_features_list = []
         for key in self.observation_space.spaces:
             if key not in ['market_features', 'symbol_id']:
@@ -183,9 +206,9 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
 
         if aux_features_list:
             all_aux_features = th.cat(aux_features_list, dim=1)
-            combined_features = th.cat([transformer_output, all_aux_features], dim=1)
+            combined_features = th.cat([pooled, all_aux_features], dim=1)
         else:
-            combined_features = transformer_output
+            combined_features = pooled
 
         return combined_features
 

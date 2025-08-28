@@ -38,10 +38,13 @@ class EnhancedStrategySuperposition(nn.Module):
                  dropout_rate: float = 0.1, 
                  initial_temperature: float = 1.0, 
                  use_gumbel_softmax: bool = True, 
-                 strategy_input_dim: int = 64, # Default input_dim for individual strategies
+                 strategy_input_dim: int = 64, # Default input_dim for individual strategies (fallback)
                  dynamic_loading_enabled: bool = True,
                  adaptive_learning_rate: float = 0.01, # New parameter for adaptive weighting
-                 performance_ema_alpha: float = 0.1): # New parameter for performance EMA
+                 performance_ema_alpha: float = 0.1,
+                 ml_strategy_input_dim: Optional[int] = None, # NEW: per-symbol transformer dim
+                 classical_strategy_input_dim: Optional[int] = None # NEW: raw features dim
+                 ): # New parameter for performance EMA
         super().__init__()
         self.logger = logging.getLogger(__name__)
         self.input_dim = input_dim # For attention network
@@ -49,6 +52,8 @@ class EnhancedStrategySuperposition(nn.Module):
         
         # Initialize self.strategy_input_dim with the value from __init__ param first
         self.strategy_input_dim = strategy_input_dim 
+        self.ml_strategy_input_dim = ml_strategy_input_dim
+        self.classical_strategy_input_dim = classical_strategy_input_dim
 
         loaded_strategy_configs_from_file: List[Union[Dict[str, Any], StrategyConfig]] = []
         if strategy_config_file_path:
@@ -200,8 +205,16 @@ class EnhancedStrategySuperposition(nn.Module):
                              self.logger.warning(f"Default config for {strategy_name_from_cfg} is not StrategyConfig. Using minimal.")
                              base_default_cfg = StrategyConfig(name=strategy_name_from_cfg)
                         
-                        # Create a StrategyConfig from the dict, then merge with default
-                        dict_based_cfg = StrategyConfig(**cfg_item) # Assumes dict keys match StrategyConfig fields
+                        # Build a StrategyConfig from the dict (map 'params' -> default_params, carry input_dim/description if present)
+                        cfg_params = cfg_item.get('params', {}) if isinstance(cfg_item.get('params', {}), dict) else {}
+                        cfg_input_dim = cfg_item.get('input_dim', None)
+                        cfg_description = cfg_item.get('description', "")
+                        dict_based_cfg = StrategyConfig(
+                            name=strategy_name_from_cfg,
+                            description=cfg_description,
+                            default_params=cfg_params,
+                            input_dim=cfg_input_dim
+                        )
                         final_config_obj = StrategyConfig.merge_configs(base_default_cfg, dict_based_cfg)
                     else:
                         self.logger.warning(f"Strategy name '{strategy_name_from_cfg}' from dict config not in STRATEGY_REGISTRY. Skipping.")
@@ -215,12 +228,14 @@ class EnhancedStrategySuperposition(nn.Module):
                         self.logger.warning(f"Strategy '{strategy_name_from_cfg}' already processed. Skipping duplicate from config list.")
                         continue
 
-                    # Ensure input_dim is set correctly
+                    # Ensure input_dim is set correctly (route ML vs classical)
+                    is_ml = ('ml_strategies' in strategy_class.__module__) or (strategy_name_from_cfg in { 'ReinforcementLearningStrategy', 'EnsembleLearningStrategy', 'TransferLearningStrategy' })
+                    desired_dim = self.ml_strategy_input_dim if (is_ml and self.ml_strategy_input_dim is not None) else (self.classical_strategy_input_dim if self.classical_strategy_input_dim is not None else default_strategy_input_dim)
                     if final_config_obj.input_dim is None:
-                        final_config_obj.input_dim = default_strategy_input_dim
-                    elif final_config_obj.input_dim != default_strategy_input_dim:
-                        self.logger.info(f"Strategy '{strategy_name_from_cfg}' config specifies input_dim {final_config_obj.input_dim}, "
-                                         f"overriding layer's default_strategy_input_dim {default_strategy_input_dim}.")
+                        final_config_obj.input_dim = desired_dim
+                    elif desired_dim is not None and final_config_obj.input_dim != desired_dim:
+                        self.logger.info(f"Strategy '{strategy_name_from_cfg}' input_dim override: {final_config_obj.input_dim} -> {desired_dim}")
+                        final_config_obj.input_dim = desired_dim
                     
                     try:
                         instance = strategy_class(config=final_config_obj)
@@ -247,12 +262,14 @@ class EnhancedStrategySuperposition(nn.Module):
                              self.logger.warning(f"Default config for explicit strategy {name} is not a StrategyConfig instance. Using minimal.")
                              default_cfg_obj = StrategyConfig(name=name)
                         
-                        # Set/override input_dim
+                        # Set/override input_dim per strategy type
+                        is_ml = ('ml_strategies' in explicit_class.__module__) or (name in { 'ReinforcementLearningStrategy', 'EnsembleLearningStrategy', 'TransferLearningStrategy' })
+                        desired_dim = self.ml_strategy_input_dim if (is_ml and self.ml_strategy_input_dim is not None) else (self.classical_strategy_input_dim if self.classical_strategy_input_dim is not None else default_strategy_input_dim)
                         if default_cfg_obj.input_dim is None:
-                            default_cfg_obj.input_dim = default_strategy_input_dim
-                        elif default_cfg_obj.input_dim != default_strategy_input_dim:
-                             self.logger.info(f"Explicit strategy '{name}' default_config.input_dim ({default_cfg_obj.input_dim}) "
-                                                f"differs from layer's default_strategy_input_dim ({default_strategy_input_dim}). Using strategy's default.")
+                            default_cfg_obj.input_dim = desired_dim
+                        elif desired_dim is not None and default_cfg_obj.input_dim != desired_dim:
+                             self.logger.info(f"Explicit strategy '{name}' input_dim override: {default_cfg_obj.input_dim} -> {desired_dim}")
+                             default_cfg_obj.input_dim = desired_dim
                         # To make layer's default always win for explicit strategies if their default is different:
                         # default_cfg_obj.input_dim = default_strategy_input_dim
 
@@ -278,12 +295,14 @@ class EnhancedStrategySuperposition(nn.Module):
                              self.logger.warning(f"Default config for {name} from registry is not a StrategyConfig instance. Using minimal.")
                              default_cfg_obj = StrategyConfig(name=name)
 
-                        # Set/override input_dim. Layer's default_strategy_input_dim takes precedence if not set in strategy's default.
+                        # Set/override input_dim per strategy type
+                        is_ml = ('ml_strategies' in strategy_class_from_registry.__module__) or (name in { 'ReinforcementLearningStrategy', 'EnsembleLearningStrategy', 'TransferLearningStrategy' })
+                        desired_dim = self.ml_strategy_input_dim if (is_ml and self.ml_strategy_input_dim is not None) else (self.classical_strategy_input_dim if self.classical_strategy_input_dim is not None else default_strategy_input_dim)
                         if default_cfg_obj.input_dim is None:
-                            default_cfg_obj.input_dim = default_strategy_input_dim
-                        elif default_cfg_obj.input_dim != default_strategy_input_dim:
-                            self.logger.info(f"Dynamically loaded strategy '{name}' default_config.input_dim ({default_cfg_obj.input_dim}) "
-                                                f"differs from layer's default_strategy_input_dim ({default_strategy_input_dim}). Using strategy's default.")
+                            default_cfg_obj.input_dim = desired_dim
+                        elif desired_dim is not None and default_cfg_obj.input_dim != desired_dim:
+                            self.logger.info(f"Dynamically loaded strategy '{name}' input_dim override: {default_cfg_obj.input_dim} -> {desired_dim}")
+                            default_cfg_obj.input_dim = desired_dim
                         # To make layer's default always win for dynamically loaded strategies:
                         # default_cfg_obj.input_dim = default_strategy_input_dim
                         
@@ -310,7 +329,8 @@ class EnhancedStrategySuperposition(nn.Module):
                 market_state_features: Optional[torch.Tensor] = None,
                 current_positions_batch: Optional[torch.Tensor] = None,
                 timestamps: Optional[List[pd.Timestamp]] = None, # Assuming a list of timestamps, one per batch item
-                external_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+                external_weights: Optional[torch.Tensor] = None,
+                transformer_per_symbol_features_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Main forward pass for the EnhancedStrategySuperposition layer.
         Includes adaptive weighting if enabled and not overridden by external_weights.
@@ -399,6 +419,12 @@ class EnhancedStrategySuperposition(nn.Module):
         # Initialize a tensor to store all strategy signals: (batch_size, num_assets, num_strategies)
         all_strategy_signals = torch.zeros(batch_size, num_assets, self.num_actual_strategies, device=asset_features_batch.device)
 
+        # helper: identify ML strategies by module/name
+        def _is_ml_strategy(s: BaseStrategy) -> bool:
+            name = getattr(s, 'config', None).name if hasattr(s, 'config') and hasattr(s.config, 'name') else s.__class__.__name__
+            mod = s.__class__.__module__
+            return ('ml_strategies' in mod) or (name in { 'ReinforcementLearningStrategy', 'EnsembleLearningStrategy', 'TransferLearningStrategy' })
+
         for asset_idx in range(num_assets):
             # Extract features for the current asset: (batch_size, seq_len, feature_dim)
             single_asset_features = asset_features_batch[:, asset_idx, :, :]
@@ -428,6 +454,13 @@ class EnhancedStrategySuperposition(nn.Module):
                 current_timestamp_for_strategy = timestamps[0] if timestamps and len(timestamps) > 0 else None
                 
                 try:
+                    # Choose feature source per strategy
+                    if _is_ml_strategy(strategy_module) and transformer_per_symbol_features_batch is not None:
+                        # ML: use transformer per-symbol features -> [B,1,D]
+                        feats = transformer_per_symbol_features_batch[:, asset_idx, :].unsqueeze(1)
+                    else:
+                        # Classical: use raw preprocessed features -> [B,T,F_raw]
+                        feats = single_asset_features
                     # Ensure strategy_input_dim matches what the strategy was configured for
                     # This check might be redundant if initialization ensures this.
                     # if single_asset_features.shape[2] != strategy_module.config.input_dim:
@@ -435,9 +468,8 @@ class EnhancedStrategySuperposition(nn.Module):
                     #    # Handle mismatch, e.g., skip strategy or use zeros
                     #    signal_tensor = torch.zeros(batch_size, 1, 1, device=asset_features_batch.device)
                     # else:
-
                     signal_tensor = strategy_module.forward(
-                        single_asset_features, 
+                        feats, 
                         current_positions=current_pos_for_asset,
                         timestamp=current_timestamp_for_strategy # Pass single timestamp
                     ) # Expected: (batch_size, 1, 1)
