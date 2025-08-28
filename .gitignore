@@ -45,6 +45,9 @@ weights/
 # TensorBoard 日誌
 logs/sac_tensorboard_logs_*/
 
+# Ignore entire logs directory to avoid committing local artifacts
+logs/
+
 # 測試文件和臨時文件
 test_emergency_fixes.py
 test_fixes_simple.py
