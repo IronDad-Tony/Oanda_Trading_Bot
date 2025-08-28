@@ -25,6 +25,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from src.data_manager.mmap_dataset import UniversalMemoryMappedDataset
+from src.data_manager.currency_manager import ensure_currency_data_for_trading
+from src.common.config import ACCOUNT_CURRENCY
 from src.data_manager.instrument_info_manager import InstrumentInfoManager
 from src.environment.trading_env import UniversalTradingEnvV4
 from src.agent.sac_agent_wrapper import QuantumEnhancedSAC
@@ -82,6 +84,20 @@ def create_training_env(symbols: list, start_time_iso: str, end_time_iso: str, e
     logger.info(f"Creating UniversalMemoryMappedDataset for symbols: {symbols}")
     logger.info(f"Training period: {start_time_iso} to {end_time_iso}")
     
+    # Ensure currency conversion pairs are present in DB for accurate training conversion
+    try:
+        ok, all_syms = ensure_currency_data_for_trading(
+            trading_symbols=symbols,
+            account_currency=ACCOUNT_CURRENCY,
+            start_time_iso=start_time_iso,
+            end_time_iso=end_time_iso,
+            granularity=CONFIG.get("trading_granularity", "S5")
+        )
+        if ok:
+            logger.info(f"Currency conversion pairs ensured. Total symbols fetched: {len(all_syms)}")
+    except Exception as e:
+        logger.warning(f"ensure_currency_data_for_trading failed: {e}")
+
     dataset = UniversalMemoryMappedDataset(
         symbols=symbols,
         start_time_iso=start_time_iso,

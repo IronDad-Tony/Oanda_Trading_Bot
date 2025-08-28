@@ -38,6 +38,7 @@ def main():
         manage_data_download_for_symbols,
         format_datetime_for_oanda,
     )
+    from oanda_trading_bot.training_system.data_manager.currency_manager import ensure_currency_data_for_trading
     from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset
     from oanda_trading_bot.training_system.data_manager.database_manager import query_historical_data
     from oanda_trading_bot.training_system.environment.trading_env import UniversalTradingEnvV4
@@ -54,8 +55,18 @@ def main():
     attempts = 0
     max_attempts = 7
     while attempts < max_attempts:
-        logger.info("=== Headless Short Training: Data Download ===")
-        logger.info(f"Symbols: {symbols}; Window: {start_iso} to {end_iso}; Granularity: {granularity}")
+    logger.info("=== Headless Short Training: Data Download (with currency pairs) ===")
+    logger.info(f"Symbols: {symbols}; Window: {start_iso} to {end_iso}; Granularity: {granularity}")
+    try:
+        ok, all_syms = ensure_currency_data_for_trading(symbols, ACCOUNT_CURRENCY, start_iso, end_iso, granularity)
+        if ok:
+            logger.info(f"Ensured currency pairs. Total symbols fetched: {len(all_syms)}")
+        else:
+            logger.warning("ensure_currency_data_for_trading reported failure; falling back to direct symbol download")
+            manage_data_download_for_symbols(symbols, start_iso, end_iso, granularity=granularity,
+                                             streamlit_progress_bar=None, streamlit_status_text=None)
+    except Exception as e:
+        logger.warning(f"ensure_currency_data_for_trading error: {e}; fallback to direct download")
         manage_data_download_for_symbols(symbols, start_iso, end_iso, granularity=granularity,
                                          streamlit_progress_bar=None, streamlit_status_text=None)
         # Quick DB presence check

@@ -68,7 +68,7 @@ class TradingLogic:
         """
         try:
             self.logger.info(f"Attempting to pre-fill data buffer for {instrument} with {self.lookback_window} candles...")
-            candles = self.client.get_candles(instrument, self.lookback_window, self.granularity)
+            candles = self.client.get_bid_ask_candles_combined(instrument, self.lookback_window, self.granularity)
             if candles and len(candles) >= self.lookback_window:
                 self.data_buffers[instrument].extend(candles)
                 self.logger.info(f"Successfully pre-filled data buffer for {instrument}. Buffer size: {len(self.data_buffers[instrument])}")
@@ -107,7 +107,7 @@ class TradingLogic:
                         continue
 
                 # 取得最新 K 線，保持 buffer 新鮮
-                latest_candles = self.client.get_candles(instrument, 2, self.granularity)
+                latest_candles = self.client.get_bid_ask_candles_combined(instrument, 2, self.granularity)
                 if not latest_candles:
                     self.logger.warning(f"Could not fetch latest candle for {instrument}. Skipping.")
                     continue
@@ -122,10 +122,10 @@ class TradingLogic:
                     continue
 
                 # 特徵工程
-                self.logger.debug(f"Preprocessing data for {instrument}.")
-                features = self.preprocessor.transform(list(self.data_buffers[instrument]), instrument)
+                self.logger.debug(f"Preparing model features for {instrument}.")
+                features = self._prepare_price_features(list(self.data_buffers[instrument]))
                 if features is None or features.size == 0:
-                    self.logger.error(f"Data preprocessing failed for {instrument}.")
+                    self.logger.error(f"Feature preparation failed for {instrument}.")
                     continue
 
                 # 模型推論
@@ -143,7 +143,7 @@ class TradingLogic:
                 signal_info = {
                     "instrument": instrument,
                     "signal": signal,
-                    "price": float(last_candle['mid']['c']),
+                    "price": float(last_candle.get('ask_close') or last_candle.get('bid_close') or 0.0),
                     "timestamp": last_candle['time']
                 }
                 self.order_manager.process_signal(signal_info)
@@ -160,3 +160,43 @@ class TradingLogic:
             self.execute_trade_cycle()
             time.sleep(self.config.get('trading_logic', {}).get('cycle_time_seconds', 60))
         self.logger.info("Trading logic run loop stopped.")
+
+    def _prepare_price_features(self, records: list) -> np.ndarray:
+        """Convert merged bid/ask candle records into (T,F) array matching training PRICE_COLUMNS order."""
+        if not records:
+            return np.array([])
+        import pandas as pd
+        import numpy as np
+        try:
+            from oanda_trading_bot.training_system.common.config import PRICE_COLUMNS
+        except Exception:
+            PRICE_COLUMNS = ['bid_open','bid_high','bid_low','bid_close','ask_open','ask_high','ask_low','ask_close','volume']
+        df = pd.DataFrame(records)
+        if 'time' in df.columns:
+            df['time'] = pd.to_datetime(df['time'])
+            df = df.sort_values('time')
+        out = pd.DataFrame()
+        for col in PRICE_COLUMNS:
+            out[col] = df[col].astype(float) if col in df.columns else 0.0
+        return out.values.astype(np.float32)
+
+    def warmup_buffers(self, instruments: List[str], max_wait_seconds: int = 120, sleep_seconds: int = 1):
+        """Cold start: fetch enough history to fill buffers before trading."""
+        import time as _t
+        deadline = _t.time() + max_wait_seconds
+        for inst in instruments:
+            if inst not in self.data_buffers:
+                self.data_buffers[inst] = collections.deque(maxlen=self.lookback_window)
+        while _t.time() < deadline:
+            ready = True
+            for inst in instruments:
+                if len(self.data_buffers[inst]) < self.lookback_window:
+                    self._fill_buffer(inst)
+                if len(self.data_buffers[inst]) < self.lookback_window:
+                    ready = False
+            if ready:
+                self.logger.info("Cold start warmup complete for all instruments.")
+                return True
+            _t.sleep(sleep_seconds)
+        self.logger.warning("Warmup timeout reached; proceeding with current buffers.")
+        return False

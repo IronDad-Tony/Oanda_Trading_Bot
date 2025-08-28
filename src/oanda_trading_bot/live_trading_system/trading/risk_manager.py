@@ -1,5 +1,8 @@
 import logging
 from typing import Dict, Any, Optional
+from decimal import Decimal
+from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager
+from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
 
 from .position_manager import PositionManager, Position
 from ..core.system_state import SystemState
@@ -38,6 +41,29 @@ class RiskManager:
         self.logger.info(f"- Max Risk Per Trade: {self.max_risk_per_trade_percent}%")
         self.logger.info(f"- Default Stop Loss (pips): {self.stop_loss_pips}")
         self.logger.info(f"- Default Take Profit (pips): {self.take_profit_pips}")
+        # Live conversion helper
+        self.account_currency = (config.get('account_currency') or 'USD').upper()
+        self.cur_mgr = CurrencyDependencyManager(self.account_currency, apply_oanda_markup=True)
+        self.iim = InstrumentInfoManager()
+
+    def _build_price_map(self, instrument: str, oanda_client) -> Dict[str, tuple]:
+        sym = instrument
+        parts = sym.split('_')
+        base, quote = parts[0], parts[1]
+        mp: Dict[str, tuple] = {}
+        recs = oanda_client.get_bid_ask_candles_combined(sym, count=1) or []
+        if recs:
+            r = recs[-1]
+            mp[sym] = (Decimal(str(r.get('bid_close', 0.0))), Decimal(str(r.get('ask_close', 0.0))))
+        # add conversion pairs for quote/account and base/account as needed
+        for a, b in [(quote, self.account_currency), (self.account_currency, quote), (base, self.account_currency), (self.account_currency, base)]:
+            pair = f"{a}_{b}"
+            if pair not in mp:
+                rr = oanda_client.get_bid_ask_candles_combined(pair, count=1) or []
+                if rr:
+                    last = rr[-1]
+                    mp[pair] = (Decimal(str(last.get('bid_close', 0.0))), Decimal(str(last.get('ask_close', 0.0))))
+        return mp
 
     def assess_trade(self, instrument: str, signal: int, price: float) -> Optional[Dict[str, Any]]:
         """
@@ -66,19 +92,44 @@ class RiskManager:
             # If the signal is opposite, it implies closing the existing position, which is handled by OrderManager.
             # We don't open a new one immediately.
 
-        # 2. Calculate order size
-        # This is a simplified calculation. A real system would need account balance and currency conversion.
-        # For now, we use a fixed size or a simple calculation.
-        trade_size_units = self.config.get('default_trade_size_units', 100)
+        # 2. Calculate order size based on risk and pip value in account currency
+        try:
+            # Equity from account summary
+            from ..core.oanda_client import OandaClient
+            client = OandaClient.from_env()
+            acct = client.get_account_summary()
+            equity = float(acct['account'].get('NAV', acct['account'].get('balance', 0.0))) if acct and 'account' in acct else 0.0
+        except Exception:
+            equity = 0.0
+
+        details = self.iim.get_details(instrument)
+        if details is None:
+            self.logger.error(f"Instrument details not found for {instrument}.")
+            return None
+
+        # pip value per unit in quote currency
+        pip_value_qc_per_unit = abs(float(Decimal(str(10)) ** Decimal(str(details.pip_location))))
+        # conversion to account currency using live prices
+        price_map = self._build_price_map(instrument, client)
+        rate_qc_to_ac = float(self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map))
+        pip_value_ac_per_unit = pip_value_qc_per_unit * rate_qc_to_ac if rate_qc_to_ac > 0 else 0.0
+        if pip_value_ac_per_unit <= 0:
+            self.logger.error("Failed to compute pip value in account currency; aborting trade.")
+            return None
+
+        risk_amount_ac = (self.max_risk_per_trade_percent / 100.0) * equity if equity > 0 else 10.0
+        units_float = risk_amount_ac / (self.stop_loss_pips * pip_value_ac_per_unit)
+        # Round units per instrument rules
+        units_decimal = details.round_units(units_float)
+        trade_size_units = int(units_decimal) if signal == 1 else -int(units_decimal)
 
         # 3. Define Stop Loss and Take Profit
-        pip_value = 0.0001 # Simplified for now, varies by instrument
         if signal == 1: # Buy
-            stop_loss_price = price - self.stop_loss_pips * pip_value
-            take_profit_price = price + self.take_profit_pips * pip_value
+            stop_loss_price = price - self.stop_loss_pips * (10 ** details.pip_location)
+            take_profit_price = price + self.take_profit_pips * (10 ** details.pip_location)
         elif signal == -1: # Sell
-            stop_loss_price = price + self.stop_loss_pips * pip_value
-            take_profit_price = price - self.take_profit_pips * pip_value
+            stop_loss_price = price + self.stop_loss_pips * (10 ** details.pip_location)
+            take_profit_price = price - self.take_profit_pips * (10 ** details.pip_location)
         else: # Hold
             return None
 

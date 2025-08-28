@@ -186,6 +186,44 @@ class OandaClient:
             logger.error(f"Failed to close position for {instrument}: {e}")
             return None
 
+    def get_bid_ask_candles_combined(self, instrument: str, count: int = 100, granularity: str = "S5") -> Optional[List[Dict[str, Any]]]:
+        """Fetch bid and ask candles and merge into unified records for downstream processing.
+
+        Each record contains: time, bid_open/high/low/close, ask_open/high/low/close, and volume if provided.
+        """
+        try:
+            bid = self.get_candles(instrument, count=count, granularity=granularity, price="B") or []
+            ask = self.get_candles(instrument, count=count, granularity=granularity, price="A") or []
+            if not bid and not ask:
+                return []
+            bid_map = {c.get("time"): c for c in bid if c and c.get("complete", True)}
+            ask_map = {c.get("time"): c for c in ask if c and c.get("complete", True)}
+            times = sorted(set([t for t in bid_map.keys() if t]) | set([t for t in ask_map.keys() if t]))
+            merged: List[Dict[str, Any]] = []
+            for t in times:
+                rec: Dict[str, Any] = {"time": t}
+                if t in bid_map and "bid" in bid_map[t]:
+                    b = bid_map[t]["bid"]
+                    rec["bid_open"] = float(b.get("o", 0.0))
+                    rec["bid_high"] = float(b.get("h", 0.0))
+                    rec["bid_low"] = float(b.get("l", 0.0))
+                    rec["bid_close"] = float(b.get("c", 0.0))
+                    if "volume" in bid_map[t]:
+                        rec["volume"] = int(bid_map[t]["volume"])
+                if t in ask_map and "ask" in ask_map[t]:
+                    a = ask_map[t]["ask"]
+                    rec["ask_open"] = float(a.get("o", 0.0))
+                    rec["ask_high"] = float(a.get("h", 0.0))
+                    rec["ask_low"] = float(a.get("l", 0.0))
+                    rec["ask_close"] = float(a.get("c", 0.0))
+                    if "volume" in ask_map[t] and "volume" not in rec:
+                        rec["volume"] = int(ask_map[t]["volume"])
+                merged.append(rec)
+            return merged
+        except Exception as e:
+            logger.error(f"Error fetching bid/ask candles for {instrument}: {e}")
+            return None
+
 # --- 範例 ---
 if __name__ == '__main__':
     logger.info("正在測試 OandaClient...")
