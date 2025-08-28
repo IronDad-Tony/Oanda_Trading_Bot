@@ -7,6 +7,7 @@ Enhanced real-time monitoring with proper data synchronization and GPU monitorin
 # Fix PyTorch Streamlit compatibility issue
 import os
 import sys
+from pathlib import Path
 
 # Set environment variables before importing torch
 os.environ['TORCH_CPP_LOG_LEVEL'] = 'ERROR'
@@ -17,6 +18,22 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # 0=all, 1=info, 2=warning, 3=error
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN warnings
 os.environ['TF_DISABLE_DEPRECATED_WARNINGS'] = '1'  # Disable deprecated warnings
 os.environ['TF_ENABLE_DEPRECATED_WARNINGS'] = '0'  # Disable deprecated warnings
+
+# Ensure 'src' (project code root) is on sys.path for absolute imports like 'oanda_trading_bot.*'
+try:
+    script_path = Path(__file__).resolve()
+    src_dir = script_path.parents[2]  # .../src
+    if src_dir.name != 'src':
+        # Fallback: search upward for a folder named 'src'
+        for p in script_path.parents:
+            if p.name == 'src':
+                src_dir = p
+                break
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+except Exception:
+    # Non-fatal; imports may still work if environment already configured
+    pass
 
 # Additional warnings suppression
 import warnings
