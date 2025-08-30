@@ -2,6 +2,7 @@ import logging
 import time
 import collections
 from typing import Dict, Any, List
+import numpy as np  # used in type annotations and processing
 
 from ..core.oanda_client import OandaClient
 from ..data.data_preprocessor import LivePreprocessor

@@ -1,15 +1,23 @@
 {
-  "trading_instruments": ["EUR_USD", "USD_JPY"],
+  "trading_instruments": ["EUR_USD", "GBP_USD", "XAU_USD", "NAS100_USD", "US30_USD"],
   "trading_granularity": "S5",
   "model_lookback_window": 128,
   "max_position_size_per_trade": 1000,
   "max_total_risk_pct": 2.0,
   "daily_loss_limit_pct": 5.0,
+  "account_currency": "USD",
+  "trading_loop_interval_seconds": 5,
+  "risk_management": {
+    "max_total_exposure_usd": 200,
+    "max_risk_per_trade_percent": 0.1,
+    "stop_loss_pips": 10,
+    "take_profit_pips": 10
+  },
   "database": {
     "path": "database/trading_history.db"
   },
   "preprocessor": {
-    "scalers_path": "live_trading_system/tests/dummy_scalers.json"
+    "scalers_path": "tests/live_trading_system/tests/dummy_scalers.json"
   },
   "model": {
     "path": "weights/sac_model_symbols5.zip"

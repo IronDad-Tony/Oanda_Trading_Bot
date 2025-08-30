@@ -256,7 +256,8 @@ def ensure_currency_data_for_trading(trading_symbols: List[str], account_currenc
         (success: bool, all_symbols: set)
     """
     # 获取所有可用的交易品种
-    from oanda_trading_bot.training_system.data_manager.instrument_info_manager import InstrumentInfoManager
+    # Use the shared InstrumentInfoManager from common package
+    from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
     instrument_info_manager = InstrumentInfoManager()
     available_instruments = set(instrument_info_manager.get_all_available_symbols())
     
