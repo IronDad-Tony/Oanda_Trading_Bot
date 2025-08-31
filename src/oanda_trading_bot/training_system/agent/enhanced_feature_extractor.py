@@ -1,8 +1,8 @@
-# src/agent/enhanced_feature_extractor.py
+﻿# src/agent/enhanced_feature_extractor.py
 """
-增強版特徵提取器 - Phase 3
-使用增強版UniversalTradingTransformer進行特徵提取
-支持多尺度特徵提取、自適應注意力機制和跨時間尺度融合
+å¢žå¼·ç‰ˆç‰¹å¾µæå–å™¨ - Phase 3
+ä½¿ç”¨å¢žå¼·ç‰ˆUniversalTradingTransformeré€²è¡Œç‰¹å¾µæå–
+æ”¯æŒå¤šå°ºåº¦ç‰¹å¾µæå–ã€è‡ªé©æ‡‰æ³¨æ„åŠ›æ©Ÿåˆ¶å’Œè·¨æ™‚é–“å°ºåº¦èžåˆ
 """
 
 import json
@@ -113,12 +113,12 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         except KeyError:
             raise ValueError("'market_features' not found in observation space. It is required.")
         
-        transformer_input_dim = market_features_dim + self.symbol_embedding_dim
+        transformer_input_dim = market_features_dim + self.symbol_embedding_dim + (self.time_output_dim if hasattr(self, 'time_output_dim') else 0)
         transformer_output_dim = self.model_config.get('output_dim', self.model_config.get('transformer_output_dim', 64))
         
         self.aux_features_dim = 0
         for key, space in observation_space.spaces.items():
-            if key not in ['market_features', 'symbol_id']:
+            if key not in ['market_features', 'symbol_id', 'features_from_dataset']:
                 self.aux_features_dim += int(np.prod(space.shape))
 
         features_dim = transformer_output_dim + self.aux_features_dim
@@ -183,8 +183,10 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             symbol_embeds = self.symbol_embedding(symbol_ids)  # [B,N,E]
             transformer_input = th.cat([market_features, symbol_embeds], dim=-1)  # [B,N,F+E]
 
-        # Transformer over symbol tokens → per-symbol outputs [B,N,D]
-        per_symbol_outputs = self.transformer(transformer_input, src_key_padding_mask=src_key_padding_mask)
+        # Transformer over symbol tokens â†’ per-symbol outputs [B,N,D]
+        amp_ctx = th.autocast('cuda', dtype=th.float16) if getattr(self, 'use_amp', False) and th.cuda.is_available() else contextlib.nullcontext()
+        with amp_ctx:
+            per_symbol_outputs = self.transformer(transformer_input, src_key_padding_mask=src_key_padding_mask)
 
         # Masked mean pooling over symbols to obtain a single portfolio feature [B,D]
         if src_key_padding_mask is not None:
@@ -201,7 +203,7 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         # Collect auxiliary features (flatten anything except the main keys)
         aux_features_list = []
         for key in self.observation_space.spaces:
-            if key not in ['market_features', 'symbol_id']:
+            if key not in ['market_features', 'symbol_id', 'features_from_dataset']:
                 aux_features_list.append(th.flatten(observations[key], start_dim=1))
 
         if aux_features_list:
@@ -391,3 +393,4 @@ class AttentionMemoryFusion(nn.Module):
         concatenated = th.cat([current_features, memory_attended], dim=-1)
         fused_features = self.out_proj(concatenated)
         return fused_features
+
