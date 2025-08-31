@@ -1597,20 +1597,52 @@ def display_training_status():
 
 
 def download_data_with_progress(symbols, start_date, end_date, granularity="S5"):
-    """Download historical data with Streamlit progress bar and status text."""
-    st.info("Checking and downloading required historical data for selected symbols...")
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
+    """Download historical data for training symbols and required FX pairs with separate progress bars."""
+    st.info("Checking required FX pairs for currency conversion and downloading data...")
+    from oanda_trading_bot.training_system.data_manager.currency_manager import (
+        get_required_conversion_pairs,
+    )
+    from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
+
+    iim = InstrumentInfoManager(force_refresh=False)
+    available = set(iim.get_all_available_symbols())
+    required_fx = sorted(list(get_required_conversion_pairs(symbols, ACCOUNT_CURRENCY, available)))
+
+    start_iso = start_date.isoformat() + "T00:00:00Z"
+    end_iso = end_date.isoformat() + "T23:59:59Z"
+
+    # Progress for training symbols
+    st.write("Primary symbols download")
+    prim_bar = st.progress(0.0)
+    prim_text = st.empty()
     manage_data_download_for_symbols(
         symbols,
-        start_date.isoformat() + "T00:00:00Z",
-        end_date.isoformat() + "T23:59:59Z",
+        start_iso,
+        end_iso,
         granularity=granularity,
-        streamlit_progress_bar=progress_bar,
-        streamlit_status_text=status_text
+        streamlit_progress_bar=prim_bar,
+        streamlit_status_text=prim_text,
     )
-    progress_bar.progress(1.0)
-    status_text.success("Historical data download complete.")
+    prim_bar.progress(1.0)
+    prim_text.success("Primary symbols complete.")
+
+    # Progress for FX conversion pairs (if any)
+    if required_fx:
+        st.write("FX conversion symbols download")
+        fx_bar = st.progress(0.0)
+        fx_text = st.empty()
+        manage_data_download_for_symbols(
+            required_fx,
+            start_iso,
+            end_iso,
+            granularity=granularity,
+            streamlit_progress_bar=fx_bar,
+            streamlit_status_text=fx_text,
+        )
+        fx_bar.progress(1.0)
+        fx_text.success("FX conversion symbols complete.")
+    else:
+        st.info("No additional FX conversion pairs required.")
 
 # --- Fragment-based UI Updates for Better Performance ---
 

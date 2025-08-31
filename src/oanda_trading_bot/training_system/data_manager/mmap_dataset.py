@@ -252,7 +252,7 @@ class UniversalMemoryMappedDataset(Dataset):
         # 确保所有必要的货币对数据已下载
         try:
             from oanda_trading_bot.training_system.common.config import ACCOUNT_CURRENCY
-            from oanda_trading_bot.training_system.data_manager.currency_manager import ensure_currency_data_for_trading
+            from oanda_trading_bot.training_system.data_manager.currency_download_helper import ensure_currency_data_for_trading
             
             success, all_symbols = ensure_currency_data_for_trading(
                 trading_symbols=self.symbols,

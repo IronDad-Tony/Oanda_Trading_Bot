@@ -45,10 +45,11 @@ try:
     if not _import_logged:
         logger.info("universal_trainer.py: Successfully imported shared data manager.")
     
-    from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager, ensure_currency_data_for_trading
+    from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager
+    from oanda_trading_bot.training_system.data_manager.currency_download_helper import ensure_currency_data_for_trading
     from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset
     from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
-    from oanda_trading_bot.training_system.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
+    from oanda_trading_bot.training_system.data_manager.oanda_downloader import format_datetime_for_oanda
     from oanda_trading_bot.training_system.environment.trading_env import UniversalTradingEnvV4
     from oanda_trading_bot.training_system.agent.sac_agent_wrapper import QuantumEnhancedSAC
     from oanda_trading_bot.training_system.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
@@ -88,10 +89,11 @@ except ImportError as e_initial_import_ut:
         if not _import_logged:
             logger.info("universal_trainer.py: Successfully re-imported shared data manager.")
         
-        from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager, ensure_currency_data_for_trading
+        from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager
+        from oanda_trading_bot.training_system.data_manager.currency_download_helper import ensure_currency_data_for_trading
         from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset
         from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
-        from oanda_trading_bot.training_system.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols
+        from oanda_trading_bot.training_system.data_manager.oanda_downloader import format_datetime_for_oanda
         from oanda_trading_bot.training_system.environment.trading_env import UniversalTradingEnvV4
         from oanda_trading_bot.training_system.agent.sac_agent_wrapper import QuantumEnhancedSAC
         from oanda_trading_bot.training_system.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
@@ -331,25 +333,27 @@ class UniversalTrainer:
             # This call might be redundant if ensure_currency_data_for_trading robustly handles all downloads.
             # For now, keeping it for potential separate progress reporting on primary symbols.
             logger.info(f"將為主要交易品種管理數據下載: {self.trading_symbols}, 範圍: {overall_start_iso} 到 {overall_end_iso}")
-            manage_data_download_for_symbols(
-                symbols=self.trading_symbols,
-                overall_start_str=overall_start_iso,
-                overall_end_str=overall_end_iso,
-                granularity=self.granularity,
-                streamlit_progress_bar=self.streamlit_progress_bar, # These might be None if using shared_data_manager
-                streamlit_status_text=self.streamlit_status_text   # These might be None if using shared_data_manager
-            )
-            
-            # 確保貨幣依賴數據完整 (this will also download if necessary)
-            logger.info("確保交易所需貨幣數據完整性 (包括轉換對)...")
-            # MODIFIED: Capture the full list of symbols from ensure_currency_data_for_trading
             success, all_symbols_for_dataset = ensure_currency_data_for_trading(
                 trading_symbols=self.trading_symbols,
                 account_currency=self.account_currency,
                 start_time_iso=overall_start_iso,
                 end_time_iso=overall_end_iso,
-                granularity=self.granularity
+                granularity=self.granularity,
+                streamlit_progress_bar=self.streamlit_progress_bar, # These might be None if using shared_data_manager
+                streamlit_status_text=self.streamlit_status_text,   # These might be None if using shared_data_manager
+                perform_download=True,
             )
+            
+            # 確保貨幣依賴數據完整 (this will also download if necessary)
+            logger.info("確保交易所需貨幣數據完整性 (包括轉換對)...")
+            # Duplicate ensure removed (already ensured above)
+            # success, all_symbols_for_dataset = ensure_currency_data_for_trading(
+            #     trading_symbols=self.trading_symbols,
+            #     account_currency=self.account_currency,
+            #     start_time_iso=overall_start_iso,
+            #     end_time_iso=overall_end_iso,
+            #     granularity=self.granularity
+            # )
             
             if not success:
                 logger.error("未能確保交易所需貨幣數據完整性。終止訓練。")

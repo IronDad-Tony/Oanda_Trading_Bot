@@ -6,14 +6,79 @@
     "TransferLearningStrategy"
   ],
   "strategies": [
-    { "name": "MomentumStrategy", "params": { "short_sma_period": 12, "long_sma_period": 26 } },
-    { "name": "BreakoutStrategy", "params": { "window": 20, "z_threshold": 2.0 } },
-    { "name": "MeanReversionStrategy", "params": { "bb_period": 20, "bb_std_dev": 2.0 } },
-    { "name": "CointegrationStrategy", "params": { "half_life": 60 } },
-    { "name": "PairsTradeStrategy", "params": { "lookback": 30 } },
-    { "name": "ReinforcementLearningStrategy", "params": { "action_dim": 3 } },
-    { "name": "EnsembleLearningStrategy", "params": { "aggregation_method": "majority_vote" } },
-    { "name": "TransferLearningStrategy", "params": { "new_head_output_dim": 3, "freeze_base_model": true } }
+    {
+      "name": "MomentumStrategy",
+      "description": "Price momentum via ROC thresholding.",
+      "params": {
+        "momentum_window": 20,
+        "signal_threshold_value": 0.35,
+        "close_idx": 0
+      }
+    },
+    {
+      "name": "TrendFollowingStrategy",
+      "description": "Moving average crossover (trend-following).",
+      "params": {
+        "short_sma_period": 10,
+        "long_sma_period": 30,
+        "close_idx": 0
+      }
+    },
+    {
+      "name": "MeanReversionStrategy",
+      "description": "Bollinger band mean reversion.",
+      "params": {
+        "bb_period": 20,
+        "bb_std_dev": 2.0,
+        "close_idx": 0
+      }
+    },
+    {
+      "name": "VolatilityBreakoutStrategy",
+      "description": "ATR-based volatility breakout.",
+      "params": {
+        "atr_period": 14,
+        "atr_multiplier": 2.0,
+        "high_idx": 1,
+        "low_idx": 2,
+        "close_idx": 0
+      }
+    },
+    {
+      "name": "BreakoutStrategy",
+      "description": "Statistical breakout using rolling high/low and volume confirmation.",
+      "params": {
+        "breakout_window": 20,
+        "std_dev_multiplier": 2.0,
+        "min_breakout_volume_increase_pct": 0.5,
+        "close_idx": 0,
+        "high_idx": 1,
+        "low_idx": 2,
+        "volume_idx": 3
+      }
+    },
+    {
+      "name": "ReinforcementLearningStrategy",
+      "description": "ML policy head (classification with 3 actions).",
+      "params": {
+        "action_dim": 3
+      }
+    },
+    {
+      "name": "EnsembleLearningStrategy",
+      "description": "Ensemble model aggregator.",
+      "params": {
+        "output_dim": 3,
+        "lookback_window": 16
+      }
+    },
+    {
+      "name": "TransferLearningStrategy",
+      "description": "Transfer learned model head.",
+      "params": {
+        "new_head_output_dim": 3,
+        "freeze_base_model": true
+      }
+    }
   ]
 }
-

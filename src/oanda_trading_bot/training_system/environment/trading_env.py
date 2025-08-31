@@ -495,8 +495,11 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         details = self.instrument_details_map[symbol]
         
         trade_value_qc = abs(units_to_trade) * trade_price_qc
-        exchange_rate = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
-        trade_value_ac = trade_value_qc * exchange_rate
+        # Commissions are debits; apply debit conversion (mid*(1+markup)) per OANDA convention
+        commission_rate_ac = self.currency_manager.convert_to_account_currency(
+            details.quote_currency, all_prices_map, is_credit=False
+        )
+        trade_value_ac = trade_value_qc * commission_rate_ac
         commission = trade_value_ac * self.commission_percentage
         
         self.cash -= commission
@@ -548,7 +551,12 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
 
         self.current_positions_units[slot_idx] = new_units
         
-        realized_pnl_ac = realized_pnl_qc * exchange_rate
+        # PnL conversion uses credit for gains and debit for losses
+        pnl_is_credit = realized_pnl_qc >= 0
+        pnl_rate_ac = self.currency_manager.convert_to_account_currency(
+            details.quote_currency, all_prices_map, is_credit=pnl_is_credit
+        )
+        realized_pnl_ac = realized_pnl_qc * pnl_rate_ac
         self.cash += realized_pnl_ac
         
         self.trade_log.append({

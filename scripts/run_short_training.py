@@ -32,13 +32,12 @@ def main():
     # Imports after sys.path adjustments
     from oanda_trading_bot.training_system.common.logger_setup import logger
     from oanda_trading_bot.training_system.common.config import (
-        MAX_SYMBOLS_ALLOWED, WEIGHTS_DIR, GRANULARITY
+        MAX_SYMBOLS_ALLOWED, WEIGHTS_DIR, GRANULARITY, ACCOUNT_CURRENCY
     )
     from oanda_trading_bot.training_system.data_manager.oanda_downloader import (
-        manage_data_download_for_symbols,
         format_datetime_for_oanda,
     )
-    from oanda_trading_bot.training_system.data_manager.currency_manager import ensure_currency_data_for_trading
+    from oanda_trading_bot.training_system.data_manager.currency_download_helper import ensure_currency_data_for_trading
     from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset
     from oanda_trading_bot.training_system.data_manager.database_manager import query_historical_data
     from oanda_trading_bot.training_system.environment.trading_env import UniversalTradingEnvV4
@@ -55,20 +54,20 @@ def main():
     attempts = 0
     max_attempts = 7
     while attempts < max_attempts:
-    logger.info("=== Headless Short Training: Data Download (with currency pairs) ===")
-    logger.info(f"Symbols: {symbols}; Window: {start_iso} to {end_iso}; Granularity: {granularity}")
-    try:
-        ok, all_syms = ensure_currency_data_for_trading(symbols, ACCOUNT_CURRENCY, start_iso, end_iso, granularity)
-        if ok:
-            logger.info(f"Ensured currency pairs. Total symbols fetched: {len(all_syms)}")
-        else:
-            logger.warning("ensure_currency_data_for_trading reported failure; falling back to direct symbol download")
-            manage_data_download_for_symbols(symbols, start_iso, end_iso, granularity=granularity,
-                                             streamlit_progress_bar=None, streamlit_status_text=None)
-    except Exception as e:
-        logger.warning(f"ensure_currency_data_for_trading error: {e}; fallback to direct download")
-        manage_data_download_for_symbols(symbols, start_iso, end_iso, granularity=granularity,
-                                         streamlit_progress_bar=None, streamlit_status_text=None)
+        logger.info("=== Headless Short Training: Unified Data Ensure (training + FX) ===")
+        logger.info(f"Symbols: {symbols}; Window: {start_iso} to {end_iso}; Granularity: {granularity}")
+        try:
+            ok, all_syms = ensure_currency_data_for_trading(
+                symbols, ACCOUNT_CURRENCY, start_iso, end_iso, granularity,
+                streamlit_progress_bar=None, streamlit_status_text=None, perform_download=True
+            )
+            if ok:
+                logger.info(f"Ensured data for all symbols (training + FX). Total symbols fetched: {len(all_syms)}")
+                break
+            else:
+                logger.warning("ensure_currency_data_for_trading reported failure; will check DB presence and retry with previous weekday if needed")
+        except Exception as e:
+            logger.warning(f"ensure_currency_data_for_trading error: {e}; will check DB presence and retry if needed")
         # Quick DB presence check
         has_data = False
         try:
@@ -95,7 +94,7 @@ def main():
 
     logger.info("=== Building Dataset ===")
     dataset = UniversalMemoryMappedDataset(
-        symbols=symbols,
+        symbols=sorted(list(all_syms)) if 'all_syms' in locals() and all_syms else symbols,
         start_time_iso=start_iso,
         end_time_iso=end_iso,
         granularity=granularity,
