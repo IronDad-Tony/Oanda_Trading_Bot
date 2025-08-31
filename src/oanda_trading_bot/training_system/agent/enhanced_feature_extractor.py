@@ -6,6 +6,7 @@
 """
 
 import json
+import contextlib
 import logging
 from typing import Optional, Dict, List
 
@@ -30,16 +31,45 @@ TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
 
 class UniversalTransformer(nn.Module):
     """
-    A universal transformer module that processes input features and captures
-    intermediate layer activations for visualization and analysis.
+    A universal transformer over symbol tokens with optional gradient checkpointing.
+    Captures intermediate layer activations for diagnostics.
     """
-    def __init__(self, input_dim, model_dim, output_dim, nhead, num_layers, dropout_rate=0.1, **kwargs):
+    def __init__(
+        self,
+        input_dim: int,
+        model_dim: int,
+        output_dim: int,
+        nhead: int,
+        num_layers: int,
+        dropout_rate: float = 0.1,
+        use_gradient_checkpointing: bool = False,
+        **kwargs,
+    ):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, model_dim)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=model_dim, nhead=nhead, batch_first=True, dropout=dropout_rate)
+        # Log config prior to layer creation to catch dimension mismatches early
+        logger.info(
+            f"[UniversalTransformer] preparing encoder: d_model={model_dim}, nhead={nhead}, dropout={dropout_rate}, num_layers={num_layers}"
+        )
+        try:
+            md_int = int(model_dim)
+            nh_int = int(nhead)
+        except Exception:
+            md_int = model_dim
+            nh_int = nhead
+        if isinstance(md_int, int) and isinstance(nh_int, int):
+            if md_int % max(1, nh_int) != 0:
+                raise ValueError(f"UniversalTransformer config invalid: d_model ({md_int}) must be divisible by nhead ({nh_int}). Model config may be incorrect: check hidden_dim/num_heads.")
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=model_dim, nhead=nhead, batch_first=True, dropout=dropout_rate
+        )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.output_proj = nn.Linear(model_dim, output_dim)
-        logger.info(f"UniversalTransformer initialized: input_dim={input_dim}, model_dim={model_dim}, output_dim={output_dim}")
+        self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
+        logger.info(
+            f"UniversalTransformer initialized: input_dim={input_dim}, model_dim={model_dim}, output_dim={output_dim}, "
+            f"nhead={nhead}, num_layers={num_layers}, gc={self.use_gradient_checkpointing}"
+        )
         # This dictionary will hold the activations from each layer
         self.activations = {}
 
@@ -56,9 +86,15 @@ class UniversalTransformer(nn.Module):
         x = self.input_proj(src)  # [B, N, model_dim]
 
         # Iterate through encoder layers and capture activations; pass key padding mask to each layer
-        # so that padded symbols are ignored by attention.
+        # so that padded symbols are ignored by attention. Optionally use gradient checkpointing to save VRAM.
         for i, layer in enumerate(self.transformer_encoder.layers):
-            x = layer(x, src_key_padding_mask=src_key_padding_mask)
+            if self.use_gradient_checkpointing:
+                # Use a closure to avoid passing non-Tensor args to checkpoint.
+                x = torch.utils.checkpoint.checkpoint(
+                    lambda y: layer(y, src_key_padding_mask=src_key_padding_mask), x
+                )
+            else:
+                x = layer(x, src_key_padding_mask=src_key_padding_mask)
             self.activations[f'encoder_layer_{i}'] = x.detach()
 
         token_outputs = self.output_proj(x)  # [B, N, output_dim]
@@ -148,7 +184,8 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             output_dim=transformer_output_dim,
             nhead=self.model_config.get('num_heads', self.model_config.get('transformer_nhead', 4)),
             num_layers=self.model_config.get('num_layers', self.model_config.get('transformer_num_layers', 3)),
-            dropout_rate=self.model_config.get('dropout_rate', 0.1)
+            dropout_rate=self.model_config.get('dropout_rate', 0.1),
+            use_gradient_checkpointing=self.model_config.get('use_gradient_checkpointing', False),
         )
         
         logger.info(f"EnhancedTransformerFeatureExtractor initialized. Total features_dim: {self._features_dim}")

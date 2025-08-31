@@ -88,6 +88,20 @@ def initialize_system(
         model_config_path = os.path.join(project_root_path, 'configs', 'training', 'enhanced_model_config.json')
         preprocessor = LivePreprocessor(scalers_path, config, model_config_path)
         prediction_service = mock_prediction_service if mock_prediction_service else PredictionService(config)
+        # Auto-load model onto GPU when available (falls back to CPU)
+        try:
+            model_cfg = config.get('model', {}) if isinstance(config, dict) else {}
+            model_rel = model_cfg.get('path')
+            if model_rel:
+                model_abs = os.path.join(project_root_path, model_rel)
+                if os.path.exists(model_abs):
+                    # device=None triggers auto 'cuda' if available inside PredictionService
+                    prediction_service.load_model(model_abs, device=None)
+                    logging.info(f"Loaded model for live trading: {model_abs}")
+                else:
+                    logging.warning(f"Configured model path not found: {model_abs}")
+        except Exception as e:
+            logging.error(f"Failed to auto-load model: {e}", exc_info=True)
 
         # --- Trading Components ---
         position_manager = PositionManager()

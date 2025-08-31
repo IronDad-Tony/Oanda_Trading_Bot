@@ -4,9 +4,21 @@ pandas
 scipy
 
 # Machine Learning and Deep Learning
-torch==2.2.0
-torchvision
-torchaudio
+# Use PyTorch CUDA 12.9 (cu129) wheels and PyG wheels
+--index-url https://download.pytorch.org/whl/cu129
+--find-links https://data.pyg.org/whl/torch-2.8.0+cu129.html
+
+torch==2.8.0+cu129
+torchvision==0.23.0+cu129
+torchaudio==2.8.0+cu129
+
+# PyTorch Geometric stack matching torch 2.8.0+cu129 (Windows wheels)
+pyg-lib==0.4.0+pt28cu129
+torch-scatter==2.1.2+pt28cu129
+torch-sparse==0.6.18+pt28cu129
+torch-cluster==1.6.3+pt28cu129
+torch-spline-conv==1.2.2+pt28cu129
+torch-geometric==2.6.1
 stable-baselines3[extra]
 gymnasium
 scikit-learn
