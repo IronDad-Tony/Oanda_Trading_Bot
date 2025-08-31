@@ -45,123 +45,104 @@ class CurrencyDependencyManager:
             # 虧損時：midpoint × (1 + 0.5%)
             return midpoint * (Decimal('1') + self.oanda_markup)
     
+    def _get_rate_via_usd(self, base_curr: str, quote_curr: str,
+                           current_prices_map: Dict[str, Tuple[Decimal, Decimal]],
+                           is_for_conversion: bool) -> Optional[Decimal]:
+        """通过USD作为中介，计算交叉汇率"""
+        if base_curr == "USD" or quote_curr == "USD":
+            return None # Should be handled by direct/inverse lookup
+
+        # 获取 base -> USD 的汇率
+        base_to_usd_rate = self.get_specific_rate(
+            base_curr, "USD", current_prices_map, is_for_conversion=is_for_conversion
+        )
+        if base_to_usd_rate is None:
+            return None
+
+        # 获取 USD -> quote 的汇率
+        usd_to_quote_rate = self.get_specific_rate(
+            "USD", quote_curr, current_prices_map, is_for_conversion=is_for_conversion
+        )
+        if usd_to_quote_rate is None:
+            return None
+
+        # 最终汇率是两者相乘
+        return base_to_usd_rate * usd_to_quote_rate
+
     def get_specific_rate(self, base_curr: str, quote_curr: str,
                          current_prices_map: Dict[str, Tuple[Decimal, Decimal]],
-                         visited: Optional[set] = None, depth: int = 0, 
                          is_for_conversion: bool = False) -> Optional[Decimal]:
         """
-        獲取特定貨幣對的匯率，支持交叉匯率計算
-        添加遞迴深度限制、循環檢測和多層中介貨幣支持
+        获取特定货币对的汇率，支持直接、反向和通过USD的三角转换。
         """
-        # 先正規化 symbol 格式，確保都是 Oanda 標準
         base_curr = self.normalize_symbol_format(base_curr)
         quote_curr = self.normalize_symbol_format(quote_curr)
-        
-        # 最大遞迴深度保護 (防止無限遞迴)
-        MAX_DEPTH = 4
-        if depth > MAX_DEPTH:
-            logger.warning(f"達到最大遞迴深度 {MAX_DEPTH}，停止查找 {base_curr}/{quote_curr} 匯率")
-            return None
-            
-        if visited is None:
-            visited = set()
-            
-        pair = (base_curr, quote_curr)
-        
-        # 防止循環處理相同貨幣對
-        if pair in visited:
-            return None
-        visited.add(pair)
-          # 相同貨幣直接返回1.0
+
         if base_curr == quote_curr:
             return Decimal('1.0')
-        
-        # 嘗試直接貨幣對
+
+        # 路径 1: 尝试直接货币对 (Base -> Quote)
         direct_pair = f"{base_curr}_{quote_curr}"
         if direct_pair in current_prices_map:
             bid, ask = current_prices_map[direct_pair]
-            if ask > 0:
-                if is_for_conversion and self.apply_oanda_markup:
-                    # 貨幣轉換時使用中間價加markup
-                    midpoint = self.get_midpoint_rate(bid, ask)
-                    return self.apply_conversion_fee(midpoint, is_credit=True)
-                else:
-                    # 一般交易使用ask價格
-                    return ask
-        
-        # 嘗試反向貨幣對
+            if is_for_conversion:
+                midpoint = self.get_midpoint_rate(bid, ask)
+                # 当我们卖出base_curr换取quote_curr时，我们得到较少的quote_curr
+                return self.apply_conversion_fee(midpoint, is_credit=True) 
+            else:
+                return ask # From Oanda's perspective, this is the rate they offer
+
+        # 路径 2: 尝试反向货币对 (Quote -> Base)
         reverse_pair = f"{quote_curr}_{base_curr}"
         if reverse_pair in current_prices_map:
             bid, ask = current_prices_map[reverse_pair]
             if bid > 0:
-                if is_for_conversion and self.apply_oanda_markup:
-                    # 貨幣轉換時使用中間價加markup
+                if is_for_conversion:
                     midpoint = self.get_midpoint_rate(bid, ask)
-                    adjusted_rate = self.apply_conversion_fee(midpoint, is_credit=True)
+                    # 当我们卖出quote_curr换取base_curr时，我们得到较少的base_curr
+                    # 所以 1 / (rate) 会得到更多的 base_curr, 因此这里用 is_credit=False (debit)
+                    adjusted_rate = self.apply_conversion_fee(midpoint, is_credit=False)
                     return Decimal('1.0') / adjusted_rate
                 else:
-                    # 一般交易使用bid價格的倒數
                     return Decimal('1.0') / bid
-        
-        # 嘗試通過中介貨幣轉換 (USD, EUR, GBP, JPY, AUD, CAD)
-        intermediates = ["USD", "EUR", "GBP", "JPY", "AUD", "CAD"]
-        for intermediate in intermediates:            # 跳過與查詢貨幣相同的仲介貨幣
-            if intermediate == base_curr or intermediate == quote_curr:
-                continue
-                
-            # 獲取基礎貨幣對中介貨幣的匯率
-            base_to_intermediate = self.get_specific_rate(
-                base_curr, intermediate, current_prices_map, visited.copy(), depth+1, is_for_conversion
-            )
-            
-            # 獲取目標貨幣對中介貨幣的匯率
-            quote_to_intermediate = self.get_specific_rate(
-                quote_curr, intermediate, current_prices_map, visited.copy(), depth+1, is_for_conversion
-            )
-            
-            if base_to_intermediate is not None and quote_to_intermediate is not None:
-                if quote_to_intermediate != 0:                    # 計算交叉匯率: (base/intermediate) / (quote/intermediate)
-                    return base_to_intermediate / quote_to_intermediate
-        
-        logger.debug(f"無法找到 {base_curr}_{quote_curr} 的轉換路徑")
+
+        # 路径 3: 尝试通过USD进行三角转换
+        triangular_rate = self._get_rate_via_usd(
+            base_curr, quote_curr, current_prices_map, is_for_conversion
+        )
+        if triangular_rate is not None:
+            return triangular_rate
+
+        logger.debug(f"无法找到 {base_curr}_{quote_curr} 的转换路径")
         return None
 
     def convert_to_account_currency(self, from_currency: str, 
                                    current_prices_map: Dict[str, Tuple[Decimal, Decimal]], 
                                    is_credit: bool = True) -> Decimal:
         """
-        將任意貨幣轉換為賬戶貨幣（符合Oanda規則）
-        is_credit: True為獲利轉換，False為虧損轉換
+        将任意货币转换为账户货币（符合Oanda规则）。
+        is_credit: True为获利转换，False为亏损转换。
         """
-        # 先正規化 symbol 格式
         from_currency = self.normalize_symbol_format(from_currency)
         
-        # 相同貨幣直接返回1.0
         if from_currency == self.account_currency:
             return Decimal('1.0')
         
-        # 使用標記表示這是貨幣轉換，需要應用markup
+        # is_for_conversion=True 会自动处理Oanda的markup
         rate = self.get_specific_rate(
             from_currency,
             self.account_currency,
             current_prices_map,
-            visited=None,
-            depth=0,
             is_for_conversion=True
         )
         
         if rate and rate > 0:
+            # 在 get_specific_rate 中已经根据 is_for_conversion 应用了正确的 markup 逻辑
+            # 此处无需再调用 apply_conversion_fee
             return rate
         
-        # 如果直接轉換失敗，嘗試反向轉換
-        reverse_rate = self.get_specific_rate(self.account_currency, from_currency, current_prices_map,
-                                            visited=None, depth=0, is_for_conversion=True)
-        if reverse_rate and reverse_rate > 0:
-            return Decimal('1.0') / reverse_rate
-        
-        # 最終回退 - 記錄警告並返回1.0
         available_pairs = ", ".join(current_prices_map.keys())
-        logger.warning(f"無法轉換 {from_currency} 到 {self.account_currency}，可用貨幣對: [{available_pairs}]，使用安全值1.0")
+        logger.warning(f"无法转换 {from_currency} 到 {self.account_currency}，可用货币对: [{available_pairs}]，使用安全值1.0")
         return Decimal('1.0')
     
     def get_trading_rate(self, base_curr: str, quote_curr: str,
@@ -190,58 +171,65 @@ class CurrencyDependencyManager:
 
 
 def get_required_conversion_pairs(symbols: List[str], account_currency: str, available_instruments: Set[str]) -> Set[str]:
-    """获取进行货币转换所需的额外货币对，只生成有效的货币对"""
+    """
+    获取进行货币转换所需的额外货币对。
+    该函数确保任何交易品种的任何货币都可以通过直接、反向或以USD为枢纽的三角转换路径，
+    最终换算成账户本位币。
+    """
     required_pairs = set()
     account_currency = account_currency.upper()
     
-    # 始终包含基础货币对（如果存在）
-    if f"USD_{account_currency}" in available_instruments:
-        required_pairs.add(f"USD_{account_currency}")
-    if f"{account_currency}_USD" in available_instruments:
-        required_pairs.add(f"{account_currency}_USD")
-    
-    # 收集所有涉及的货币
+    # 收集所有涉及的独特货币
     currencies = set()
     for symbol in symbols:
         parts = symbol.split("_")
         if len(parts) == 2:
             currencies.add(parts[0])
             currencies.add(parts[1])
-    
-    # 添加账户货币相关的货币对
+
+    # 对于每种货币，确保存在到账户货币的转换路径
     for currency in currencies:
         if currency == account_currency:
             continue
-            
-        # 直接货币对
+
+        # 路径 1 & 2: 直接或反向转换
         direct_pair = f"{currency}_{account_currency}"
         inverse_pair = f"{account_currency}_{currency}"
-        
-        # 只添加有效的货币对
+
         if direct_pair in available_instruments:
             required_pairs.add(direct_pair)
+            continue # 找到路径，无需进一步寻找
         if inverse_pair in available_instruments:
             required_pairs.add(inverse_pair)
-        
-        # 添加通过USD中转的货币对（如果有效）
+            continue # 找到路径，无需进一步寻找
+
+        # 路径 3: 三角转换 (通过 USD)
+        # 如果货币本身不是USD，且账户货币也不是USD
         if currency != "USD" and account_currency != "USD":
-            usd_pair1 = f"{currency}_USD"
-            usd_pair2 = f"USD_{currency}"
-            if usd_pair1 in available_instruments:
-                required_pairs.add(usd_pair1)
-            if usd_pair2 in available_instruments:
-                required_pairs.add(usd_pair2)
-    
-    # 添加常见中转货币对（如果有效）
-    for intermediate in ["EUR", "GBP", "JPY"]:
-        if intermediate != account_currency:
-            pair1 = f"{intermediate}_{account_currency}"
-            pair2 = f"{account_currency}_{intermediate}"
-            if pair1 in available_instruments:
-                required_pairs.add(pair1)
-            if pair2 in available_instruments:
-                required_pairs.add(pair2)
-    
+            # 检查 Ccy -> USD 的路径
+            path1_direct = f"{currency}_USD"
+            path1_inverse = f"USD_{currency}"
+            
+            # 检查 USD -> AccountCurrency 的路径
+            path2_direct = f"USD_{account_currency}"
+            path2_inverse = f"{account_currency}_USD"
+
+            # 确保两条路都通
+            if (path1_direct in available_instruments or path1_inverse in available_instruments) and \
+               (path2_direct in available_instruments or path2_inverse in available_instruments):
+                
+                # 将所有涉及的有效货币对加入列表
+                if path1_direct in available_instruments:
+                    required_pairs.add(path1_direct)
+                if path1_inverse in available_instruments:
+                    required_pairs.add(path1_inverse)
+                if path2_direct in available_instruments:
+                    required_pairs.add(path2_direct)
+                if path2_inverse in available_instruments:
+                    required_pairs.add(path2_inverse)
+            else:
+                logger.warning(f"無法為貨幣 {currency} 找到到帳戶貨幣 {account_currency} 的轉換路徑，即使通過USD也無法。")
+
     return required_pairs - set(symbols)
 
 def ensure_currency_data_for_trading(trading_symbols: List[str], account_currency: str,
