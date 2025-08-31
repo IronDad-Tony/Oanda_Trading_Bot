@@ -40,6 +40,7 @@ class RiskManager:
         self.use_atr_sizing = self.config.get('use_atr_sizing', False)
         self.atr_period = int(self.config.get('atr_period', 14))
         self.stop_loss_atr_multiplier = float(self.config.get('stop_loss_atr_multiplier', 2.0))
+        self.take_profit_atr_multiplier = float(self.config.get('take_profit_atr_multiplier', 3.0))
         
         self.logger.info("RiskManager initialized with the following parameters:")
         self.logger.info(f"- Max Total Exposure (USD): {self.max_total_exposure_usd}")
@@ -165,6 +166,12 @@ class RiskManager:
                         stop_loss_price = price - sl_distance_qc
                     elif signal == -1:
                         stop_loss_price = price + sl_distance_qc
+                    if self.take_profit_atr_multiplier and self.take_profit_atr_multiplier > 0:
+                        tp_distance_qc = atr_val * self.take_profit_atr_multiplier
+                        if signal == 1:
+                            take_profit_price = price + tp_distance_qc
+                        elif signal == -1:
+                            take_profit_price = price - tp_distance_qc
                     used_atr = True
 
         if not used_atr:
@@ -182,7 +189,7 @@ class RiskManager:
             elif signal == -1:
                 stop_loss_price = price + self.stop_loss_pips * (10 ** details.pip_location)
 
-        # Take profit：保留 pip 模式（可於未來擴充 ATR TP）
+        # Take profitÃ¯Â¼Å¡Ã¤Â¿ÂÃ§â€¢â„¢ pip Ã¦Â¨Â¡Ã¥Â¼ÂÃ¯Â¼Ë†Ã¥ÂÂ¯Ã¦â€“Â¼Ã¦Å“ÂªÃ¤Â¾â€ Ã¦â€œÂ´Ã¥â€¦â€¦ ATR TPÃ¯Â¼â€°
         if signal == 1: # Buy
             take_profit_price = price + self.take_profit_pips * (10 ** details.pip_location)
         elif signal == -1:
