@@ -45,22 +45,30 @@ if logger.hasHandlers():
 
 # --- 控制台處理程序 (Console Handler) ---
 if sys.platform == 'win32':
+    # Force UTF-8 for console streams to avoid UnicodeEncodeError on cp1252 consoles
+    try:
+        os.environ['PYTHONIOENCODING'] = os.environ.get('PYTHONIOENCODING', 'utf-8')
+    except Exception:
+        pass
     # This block should be executed only once.
     if not _stdout_wrapped:
         try:
-            # Check if sys.stdout is a TTY, if not, it might be already redirected (e.g. in a pipe)
-            if sys.stdout.isatty(): 
+            if hasattr(sys.stdout, 'reconfigure'):
+                sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            else:
                 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
             _stdout_wrapped = True
         except Exception as e:
-            print(f"Initial Error wrapping stdout: {e}") 
+            print(f"Initial Error setting stdout encoding: {e}") 
     if not _stderr_wrapped:
         try:
-            if sys.stderr.isatty():
+            if hasattr(sys.stderr, 'reconfigure'):
+                sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+            else:
                 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
             _stderr_wrapped = True
         except Exception as e:
-            print(f"Initial Error wrapping stderr: {e}")
+            print(f"Initial Error setting stderr encoding: {e}")
 
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO) # Changed from DEBUG to INFO for console

@@ -1,10 +1,6 @@
 {
   "global_strategy_input_dim": null,
-  "ml_strategy_names": [
-    "ReinforcementLearningStrategy",
-    "EnsembleLearningStrategy",
-    "TransferLearningStrategy"
-  ],
+  "ml_strategy_names": [],
   "strategies": [
     {
       "name": "MomentumStrategy",
@@ -58,26 +54,15 @@
       }
     },
     {
-      "name": "ReinforcementLearningStrategy",
-      "description": "ML policy head (classification with 3 actions).",
+      "name": "ReversalStrategy",
+      "description": "RSI/Stochastic reversal entries.",
       "params": {
-        "action_dim": 3
-      }
-    },
-    {
-      "name": "EnsembleLearningStrategy",
-      "description": "Ensemble model aggregator.",
-      "params": {
-        "output_dim": 3,
-        "lookback_window": 16
-      }
-    },
-    {
-      "name": "TransferLearningStrategy",
-      "description": "Transfer learned model head.",
-      "params": {
-        "new_head_output_dim": 3,
-        "freeze_base_model": true
+        "reversal_window": 14,
+        "rsi_oversold": 30.0,
+        "rsi_overbought": 70.0,
+        "close_idx": 0,
+        "high_idx": 1,
+        "low_idx": 2
       }
     }
   ]

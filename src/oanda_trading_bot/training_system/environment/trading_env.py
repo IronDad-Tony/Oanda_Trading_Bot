@@ -633,13 +633,34 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             mid_price_qc = (current_bid_qc + current_ask_qc) / Decimal('2')
              
             
+            # 1) Value cap by max_position_size_percentage (AC -> QC -> units)
             max_pos_value_ac = self.equity_ac * self.max_position_size_percentage
             exchange_rate_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
-            if exchange_rate_to_ac <= 0: continue
-                 
+            if exchange_rate_to_ac <= 0:
+                continue
             max_pos_value_qc = max_pos_value_ac / exchange_rate_to_ac
             target_value_qc = max_pos_value_qc * Decimal(str(desired_position_ratio))
-            target_units = target_value_qc / mid_price_qc if mid_price_qc > 0 else Decimal('0')
+            value_cap_units = (target_value_qc / mid_price_qc) if mid_price_qc > 0 else Decimal('0')
+
+            # 2) Risk-based cap using ATR stop distance (per-trade risk sizing)
+            risk_cap_units = None
+            atr_qc = self.atr_values_qc[slot_idx]
+            if atr_qc > 0 and self.stop_loss_atr_multiplier > 0:
+                sl_distance_qc = atr_qc * self.stop_loss_atr_multiplier
+                # Risk per unit in account currency = stop distance (QC) * quote->AC rate
+                risk_per_unit_ac = sl_distance_qc * exchange_rate_to_ac
+                if risk_per_unit_ac > 0:
+                    risk_amount_ac = self.equity_ac * self.max_account_risk_per_trade
+                    risk_cap_units = risk_amount_ac / risk_per_unit_ac
+
+            # 3) Combine caps: take the minimum absolute units while preserving sign of desired ratio
+            desired_sign = Decimal('1.0') if Decimal(str(desired_position_ratio)) >= 0 else Decimal('-1.0')
+            abs_units_value = abs(value_cap_units)
+            if risk_cap_units is not None and risk_cap_units > 0:
+                abs_units_final = min(abs_units_value, risk_cap_units)
+            else:
+                abs_units_final = abs_units_value
+            target_units = desired_sign * abs_units_final
             target_units = self._round_trade_units(target_units, details.trade_units_precision)
 
             current_units = self.current_positions_units[slot_idx]

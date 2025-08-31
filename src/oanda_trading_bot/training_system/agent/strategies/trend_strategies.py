@@ -1,4 +1,4 @@
-# src/agent/strategies/trend_strategies.py
+﻿# src/agent/strategies/trend_strategies.py
 from .base_strategy import BaseStrategy, StrategyConfig
 from . import register_strategy
 import pandas as pd
@@ -20,7 +20,7 @@ except ImportError:
 
 @register_strategy("MomentumStrategy")
 class MomentumStrategy(BaseStrategy):
-    """動量策略：基於價格動量進行交易"""
+    """å‹•é‡ç­–ç•¥ï¼šåŸºæ–¼åƒ¹æ ¼å‹•é‡é€²è¡Œäº¤æ˜“"""
     
     @staticmethod
     def default_config() -> StrategyConfig:
@@ -132,7 +132,7 @@ class MomentumStrategy(BaseStrategy):
 
 @register_strategy("BreakoutStrategy")
 class BreakoutStrategy(BaseStrategy):
-    """突破策略：識別並跟隨價格突破"""
+    """çªç ´ç­–ç•¥ï¼šè­˜åˆ¥ä¸¦è·Ÿéš¨åƒ¹æ ¼çªç ´"""
 
     @staticmethod
     def default_config() -> StrategyConfig:
@@ -300,8 +300,9 @@ class BreakoutStrategy(BaseStrategy):
             idx = pd.DatetimeIndex([])
         return pd.DataFrame(index=idx, columns=['signal'], dtype=float).fillna(0.0)
 
+@register_strategy("TrendFollowingStrategy")
 class TrendFollowingStrategy(BaseStrategy):
-    """趨勢跟隨策略：基於移動平均線交叉"""
+    """è¶¨å‹¢è·Ÿéš¨ç­–ç•¥ï¼šåŸºæ–¼ç§»å‹•å¹³å‡ç·šäº¤å‰"""
 
     @staticmethod
     def default_config() -> StrategyConfig:
@@ -421,8 +422,9 @@ class TrendFollowingStrategy(BaseStrategy):
             idx = pd.DatetimeIndex([])
         return pd.DataFrame(index=idx, columns=['signal'], dtype=float).fillna(0.0)
 
+@register_strategy("ReversalStrategy")
 class ReversalStrategy(BaseStrategy):
-    """反轉策略：基於RSI指標的超買超賣"""
+    """åè½‰ç­–ç•¥ï¼šåŸºæ–¼RSIæŒ‡æ¨™çš„è¶…è²·è¶…è³£"""
 
     @staticmethod
     def default_config() -> StrategyConfig:
@@ -673,7 +675,7 @@ class ReversalStrategy(BaseStrategy):
     #     # ... (old pandas generate_signals commented out) ...
 
 class MeanReversionStrategy(BaseStrategy):
-    """均值反轉策略：基於價格和指標的超買超賣"""
+    """å‡å€¼åè½‰ç­–ç•¥ï¼šåŸºæ–¼åƒ¹æ ¼å’ŒæŒ‡æ¨™çš„è¶…è²·è¶…è³£"""
 
     @staticmethod
     def default_config() -> StrategyConfig:
@@ -774,3 +776,6 @@ class MeanReversionStrategy(BaseStrategy):
             signal[exit_short] = 0.0
 
         return signal.view(batch_size, 1, 1)
+
+
+

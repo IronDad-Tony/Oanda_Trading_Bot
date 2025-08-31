@@ -159,6 +159,7 @@ class QuantumEnhancedSAC:
                 "use_gumbel_softmax": QUANTUM_STRATEGY_USE_GUMBEL_SOFTMAX,
                 "adaptive_learning_rate": QUANTUM_ADAPTIVE_LR,
                 "performance_ema_alpha": QUANTUM_PERFORMANCE_EMA_ALPHA,
+                "dynamic_loading_enabled": False,
             },
         }
         
@@ -195,6 +196,44 @@ class QuantumEnhancedSAC:
             tensorboard_log=full_tensorboard_path,
             **cleaned_kwargs # <--- MODIFIED: Pass cleaned_kwargs to SAC constructor
         )        # CustomSACPolicy 在內部已使用 TransformerFeatureExtractor，無需手動替換        # Initialize High-Level Integration System for Phase 5
+        # Augment actor optimizer to include FE/ESS parameters so their gradients update with actor steps
+        try:
+            pol = self.agent.policy
+            act = getattr(pol, 'actor', None)
+            if act is not None and hasattr(act, 'optimizer') and act.optimizer is not None:
+                base = list(act.parameters())
+                extra = []
+                if hasattr(pol, 'features_extractor') and pol.features_extractor is not None:
+                    extra += [p for p in pol.features_extractor.parameters() if p.requires_grad]
+                if hasattr(pol, 'ess_layer') and pol.ess_layer is not None:
+                    extra += [p for p in pol.ess_layer.parameters() if p.requires_grad]
+                uniq, seen = [], set()
+                for p in base + extra:
+                    pid = id(p)
+                    if pid not in seen:
+                        seen.add(pid)
+                        uniq.append(p)
+                if len(uniq) > len(base):
+                    try:
+                        lr = act.optimizer.param_groups[0].get('lr', 3e-4)
+                    except Exception:
+                        lr = 3e-4
+                    opt_cls = type(act.optimizer)
+                    opt_kwargs = {}
+                    try:
+                        pg = act.optimizer.param_groups[0]
+                        for key in ['betas', 'eps', 'weight_decay']:
+                            if key in pg:
+                                opt_kwargs[key] = pg[key]
+                    except Exception:
+                        pass
+                    act.optimizer = opt_cls(uniq, lr=lr, **opt_kwargs)
+                    logger.info("Actor optimizer augmented with features_extractor and ESS parameters.")
+            else:
+                logger.warning("Actor optimizer not available for augmentation.")
+        except Exception as e:
+            logger.warning(f"Failed to augment actor optimizer: {e}")
+
         try:
             if HighLevelIntegrationSystem is not None:
                 # Create real components for integration system

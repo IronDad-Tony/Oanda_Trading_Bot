@@ -1,4 +1,4 @@
-# src/agent/strategies/statistical_arbitrage_strategies.py
+﻿# src/agent/strategies/statistical_arbitrage_strategies.py
 import pandas as pd
 import numpy as np
 import ta
@@ -593,6 +593,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         self.logger.warning(f"[{self.config.name}] Legacy generate_signals for composite strategy is not fully implemented to combine sub-signals. Returning neutral.")
         return pd.DataFrame(0.0, index=output_index, columns=['signal'])
 
+@register_strategy("VolatilityBreakoutStrategy")
 class VolatilityBreakoutStrategy(BaseStrategy):
     """
     A strategy that signals when price breaks out of a volatility-defined range (e.g., ATR bands).
@@ -983,3 +984,6 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         # For now, just return neutral. A full legacy implementation would be extensive.
         self.logger.warning(f"[{self.config.name}] Legacy generate_signals for composite strategy is not fully implemented to combine sub-signals. Returning neutral.")
         return pd.DataFrame(0.0, index=output_index, columns=['signal'])
+
+
+

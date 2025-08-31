@@ -10,6 +10,9 @@
   "risk_management": {
     "max_total_exposure_usd": 200,
     "max_risk_per_trade_percent": 0.1,
+    "use_atr_sizing": true,
+    "atr_period": 14,
+    "stop_loss_atr_multiplier": 2.0,
     "stop_loss_pips": 10,
     "take_profit_pips": 10
   },
