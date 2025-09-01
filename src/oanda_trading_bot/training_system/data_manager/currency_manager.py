@@ -170,67 +170,53 @@ class CurrencyDependencyManager:
         )
 
 
-def get_required_conversion_pairs(symbols: List[str], account_currency: str, available_instruments: Set[str]) -> Set[str]:
+
+def ensure_currency_data_for_trading(trading_symbols: List[str], account_currency: str,
+                                    start_time_iso: str, end_time_iso: str, granularity: str) -> tuple:
     """
-    获取进行货币转换所需的额外货币对。
-    该函数确保任何交易品种的任何货币都可以通过直接、反向或以USD为枢纽的三角转换路径，
-    最终换算成账户本位币。
-    """
-    required_pairs = set()
-    account_currency = account_currency.upper()
+    确保交易所需的所有货币数据已下载，包括通过InstrumentInfoManager智能识别出的汇率转换对。
     
-    # 收集所有涉及的独特货币
-    currencies = set()
-    for symbol in symbols:
-        parts = symbol.split("_")
-        if len(parts) == 2:
-            currencies.add(parts[0])
-            currencies.add(parts[1])
+    所有额外貨幣對將按照訓練symbols的標準下載完整的價量信息，並存儲到數據庫中。
+    
+    返回:
+        (success: bool, all_symbols: set)
+    """
+    from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
+    
+    logger.info(f"确保货币数据可用: 初始交易品种={trading_symbols}, 账户货币={account_currency}")
 
-    # 对于每种货币，确保存在到账户货币的转换路径
-    for currency in currencies:
-        if currency == account_currency:
-            continue
+    # 使用 InstrumentInfoManager 的新方法来获取完整的品种列表
+    instrument_info_manager = InstrumentInfoManager()
+    all_symbols_list = instrument_info_manager.get_required_symbols_for_trading(
+        trading_symbols=trading_symbols,
+        account_currency=account_currency
+    )
+    all_symbols_set = set(all_symbols_list)
+    
+    required_pairs = all_symbols_set - set(trading_symbols)
+    if required_pairs:
+        logger.info(f"由InstrumentInfoManager智能识别出 {len(required_pairs)} 个额外汇率转换货币对: {sorted(list(required_pairs))}")
+    else:
+        logger.info("所有交易品种的报价货币与账户货币一致，无需额外下载汇率转换对。")
 
-        # 路径 1 & 2: 直接或反向转换
-        direct_pair = f"{currency}_{account_currency}"
-        inverse_pair = f"{account_currency}_{currency}"
+    # 调用数据下载器
+    try:
+        from oanda_trading_bot.training_system.data_manager.oanda_downloader import manage_data_download_for_symbols
+        manage_data_download_for_symbols(
+            symbols=all_symbols_list,
+            overall_start_str=start_time_iso,
+            overall_end_str=end_time_iso,
+            granularity=granularity
+        )
+        logger.info(f"已确保所有 {len(all_symbols_list)} 个货币对数据下载完成。")
+        return True, all_symbols_set
+    except ImportError as e:
+        logger.error(f"无法导入数据下载器: {e}")
+        return False, set(trading_symbols)
+    except Exception as e:
+        logger.error(f"下载货币数据时出错: {e}", exc_info=True)
+        return False, set(trading_symbols)
 
-        if direct_pair in available_instruments:
-            required_pairs.add(direct_pair)
-            continue # 找到路径，无需进一步寻找
-        if inverse_pair in available_instruments:
-            required_pairs.add(inverse_pair)
-            continue # 找到路径，无需进一步寻找
-
-        # 路径 3: 三角转换 (通过 USD)
-        # 如果货币本身不是USD，且账户货币也不是USD
-        if currency != "USD" and account_currency != "USD":
-            # 检查 Ccy -> USD 的路径
-            path1_direct = f"{currency}_USD"
-            path1_inverse = f"USD_{currency}"
-            
-            # 检查 USD -> AccountCurrency 的路径
-            path2_direct = f"USD_{account_currency}"
-            path2_inverse = f"{account_currency}_USD"
-
-            # 确保两条路都通
-            if (path1_direct in available_instruments or path1_inverse in available_instruments) and \
-               (path2_direct in available_instruments or path2_inverse in available_instruments):
-                
-                # 将所有涉及的有效货币对加入列表
-                if path1_direct in available_instruments:
-                    required_pairs.add(path1_direct)
-                if path1_inverse in available_instruments:
-                    required_pairs.add(path1_inverse)
-                if path2_direct in available_instruments:
-                    required_pairs.add(path2_direct)
-                if path2_inverse in available_instruments:
-                    required_pairs.add(path2_inverse)
-            else:
-                logger.warning(f"無法為貨幣 {currency} 找到到帳戶貨幣 {account_currency} 的轉換路徑，即使通過USD也無法。")
-
-    return required_pairs - set(symbols)
 
 def ensure_currency_data_for_trading(trading_symbols: List[str], account_currency: str,
                                     start_time_iso: str, end_time_iso: str, granularity: str) -> tuple:

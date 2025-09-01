@@ -176,6 +176,52 @@ class InstrumentInfoManager:
         for sym in symbols: result[sym.upper()] = self.get_details(sym.upper())
         return result
 
+    def get_required_symbols_for_trading(self, trading_symbols: List[str], account_currency: str) -> List[str]:
+        """
+        根據給定的交易品種列表和帳戶貨幣，計算出所有需要的品種列表（包括用於匯率轉換的品種）。
+
+        :param trading_symbols: 用戶打算交易的品種列表。
+        :param account_currency: 帳戶的基準貨幣 (例如 'AUD')。
+        :return: 一個包含原始品種和所有必需的匯率轉換品種的列表。
+        """
+        required_symbols = set(trading_symbols)
+        account_currency = account_currency.upper()
+        
+        all_available_symbols = self.get_all_available_symbols()
+        if not all_available_symbols:
+            logger.error("無法獲取任何可用的交易品種，無法確定匯率轉換對。")
+            return list(required_symbols)
+
+        all_available_symbols_set = set(all_available_symbols)
+
+        for symbol in trading_symbols:
+            details = self.get_details(symbol)
+            if not details:
+                logger.warning(f"無法獲取 {symbol} 的詳細信息，跳過匯率轉換檢查。")
+                continue
+
+            quote_currency = details.quote_currency.upper()
+
+            if quote_currency != account_currency:
+                # 需要進行匯率轉換
+                # 構建可能的轉換對名稱，例如 AUD_USD 或 USD_AUD
+                conversion_pair_1 = f"{account_currency}_{quote_currency}"
+                conversion_pair_2 = f"{quote_currency}_{account_currency}"
+
+                if conversion_pair_1 in all_available_symbols_set:
+                    required_symbols.add(conversion_pair_1)
+                    logger.info(f"交易 {symbol} (報價貨幣: {quote_currency}) 需要匯率轉換。已自動添加 {conversion_pair_1} 到數據列表。")
+                elif conversion_pair_2 in all_available_symbols_set:
+                    required_symbols.add(conversion_pair_2)
+                    logger.info(f"交易 {symbol} (報價貨幣: {quote_currency}) 需要匯率轉換。已自動添加 {conversion_pair_2} 到數據列表。")
+                else:
+                    logger.error(f"關鍵錯誤：無法為 {symbol} (報價貨幣: {quote_currency}) 找到對 {account_currency} 的匯率轉換對。"
+                                 f"已嘗試查找 {conversion_pair_1} 和 {conversion_pair_2}，但均未在OANDA可用品種中找到。")
+        
+        final_list = sorted(list(required_symbols))
+        logger.info(f"最終需要的品種列表 (共 {len(final_list)} 個): {final_list}")
+        return final_list
+
 if __name__ == "__main__":
     logger.info("正在直接運行 InstrumentInfoManager.py 進行測試...")
     if not OANDA_API_KEY or not OANDA_ACCOUNT_ID: # OANDA_API_KEY, OANDA_ACCOUNT_ID 從頂部導入
