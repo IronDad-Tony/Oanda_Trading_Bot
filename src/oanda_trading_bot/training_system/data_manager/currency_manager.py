@@ -171,35 +171,129 @@ class CurrencyDependencyManager:
 
 
 
-def ensure_currency_data_for_trading(trading_symbols: List[str], account_currency: str,
-                                    start_time_iso: str, end_time_iso: str, granularity: str) -> tuple:
+def get_required_conversion_pairs(trading_symbols: List[str],
+                                  available_instruments: Set[str]) -> Set[str]:
     """
-    确保交易所需的所有货币数据已下载，包括通过InstrumentInfoManager智能识别出的汇率转换对。
-    
-    所有额外貨幣對將按照訓練symbols的標準下載完整的價量信息，並存儲到數據庫中。
-    
+    獲取將交易符號轉換為帳戶貨幣所需的額外貨幣對集合
+
+    此函數分析所有交易符號的報價貨幣，並確定將這些貨幣轉換為帳戶貨幣
+    所需的匯率轉換對。轉換可能涉及直接貨幣對或通過USD的三角轉換。
+    帳戶貨幣從配置中動態獲取。
+
+    參數:
+        trading_symbols: List[str] - 交易符號列表，例如 ['EUR_USD', 'GBP_JPY']
+        available_instruments: Set[str] - 可用的貨幣對集合
+
+    返回:
+        Set[str] - 所需的轉換貨幣對集合，只包含 available_instruments 中存在的對
+
+    邏輯說明:
+    1. 從配置中獲取帳戶貨幣設置
+    2. 對於每個交易符號，提取其報價貨幣
+    3. 如果報價貨幣與帳戶貨幣不同，需要轉換
+    4. 優先考慮直接貨幣對（報價貨幣 -> 帳戶貨幣）
+    5. 如果沒有直接對，考慮通過USD的三角轉換
+    6. 只返回實際可用的貨幣對
+    """
+    # 從配置中動態獲取帳戶貨幣
+    try:
+        from oanda_trading_bot.training_system.common.config import ACCOUNT_CURRENCY
+        account_currency = ACCOUNT_CURRENCY.upper()
+    except ImportError:
+        # 如果無法導入配置，使用默認值 AUD
+        account_currency = "AUD"
+
+    required_pairs = set()
+
+    logger.debug(f"分析交易符號 {trading_symbols} 所需的轉換對，帳戶貨幣: {account_currency}")
+
+    for symbol in trading_symbols:
+        # 正規化符號格式
+        symbol = CurrencyDependencyManager.normalize_symbol_format(symbol)
+
+        # 提取報價貨幣（第二個貨幣）
+        if '_' in symbol:
+            base_curr, quote_curr = symbol.split('_')
+            quote_curr = quote_curr.upper()
+
+            # 如果報價貨幣就是帳戶貨幣，無需轉換
+            if quote_curr == account_currency:
+                continue
+
+            # 優先：直接貨幣對 (quote -> account)
+            direct_pair = f"{quote_curr}_{account_currency}"
+            if direct_pair in available_instruments:
+                required_pairs.add(direct_pair)
+                logger.debug(f"添加直接轉換對: {direct_pair} (用於 {symbol})")
+                continue
+
+            # 備選：反向直接對 (account -> quote)
+            reverse_pair = f"{account_currency}_{quote_curr}"
+            if reverse_pair in available_instruments:
+                required_pairs.add(reverse_pair)
+                logger.debug(f"添加反向直接轉換對: {reverse_pair} (用於 {symbol})")
+                continue
+
+            # 三角轉換：通過USD
+            if quote_curr != "USD" and account_currency != "USD":
+                # quote -> USD
+                quote_to_usd = f"{quote_curr}_USD"
+                if quote_to_usd in available_instruments:
+                    required_pairs.add(quote_to_usd)
+                    logger.debug(f"添加三角轉換對: {quote_to_usd} (用於 {symbol})")
+
+                # USD -> account
+                usd_to_account = f"USD_{account_currency}"
+                if usd_to_account in available_instruments:
+                    required_pairs.add(usd_to_account)
+                    logger.debug(f"添加三角轉換對: {usd_to_account} (用於 {symbol})")
+
+                # 或者反向：account -> USD
+                account_to_usd = f"{account_currency}_USD"
+                if account_to_usd in available_instruments:
+                    required_pairs.add(account_to_usd)
+                    logger.debug(f"添加三角轉換對: {account_to_usd} (用於 {symbol})")
+
+    # 過濾只保留實際可用的貨幣對
+    final_pairs = required_pairs & available_instruments
+
+    if final_pairs:
+        logger.info(f"確定所需的貨幣轉換對: {sorted(list(final_pairs))}")
+    else:
+        logger.debug("無需額外的貨幣轉換對")
+
+    return final_pairs
+
+
+def ensure_currency_data_for_trading(trading_symbols: List[str], account_currency: str,
+                                     start_time_iso: str, end_time_iso: str, granularity: str) -> tuple:
+    """
+    確保交易所需的所有貨幣數據已下載，包括通過InstrumentInfoManager智能識別出的匯率轉換對。
+
+    所有額外貨幣對將按照訓練symbols的標準下載完整的價量信息，並存儲到數據庫中。
+
     返回:
         (success: bool, all_symbols: set)
     """
     from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
-    
-    logger.info(f"确保货币数据可用: 初始交易品种={trading_symbols}, 账户货币={account_currency}")
 
-    # 使用 InstrumentInfoManager 的新方法来获取完整的品种列表
+    logger.info(f"確保貨幣數據可用: 初始交易品種={trading_symbols}, 帳戶貨幣={account_currency}")
+
+    # 使用 InstrumentInfoManager 的新方法來獲取完整的品種列表
     instrument_info_manager = InstrumentInfoManager()
     all_symbols_list = instrument_info_manager.get_required_symbols_for_trading(
         trading_symbols=trading_symbols,
         account_currency=account_currency
     )
     all_symbols_set = set(all_symbols_list)
-    
+
     required_pairs = all_symbols_set - set(trading_symbols)
     if required_pairs:
-        logger.info(f"由InstrumentInfoManager智能识别出 {len(required_pairs)} 个额外汇率转换货币对: {sorted(list(required_pairs))}")
+        logger.info(f"由InstrumentInfoManager智能識別出 {len(required_pairs)} 個額外匯率轉換貨幣對: {sorted(list(required_pairs))}")
     else:
-        logger.info("所有交易品种的报价货币与账户货币一致，无需额外下载汇率转换对。")
+        logger.info("所有交易品種的報價貨幣與帳戶貨幣一致，無需額外下載匯率轉換對。")
 
-    # 调用数据下载器
+    # 調用數據下載器
     try:
         from oanda_trading_bot.training_system.data_manager.oanda_downloader import manage_data_download_for_symbols
         manage_data_download_for_symbols(
@@ -208,13 +302,13 @@ def ensure_currency_data_for_trading(trading_symbols: List[str], account_currenc
             overall_end_str=end_time_iso,
             granularity=granularity
         )
-        logger.info(f"已确保所有 {len(all_symbols_list)} 个货币对数据下载完成。")
+        logger.info(f"已確保所有 {len(all_symbols_list)} 個貨幣對數據下載完成。")
         return True, all_symbols_set
     except ImportError as e:
-        logger.error(f"无法导入数据下载器: {e}")
+        logger.error(f"無法導入數據下載器: {e}")
         return False, set(trading_symbols)
     except Exception as e:
-        logger.error(f"下载货币数据时出错: {e}", exc_info=True)
+        logger.error(f"下載貨幣數據時出錯: {e}", exc_info=True)
         return False, set(trading_symbols)
 
 
@@ -236,7 +330,7 @@ def ensure_currency_data_for_trading(trading_symbols: List[str], account_currenc
     available_instruments = set(instrument_info_manager.get_all_available_symbols())
     
     # 获取所有需要的货币对
-    required_pairs = get_required_conversion_pairs(trading_symbols, account_currency, available_instruments)
+    required_pairs = get_required_conversion_pairs(trading_symbols, available_instruments)
     all_symbols = set(trading_symbols) | required_pairs
     
     # 记录详细信息

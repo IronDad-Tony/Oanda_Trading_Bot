@@ -32,7 +32,7 @@ def ensure_currency_data_for_trading(
         available_instruments = set(instrument_info_manager.get_all_available_symbols())
 
         required_pairs = get_required_conversion_pairs(
-            trading_symbols, account_currency, available_instruments
+            trading_symbols, available_instruments
         )
         all_symbols = set(trading_symbols) | required_pairs
 

@@ -1606,7 +1606,7 @@ def download_data_with_progress(symbols, start_date, end_date, granularity="S5")
 
     iim = InstrumentInfoManager(force_refresh=False)
     available = set(iim.get_all_available_symbols())
-    required_fx = sorted(list(get_required_conversion_pairs(symbols, ACCOUNT_CURRENCY, available)))
+    required_fx = sorted(list(get_required_conversion_pairs(symbols, available)))
 
     start_iso = start_date.isoformat() + "T00:00:00Z"
     end_iso = end_date.isoformat() + "T23:59:59Z"
