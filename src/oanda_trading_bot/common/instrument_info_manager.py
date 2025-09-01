@@ -159,7 +159,13 @@ class InstrumentInfoManager:
             logger.info("Instrument details cache expired or empty, attempting to refresh.")
             self._fetch_all_instruments_details() # 調用實例方法
         details = InstrumentInfoManager._instrument_cache.get(symbol.upper())
-        if details is None: logger.warning(f"未能找到交易品種 '{symbol}' 的詳細信息。")
+        if details is None:
+            logger.warning(f"未能找到交易品種 '{symbol}' 的詳細信息。")
+            logger.debug(f"當前緩存中的symbol列表: {list(InstrumentInfoManager._instrument_cache.keys())}")
+            # 檢查是否是常見的錯誤：傳入了不完整的symbol名稱
+            if '_' not in symbol and symbol.upper() in ['UK100', 'SPX', 'NAS', 'US30', 'DE30', 'JP225']:
+                logger.warning(f"檢測到可能的指數symbol錯誤: '{symbol}' 沒有下劃線，這可能導致貨幣轉換問題。")
+                logger.warning(f"建議檢查代碼中是否正確使用了完整的symbol名稱，如 'UK100_GBP' 而不是 'UK100'")
         return details
     def get_all_available_symbols(self) -> List[str]:
         if self._is_cache_expired() and OANDA_API_KEY and OANDA_ACCOUNT_ID: self._fetch_all_instruments_details()
@@ -195,18 +201,22 @@ class InstrumentInfoManager:
         all_available_symbols_set = set(all_available_symbols)
 
         for symbol in trading_symbols:
+            logger.debug(f"處理交易symbol: {symbol}")
             details = self.get_details(symbol)
             if not details:
                 logger.warning(f"無法獲取 {symbol} 的詳細信息，跳過匯率轉換檢查。")
                 continue
 
             quote_currency = details.quote_currency.upper()
+            logger.debug(f"Symbol {symbol} 的報價貨幣: {quote_currency}")
 
             if quote_currency != account_currency:
                 # 需要進行匯率轉換
                 # 構建可能的轉換對名稱，例如 AUD_USD 或 USD_AUD
                 conversion_pair_1 = f"{account_currency}_{quote_currency}"
                 conversion_pair_2 = f"{quote_currency}_{account_currency}"
+
+                logger.debug(f"為 {symbol} 查找轉換對: {conversion_pair_1} 或 {conversion_pair_2}")
 
                 if conversion_pair_1 in all_available_symbols_set:
                     required_symbols.add(conversion_pair_1)
@@ -217,6 +227,7 @@ class InstrumentInfoManager:
                 else:
                     logger.error(f"關鍵錯誤：無法為 {symbol} (報價貨幣: {quote_currency}) 找到對 {account_currency} 的匯率轉換對。"
                                  f"已嘗試查找 {conversion_pair_1} 和 {conversion_pair_2}，但均未在OANDA可用品種中找到。")
+                    logger.debug(f"可用的symbol列表: {sorted(all_available_symbols_set)}")
         
         final_list = sorted(list(required_symbols))
         logger.info(f"最終需要的品種列表 (共 {len(final_list)} 個): {final_list}")

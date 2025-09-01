@@ -116,18 +116,56 @@ class CurrencyDependencyManager:
         logger.debug(f"无法找到 {base_curr}_{quote_curr} 的转换路径")
         return None
 
-    def convert_to_account_currency(self, from_currency: str, 
-                                   current_prices_map: Dict[str, Tuple[Decimal, Decimal]], 
-                                   is_credit: bool = True) -> Decimal:
+    def convert_to_account_currency(self, from_currency: str,
+                                    current_prices_map: Dict[str, Tuple[Decimal, Decimal]],
+                                    is_credit: bool = True) -> Decimal:
         """
         将任意货币转换为账户货币（符合Oanda规则）。
         is_credit: True为获利转换，False为亏损转换。
         """
         from_currency = self.normalize_symbol_format(from_currency)
-        
+
+        # 添加調試日誌來追蹤貨幣轉換請求
+        logger.debug(f"嘗試轉換貨幣: {from_currency} -> {self.account_currency}, is_credit={is_credit}")
+        logger.debug(f"當前價格映射中的鍵: {list(current_prices_map.keys())}")
+
         if from_currency == self.account_currency:
+            logger.debug(f"貨幣相同，直接返回1.0: {from_currency} == {self.account_currency}")
             return Decimal('1.0')
-        
+
+        # 檢查from_currency是否是已知的貨幣代碼
+        known_currencies = set()
+        for pair in current_prices_map.keys():
+            if '_' in pair:
+                base, quote = pair.split('_')
+                known_currencies.add(base)
+                known_currencies.add(quote)
+
+        # 增強的錯誤檢測：檢查是否傳入了指數代碼而不是貨幣代碼
+        if from_currency not in known_currencies:
+            logger.warning(f"警告: {from_currency} 不是已知的貨幣代碼。已知貨幣: {sorted(known_currencies)}")
+
+            # 檢查是否是常見的指數代碼錯誤
+            index_codes = ['UK100', 'US30', 'NAS100', 'SPX500', 'DE30', 'JP225', 'AU200', 'FRA40', 'EU50', 'CN50']
+            if from_currency in index_codes:
+                logger.error(f"檢測到指數代碼錯誤: 傳入了指數 '{from_currency}' 而不是其報價貨幣")
+                logger.error(f"對於指數 {from_currency}，應該傳入其報價貨幣（如 GBP for UK100_GBP）")
+                logger.error(f"請檢查調用代碼，確保傳入的是貨幣代碼而不是指數代碼")
+
+                # 嘗試從價格映射中找到對應的指數對並提取報價貨幣
+                possible_index_pairs = [pair for pair in current_prices_map.keys() if from_currency in pair]
+                if possible_index_pairs:
+                    logger.info(f"找到相關的指數對: {possible_index_pairs}")
+                    for pair in possible_index_pairs:
+                        if '_' in pair:
+                            base, quote = pair.split('_')
+                            if base == from_currency and quote in known_currencies:
+                                logger.info(f"建議: 使用報價貨幣 '{quote}' 而不是指數 '{from_currency}'")
+                                # 自動修復：使用報價貨幣進行轉換
+                                logger.info(f"自動修復: 將使用 '{quote}' 代替 '{from_currency}' 進行轉換")
+                                from_currency = quote
+                                break
+
         # is_for_conversion=True 会自动处理Oanda的markup
         rate = self.get_specific_rate(
             from_currency,
@@ -135,12 +173,13 @@ class CurrencyDependencyManager:
             current_prices_map,
             is_for_conversion=True
         )
-        
+
         if rate and rate > 0:
             # 在 get_specific_rate 中已经根据 is_for_conversion 应用了正确的 markup 逻辑
             # 此处无需再调用 apply_conversion_fee
+            logger.debug(f"成功獲取轉換率: {from_currency} -> {self.account_currency} = {rate}")
             return rate
-        
+
         available_pairs = ", ".join(current_prices_map.keys())
         logger.warning(f"无法转换 {from_currency} 到 {self.account_currency}，可用货币对: [{available_pairs}]，使用安全值1.0")
         return Decimal('1.0')
