@@ -5,7 +5,7 @@
 包括保證金率、最小交易單位、點值信息、報價貨幣等。
 """
 import requests
-from typing import Dict, Optional, List, Union # <--- 添加 Union
+from typing import Dict, Optional, List, Union, Any # <--- 添加 Union 和 Any
 from decimal import Decimal, ROUND_HALF_UP # <--- 添加 ROUND_HALF_UP
 import time
 from functools import lru_cache
@@ -185,6 +185,7 @@ class InstrumentInfoManager:
     def get_required_symbols_for_trading(self, trading_symbols: List[str], account_currency: str) -> List[str]:
         """
         根據給定的交易品種列表和帳戶貨幣，計算出所有需要的品種列表（包括用於匯率轉換的品種）。
+        使用優化的API查詢，只查詢需要的特定符號，而不需列出所有可用符號。
 
         :param trading_symbols: 用戶打算交易的品種列表。
         :param account_currency: 帳戶的基準貨幣 (例如 'AUD')。
@@ -192,13 +193,39 @@ class InstrumentInfoManager:
         """
         required_symbols = set(trading_symbols)
         account_currency = account_currency.upper()
-        
-        all_available_symbols = self.get_all_available_symbols()
-        if not all_available_symbols:
-            logger.error("無法獲取任何可用的交易品種，無法確定匯率轉換對。")
-            return list(required_symbols)
 
-        all_available_symbols_set = set(all_available_symbols)
+        logger.info(f"開始分析 {len(trading_symbols)} 個交易符號的轉換需求，帳戶貨幣: {account_currency}")
+
+        # 新增：先驗證OANDA API連線
+        if not self.api_key or not self.account_id:
+            logger.warning("OANDA API憑證未配置，回退到以前的邏輯")
+            return self._get_required_symbols_fallback(trading_symbols, account_currency)
+
+        # 優化1: 直接查詢所需的符號詳細信息，而不是列出所有可用符號
+        conversion_canditates = self._get_conversion_candidates(trading_symbols, account_currency)
+
+        # 優化2: 批量查詢轉換候選對的可用性
+        available_conversion_pairs = self._filter_available_symbols(conversion_canditates)
+
+        # 優化3: 添加證實的轉換對到所需列表
+        for pair_info in available_conversion_pairs:
+            required_symbols.add(pair_info['symbol'])
+            reasons = ", ".join([f"{symbol}({info['currency']})" for symbol, info in pair_info['source_symbols'].items()])
+            logger.info(f"自動添加轉換對 {pair_info['symbol']} 用於: {reasons}")
+
+        final_list = sorted(list(required_symbols))
+        logger.info(f"最終需要的品種列表 (共 {len(final_list)} 個): {final_list}")
+        return final_list
+
+    def _get_conversion_candidates(self, trading_symbols: List[str], account_currency: str) -> List[Dict[str, Any]]:
+        """
+        計算所有可能的轉換候選對，不依賴列出所有可用符號
+
+        返回:
+            List of dicts: [{'symbol': 'AUD_USD', 'source_symbols': {'EUR_USD': {'currency': 'USD'}}}, ...]
+        """
+        conversion_candidates = []
+        account_currency = account_currency.upper()
 
         for symbol in trading_symbols:
             logger.debug(f"處理交易symbol: {symbol}")
@@ -210,28 +237,148 @@ class InstrumentInfoManager:
             quote_currency = details.quote_currency.upper()
             logger.debug(f"Symbol {symbol} 的報價貨幣: {quote_currency}")
 
+            if quote_currency == account_currency:
+                logger.debug(f"{symbol} 的報價貨幣({quote_currency})與帳戶貨幣相同，無需轉換")
+                continue
+
+            # 構造可能的轉換途徑
+            conversion_options = self._build_conversion_options(quote_currency, account_currency, symbol)
+
+            for option in conversion_options:
+                # 檢查是否已存在相同候選對
+                existing = next((c for c in conversion_candidates if c['symbol'] == option['symbol']), None)
+                if existing:
+                    existing['source_symbols'][symbol] = {'currency': quote_currency}
+                else:
+                    option_data = {
+                        'symbol': option['symbol'],
+                        'source_symbols': {symbol: {'currency': quote_currency}},
+                        'conversion_type': option.get('conversion_type', 'direct')
+                    }
+                    conversion_candidates.append(option_data)
+                    logger.debug(f"添加轉換候選: {option['symbol']} for {symbol} ({option.get('conversion_type', 'direct')})")
+
+        return conversion_candidates
+
+    def _build_conversion_options(self, quote_currency: str, account_currency: str, symbol: str) -> List[Dict[str, Any]]:
+        """
+        為給定的貨幣組合構造所有可能的轉換選項
+        """
+        options = []
+
+        # 選項1: 直接轉換 (quote -> account)
+        direct_pair = f"{quote_currency}_{account_currency}"
+        options.append({
+            'symbol': direct_pair,
+            'conversion_type': 'direct',
+            'path': f"{quote_currency} -> {account_currency}"
+        })
+
+        # 選項2: 反向直接轉換 (account -> quote)
+        reverse_pair = f"{account_currency}_{quote_currency}"
+        options.append({
+            'symbol': reverse_pair,
+            'conversion_type': 'reverse_direct',
+            'path': f"{account_currency} -> {quote_currency}"
+        })
+
+        # 選項3: 三角轉換通過USD (如果任一貨幣不是USD)
+        if quote_currency != "USD" and account_currency != "USD":
+            # 選項3a: quote -> USD
+            quote_to_usd = f"{quote_currency}_USD"
+            options.append({
+                'symbol': quote_to_usd,
+                'conversion_type': 'triangular_quote_to_usd',
+                'path': f"{quote_currency} -> USD"
+            })
+
+            # 選項3b: account -> USD
+            account_to_usd = f"{account_currency}_USD"
+            options.append({
+                'symbol': account_to_usd,
+                'conversion_type': 'triangular_account_to_usd',
+                'path': f"{account_currency} -> USD"
+            })
+
+            # 選項3c: USD -> quote
+            usd_to_quote = f"USD_{quote_currency}"
+            options.append({
+                'symbol': usd_to_quote,
+                'conversion_type': 'triangular_usd_to_quote',
+                'path': f"USD -> {quote_currency}"
+            })
+
+            # 選項3d: USD -> account
+            usd_to_account = f"USD_{account_currency}"
+            options.append({
+                'symbol': usd_to_account,
+                'conversion_type': 'triangular_usd_to_account',
+                'path': f"USD -> {account_currency}"
+            })
+
+        logger.debug(f"為 {symbol} ({quote_currency}->{account_currency}) 創建了 {len(options)} 個轉換選項")
+        return options
+
+    def _filter_available_symbols(self, conversion_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        批量查詢轉換候選對在OANDA的可用性
+
+        通過單個API調用查詢所有候選符號，而不是單個查詢
+        """
+        if not conversion_candidates:
+            return []
+
+        candidate_symbols = [c['symbol'] for c in conversion_candidates]
+        logger.info(f"查詢 {len(candidate_symbols)} 個轉換候選符號的可用性")
+
+        # 批量API查詢
+        details_map = self.get_details_for_multiple_symbols(candidate_symbols)
+
+        available = []
+        for candidate in conversion_candidates:
+            symbol = candidate['symbol']
+            if symbol in details_map and details_map[symbol] is not None:
+                candidate['details'] = details_map[symbol]
+                available.append(candidate)
+                logger.debug(f"✓ {symbol} 可用於轉換")
+            else:
+                logger.debug(f"✗ {symbol} 在OANDA不可用")
+
+        logger.info(f"{len(available)}/{len(conversion_candidates)} 個轉換候選符號可用")
+        return available
+
+    def _get_required_symbols_fallback(self, trading_symbols: List[str], account_currency: str) -> List[str]:
+        """
+        當OANDA API不可用時的回退邏輯
+        """
+        logger.warning("使用回退邏輯確定所需符號")
+        required_symbols = set(trading_symbols)
+
+        all_available_symbols = self.get_all_available_symbols()
+        if not all_available_symbols:
+            logger.error("無法獲取任何可用的交易品種，且API不可用")
+            return list(required_symbols)
+
+        all_available_symbols_set = set(all_available_symbols)
+
+        for symbol in trading_symbols:
+            details = self.get_details(symbol)
+            if not details:
+                continue
+
+            quote_currency = details.quote_currency.upper()
             if quote_currency != account_currency:
-                # 需要進行匯率轉換
-                # 構建可能的轉換對名稱，例如 AUD_USD 或 USD_AUD
                 conversion_pair_1 = f"{account_currency}_{quote_currency}"
                 conversion_pair_2 = f"{quote_currency}_{account_currency}"
 
-                logger.debug(f"為 {symbol} 查找轉換對: {conversion_pair_1} 或 {conversion_pair_2}")
-
                 if conversion_pair_1 in all_available_symbols_set:
                     required_symbols.add(conversion_pair_1)
-                    logger.info(f"交易 {symbol} (報價貨幣: {quote_currency}) 需要匯率轉換。已自動添加 {conversion_pair_1} 到數據列表。")
+                    logger.info(f"[回退] 添加轉換對 {conversion_pair_1} 用於 {symbol}")
                 elif conversion_pair_2 in all_available_symbols_set:
                     required_symbols.add(conversion_pair_2)
-                    logger.info(f"交易 {symbol} (報價貨幣: {quote_currency}) 需要匯率轉換。已自動添加 {conversion_pair_2} 到數據列表。")
-                else:
-                    logger.error(f"關鍵錯誤：無法為 {symbol} (報價貨幣: {quote_currency}) 找到對 {account_currency} 的匯率轉換對。"
-                                 f"已嘗試查找 {conversion_pair_1} 和 {conversion_pair_2}，但均未在OANDA可用品種中找到。")
-                    logger.debug(f"可用的symbol列表: {sorted(all_available_symbols_set)}")
-        
-        final_list = sorted(list(required_symbols))
-        logger.info(f"最終需要的品種列表 (共 {len(final_list)} 個): {final_list}")
-        return final_list
+                    logger.info(f"[回退] 添加轉換對 {conversion_pair_2} 用於 {symbol}")
+
+        return sorted(list(required_symbols))
 
 if __name__ == "__main__":
     logger.info("正在直接運行 InstrumentInfoManager.py 進行測試...")
