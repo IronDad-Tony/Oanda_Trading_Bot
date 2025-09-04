@@ -389,11 +389,11 @@ with st.sidebar:
     with c1:
         if st.button("開始交易", type="primary", disabled=running):
             start_trading(comps, warmup_timeout=180)
-            st.experimental_rerun()
+            st.rerun()
     with c2:
         if st.button("停止交易", disabled=not running):
             stop_trading(comps)
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("<div class='risk-box danger'>", unsafe_allow_html=True)
     if st.button("緊急停止 (平倉+停止)", disabled=running is False):

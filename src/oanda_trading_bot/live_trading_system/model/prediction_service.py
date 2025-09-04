@@ -247,9 +247,18 @@ class PredictionService:
                                 ffd[i, :, :] = window_fd[-t_steps:]
                                 fixed_obs['features_from_dataset'] = ffd
 
-                            # padding_mask default zeros (no mask)
+                            # padding_mask: 1=active, 0=dummy in env; SB3 extractor uses boolean for key padding mask.
+                            # For inference here we provide vector for all symbols; 1 means active, so no dummy.
                             if 'padding_mask' in obs_space.spaces:
-                                fixed_obs['padding_mask'] = np.zeros((symbols_dim,), dtype=np.int32)
+                                fixed_obs['padding_mask'] = np.ones((symbols_dim,), dtype=np.int32)
+
+                            # pending_mask: 1=in-flight order, 0=free. At inference time, default to all free.
+                            if 'pending_mask' in obs_space.spaces:
+                                fixed_obs['pending_mask'] = np.zeros((symbols_dim,), dtype=np.int32)
+
+                            # action_mask: 1=action allowed. Default to all allowed.
+                            if 'action_mask' in obs_space.spaces:
+                                fixed_obs['action_mask'] = np.ones((symbols_dim,), dtype=np.int32)
 
                             # symbol_id 0..S-1
                             if 'symbol_id' in obs_space.spaces:
