@@ -18,6 +18,7 @@ from .trading.order_manager import OrderManager
 from .trading.position_manager import PositionManager
 from .trading.risk_manager import RiskManager
 from .database.database_manager import DatabaseManager
+from .core.transaction_stream import TransactionStreamWorker
 from dotenv import load_dotenv
 
 def load_config() -> Optional[Dict[str, Any]]:
@@ -106,12 +107,29 @@ def initialize_system(
         # --- Trading Components ---
         position_manager = PositionManager()
         risk_manager = RiskManager(config, system_state, position_manager)
-        order_manager = OrderManager(client, system_state, position_manager, risk_manager, db_manager)
+        order_manager = OrderManager(client, system_state, position_manager, risk_manager, db_manager, config)
         
         # --- Main Logic Engine ---
         trading_logic = TradingLogic(
             config, client, system_state, preprocessor, prediction_service, order_manager
         )
+
+        # Start transactions stream if enabled
+        exec_cfg = config.get('execution', {}) if isinstance(config, dict) else {}
+        use_stream = bool(exec_cfg.get('use_transactions_stream', False))
+        tx_stream = None
+        if use_stream:
+            try:
+                tx_stream = TransactionStreamWorker(
+                    api_client=client.client,
+                    account_id=oanda_account_id,
+                    last_transaction_id_getter=lambda: client.last_transaction_id,
+                    on_transaction=order_manager.on_transaction_event,
+                )
+                tx_stream.start()
+                logging.info("Transactions stream started.")
+            except Exception as e:
+                logging.error(f"Failed to start transactions stream: {e}", exc_info=True)
 
         logging.info("All system components initialized successfully.")
 
@@ -127,6 +145,7 @@ def initialize_system(
             "risk_manager": risk_manager,
             "order_manager": order_manager,
             "trading_logic": trading_logic,
+            "transactions_stream": tx_stream,
         }
     except Exception as e:
         logging.critical(f"A critical error occurred during system initialization: {e}", exc_info=True)
@@ -142,7 +161,7 @@ def trading_loop(components: Dict[str, Any]):
     logger = logging.getLogger("LiveTradingSystem")
 
     logger.info("Trading loop started.")
-    while system_state.is_running():
+    while getattr(system_state, 'is_running', False):
         try:
             trading_logic.execute_trade_cycle()
             # The sleep duration can be configured

@@ -25,5 +25,13 @@
   },
   "model": {
     "path": "weights/sac_model_symbols5.zip"
+  },
+  "execution": {
+    "per_symbol_sequencing": true,
+    "order_fill_timeout_seconds": 3,
+    "min_interval_between_orders_ms": 250,
+    "use_price_bound": true,
+    "max_slippage_pips": 1.0,
+    "use_transactions_stream": true
   }
 }

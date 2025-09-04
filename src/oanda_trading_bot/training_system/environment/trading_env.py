@@ -108,6 +108,37 @@ except ImportError as e_initial_import_v5:
 
 TIMESTEPS = _config_values_env_v5.get("TIMESTEPS", 128); MAX_SYMBOLS_ALLOWED = _config_values_env_v5.get("MAX_SYMBOLS_ALLOWED", 20); ACCOUNT_CURRENCY = _config_values_env_v5.get("ACCOUNT_CURRENCY", "AUD"); DEFAULT_INITIAL_CAPITAL = _config_values_env_v5.get("DEFAULT_INITIAL_CAPITAL", 100000.0); OANDA_MARGIN_CLOSEOUT_LEVEL = _config_values_env_v5.get("OANDA_MARGIN_CLOSEOUT_LEVEL", Decimal('0.50')); TRADE_COMMISSION_PERCENTAGE = _config_values_env_v5.get("TRADE_COMMISSION_PERCENTAGE", Decimal('0.0001')); OANDA_API_KEY = _config_values_env_v5.get("OANDA_API_KEY", None); ATR_PERIOD = _config_values_env_v5.get("ATR_PERIOD", 14); STOP_LOSS_ATR_MULTIPLIER = _config_values_env_v5.get("STOP_LOSS_ATR_MULTIPLIER", Decimal('2.0')); MAX_ACCOUNT_RISK_PERCENTAGE = _config_values_env_v5.get("MAX_ACCOUNT_RISK_PERCENTAGE", Decimal('0.01')); MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY = _config_values_env_v5.get("MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY", Decimal('0.10'))
 
+# --- Execution simulation defaults; optionally overridden by JSON config ---
+_SIM_EXEC_ENABLED = True
+_SIM_EXEC_DELAY_MEAN_STEPS = 1
+_SIM_EXEC_DELAY_JITTER_STEPS = 1
+_SIM_MAX_SLIPPAGE_PIPS = 0.5
+_SIM_SLIPPAGE_SIGMA_PIPS = 0.25
+_SIM_REJECT_ON_BOUND = True
+
+try:
+    from oanda_trading_bot.training_system.common.config import BASE_DIR as _BASE_DIR
+except Exception:
+    _BASE_DIR = Path(__file__).resolve().parents[5]
+
+try:
+    import json
+    _exec_cfg_path = Path(_BASE_DIR) / 'configs' / 'training' / 'execution_sim_config.json'
+    if _exec_cfg_path.exists():
+        with open(_exec_cfg_path, 'r', encoding='utf-8') as _f:
+            _c = json.load(_f)
+            _SIM_EXEC_ENABLED = bool(_c.get('simulate_order_latency', _SIM_EXEC_ENABLED))
+            _SIM_EXEC_DELAY_MEAN_STEPS = int(_c.get('execution_delay_mean_steps', _SIM_EXEC_DELAY_MEAN_STEPS))
+            _SIM_EXEC_DELAY_JITTER_STEPS = int(_c.get('execution_delay_jitter_steps', _SIM_EXEC_DELAY_JITTER_STEPS))
+            _SIM_MAX_SLIPPAGE_PIPS = float(_c.get('max_slippage_pips', _SIM_MAX_SLIPPAGE_PIPS))
+            _SIM_SLIPPAGE_SIGMA_PIPS = float(_c.get('slippage_sigma_pips', _SIM_SLIPPAGE_SIGMA_PIPS))
+            _SIM_REJECT_ON_BOUND = bool(_c.get('reject_if_slippage_exceeds_bound', _SIM_REJECT_ON_BOUND))
+except Exception as _e_sim:
+    try:
+        logger.debug(f"Execution sim config load failed or not found: {_e_sim}")
+    except Exception:
+        pass
+
 
 class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
     metadata = {'render_modes': ['human', 'array'], 'render_fps': 10}
@@ -233,6 +264,23 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         self.progressive_reward_calculator = None
         self.use_enhanced_rewards = False
         self.use_progressive_rewards = False
+
+        # --- Execution simulation controls (latency and slippage) ---
+        try:
+            self.simulate_order_latency = bool(_SIM_EXEC_ENABLED)  # type: ignore
+            self.exec_delay_mean_steps = int(_SIM_EXEC_DELAY_MEAN_STEPS)  # type: ignore
+            self.exec_delay_jitter_steps = int(_SIM_EXEC_DELAY_JITTER_STEPS)  # type: ignore
+            self.max_slippage_pips = float(_SIM_MAX_SLIPPAGE_PIPS)  # type: ignore
+            self.slippage_sigma_pips = float(_SIM_SLIPPAGE_SIGMA_PIPS)  # type: ignore
+            self.reject_if_slippage_exceeds_bound = bool(_SIM_REJECT_ON_BOUND)  # type: ignore
+        except Exception:
+            self.simulate_order_latency = True
+            self.exec_delay_mean_steps = 1
+            self.exec_delay_jitter_steps = 1
+            self.max_slippage_pips = 0.5
+            self.slippage_sigma_pips = 0.25
+            self.reject_if_slippage_exceeds_bound = True
+        self.pending_orders_by_slot: Dict[int, Dict[str, Any]] = {}
         
         # Check reward type preference from config
         reward_type = reward_config.get('reward_type', 'progressive') if reward_config else 'progressive'
@@ -330,7 +378,11 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
                 dtype=np.int32
             ),
             # Padding mask to indicate active (1) vs dummy (0) slots
-            "padding_mask": spaces.MultiBinary(self.num_env_slots)
+            "padding_mask": spaces.MultiBinary(self.num_env_slots),
+            # Pending mask to indicate in-flight orders (1 = pending, 0 = free)
+            "pending_mask": spaces.MultiBinary(self.num_env_slots),
+            # Action mask to indicate whether a new action is allowed (1 = allowed)
+            "action_mask": spaces.MultiBinary(self.num_env_slots)
         }
         self.observation_space = spaces.Dict(obs_spaces)
 
@@ -384,6 +436,55 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             self.max_drawdown_episode = max(self.max_drawdown_episode, drawdown)
         
         self.portfolio_value_history.append(float(self.portfolio_value_ac))
+
+    # --- Execution simulation helpers ---
+    def _pip_size(self, symbol: str) -> Decimal:
+        try:
+            details = self.instrument_details_map.get(symbol)
+            if details and hasattr(details, 'pip_location'):
+                return Decimal(str(10 ** details.pip_location))
+        except Exception:
+            pass
+        return Decimal('0.0001')
+
+    def _sample_delay_steps(self) -> int:
+        low = max(0, int(getattr(self, 'exec_delay_mean_steps', 1) - getattr(self, 'exec_delay_jitter_steps', 1)))
+        high = int(getattr(self, 'exec_delay_mean_steps', 1) + getattr(self, 'exec_delay_jitter_steps', 1))
+        if high < low: high = low
+        return int(self.np_random.integers(low, high + 1))  # type: ignore
+
+    def _process_pending_orders(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], current_timestamp: pd.Timestamp):
+        if not getattr(self, 'simulate_order_latency', True) or not self.pending_orders_by_slot:
+            return
+        to_remove: list[int] = []
+        for slot_idx, order in list(self.pending_orders_by_slot.items()):
+            if self.episode_step_count < order.get('scheduled_step', 0):
+                continue
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if not symbol:
+                to_remove.append(slot_idx)
+                continue
+            current_bid_qc, current_ask_qc = all_prices_map.get(symbol, (Decimal('0'), Decimal('0')))
+            if current_bid_qc <= 0 or current_ask_qc <= 0:
+                # No valid price, postpone 1 step
+                order['scheduled_step'] = self.episode_step_count + 1
+                continue
+            side_units: Decimal = Decimal(str(order['units']))
+            base_price = current_ask_qc if side_units > 0 else current_bid_qc
+            pip = self._pip_size(symbol)
+            sigma = Decimal(str(getattr(self, 'slippage_sigma_pips', 0.25))) * pip
+            magnitude = abs(Decimal(str(float(self.np_random.normal(0.0, float(sigma))))))  # type: ignore
+            max_slip = Decimal(str(getattr(self, 'max_slippage_pips', 0.5))) * pip
+            slip = min(magnitude, max_slip)
+            fill_price = base_price + slip if side_units > 0 else base_price - slip
+            # Simulated priceBound reject
+            if getattr(self, 'reject_if_slippage_exceeds_bound', True) and magnitude > max_slip:
+                to_remove.append(slot_idx)
+                continue
+            self._execute_trade(slot_idx, side_units, fill_price, current_timestamp, all_prices_map)
+            to_remove.append(slot_idx)
+        for idx in to_remove:
+            self.pending_orders_by_slot.pop(idx, None)
 
     def _update_atr_values(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]):
         """
@@ -682,9 +783,20 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             units_to_trade = target_units - current_units
             
             if abs(units_to_trade) > Decimal('1e-9'):
-                trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
-                _, commission = self._execute_trade(slot_idx, units_to_trade, trade_price_qc, current_timestamp, all_prices_map)
-                total_commission += commission
+                if getattr(self, 'simulate_order_latency', True):
+                    # If pending already, drop this action (agent learns it cannot spam)
+                    if slot_idx in self.pending_orders_by_slot:
+                        continue
+                    delay = self._sample_delay_steps()
+                    self.pending_orders_by_slot[slot_idx] = {
+                        'units': units_to_trade,
+                        'scheduled_step': self.episode_step_count + delay,
+                        'created_step': self.episode_step_count,
+                    }
+                else:
+                    trade_price_qc = current_ask_qc if units_to_trade > 0 else current_bid_qc
+                    _, commission = self._execute_trade(slot_idx, units_to_trade, trade_price_qc, current_timestamp, all_prices_map)
+                    total_commission += commission
 
         return total_commission
 
@@ -880,6 +992,11 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         
         # 1. Get current market data for this step
         all_prices_map, current_timestamp = self._get_current_raw_prices_for_all_dataset_symbols()
+        # Process any pending fills scheduled for this step
+        try:
+            self._process_pending_orders(all_prices_map, current_timestamp)
+        except Exception as _e_proc:
+            logger.debug(f"Pending order processing skipped: {_e_proc}")
         
         # 2. Store state before any actions are taken
         portfolio_value_before_action = self.portfolio_value_ac
@@ -1148,6 +1265,14 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             "context_features": context_features,
             "symbol_id": symbol_ids,
             "padding_mask": padding_mask,
+            "pending_mask": np.array([
+                1 if slot_idx in getattr(self, 'pending_orders_by_slot', {}) else 0
+                for slot_idx in range(self.num_env_slots)
+            ], dtype=np.int8),
+            "action_mask": np.array([
+                0 if slot_idx in getattr(self, 'pending_orders_by_slot', {}) else 1
+                for slot_idx in range(self.num_env_slots)
+            ], dtype=np.int8),
         }
         
         return observation

@@ -197,6 +197,30 @@ class RiskManager:
         else:
             return None
 
+        # Cap by max_total_exposure_usd
+        try:
+            notional_qc = abs(trade_size_units) * price
+            notional_ac = notional_qc * rate_qc_to_ac
+            if self.max_total_exposure_usd and notional_ac > float(self.max_total_exposure_usd):
+                scale = float(self.max_total_exposure_usd) / max(1e-9, notional_ac)
+                scaled_units = abs(trade_size_units) * scale
+                # Round using broker rules
+                units_decimal = details.round_units(scaled_units)
+                trade_size_units = int(units_decimal) if trade_size_units >= 0 else -int(units_decimal)
+                self.logger.info(f"Capped trade size by exposure: new units {trade_size_units} for {instrument}.")
+        except Exception:
+            pass
+
+        # Safety: ensure non-zero units for minimal live execution if sizing rounded to 0
+        if trade_size_units == 0:
+            try:
+                min_units = int(getattr(details, 'minimum_trade_size', 1))
+            except Exception:
+                min_units = 1
+            min_units = max(1, min_units)
+            trade_size_units = min_units if signal == 1 else -min_units
+            self.logger.info(f"Risk sizing rounded to zero; using minimum trade size {trade_size_units} for {instrument}.")
+
         # 4. Final check (placeholder for more complex checks like total exposure)
         # In a real system, you would check if this new trade exceeds max_total_exposure_usd.
 

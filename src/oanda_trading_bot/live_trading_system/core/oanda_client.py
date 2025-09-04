@@ -224,6 +224,46 @@ class OandaClient:
             logger.error(f"Error fetching bid/ask candles for {instrument}: {e}")
             return None
 
+    def create_order_v2(
+        self,
+        instrument: str,
+        units: int,
+        stop_loss_on_fill: Optional[Dict] = None,
+        take_profit_on_fill: Optional[Dict] = None,
+        price_bound: Optional[float] = None,
+        client_extensions: Optional[Dict[str, Any]] = None,
+        time_in_force: str = "FOK",
+    ) -> Optional[Dict[str, Any]]:
+        """Create a MARKET order with optional SL/TP, priceBound, and clientExtensions.
+
+        This method preserves the original `create_order` for backwards compatibility
+        and adds support for price protection and id tagging.
+        """
+        order_data: Dict[str, Any] = {
+            "order": {
+                "instrument": instrument,
+                "units": str(units),
+                "type": "MARKET",
+                "timeInForce": time_in_force,
+                "positionFill": "DEFAULT",
+            }
+        }
+        if stop_loss_on_fill:
+            order_data["order"]["stopLossOnFill"] = stop_loss_on_fill
+        if take_profit_on_fill:
+            order_data["order"]["takeProfitOnFill"] = take_profit_on_fill
+        if price_bound is not None:
+            order_data["order"]["priceBound"] = str(price_bound)
+        if client_extensions:
+            order_data["order"]["clientExtensions"] = client_extensions
+
+        endpoint = orders.OrderCreate(self.account_id, data=order_data)
+        try:
+            return self._request(endpoint)
+        except V20Error as e:
+            logger.error(f"Failed to create order for {instrument}: {e}")
+            return None
+
 # --- 範例 ---
 if __name__ == '__main__':
     logger.info("正在測試 OandaClient...")
