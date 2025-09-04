@@ -124,6 +124,34 @@ class OrderManager:
                     self.logger.warning(f"Trade for {instrument} was not approved by RiskManager.")
                     return
 
+            # 1.5 If opposite position exists, close it first before proceeding
+            try:
+                existing = self.position_manager.get_position(instrument)
+                if existing:
+                    if (signal == 1 and existing.position_type == 'short') or (signal == -1 and existing.position_type == 'long'):
+                        self.logger.info(f"Opposite position detected on {instrument} (existing={existing.position_type}). Closing before new order.")
+                        resp = None
+                        if existing.position_type == 'long':
+                            resp = self.client.close_position(instrument, long_units="ALL")
+                        else:
+                            resp = self.client.close_position(instrument, short_units="ALL")
+                        if resp:
+                            fill_tx = resp.get('longOrderFillTransaction') or resp.get('shortOrderFillTransaction')
+                            if fill_tx and fill_tx.get('tradesClosed'):
+                                for closed_trade in fill_tx.get('tradesClosed', []):
+                                    try:
+                                        trade_id_c = closed_trade.get("tradeID")
+                                        price_c = float(closed_trade.get("price", 0))
+                                        pnl_c = float(closed_trade.get("realizedPL", 0))
+                                        self.db_manager.update_trade_on_close(trade_id_c, price_c, pnl_c)
+                                    except Exception:
+                                        pass
+                                self.position_manager.close_position(instrument)
+                        else:
+                            self.logger.warning(f"Close position API returned no response for {instrument}.")
+            except Exception as e:
+                self.logger.error(f"Failed to close opposite position for {instrument}: {e}")
+
             # 2. If trade is approved, create the order
             self.logger.info(f"Trade approved. Preparing to place order for {instrument}.")
             
@@ -143,26 +171,30 @@ class OrderManager:
                 "tag": "live_exec",
             }
 
-            # Prefer v2 method if available; fallback to original create_order
-            request_ts_ms = int(time.time() * 1000)
-            if hasattr(self.client, 'create_order_v2'):
-                order_response = self.client.create_order_v2(
-                    instrument=instrument,
-                    units=trade_details["units"],
-                    stop_loss_on_fill=stop_loss_on_fill,
-                    take_profit_on_fill=take_profit_on_fill,
-                    price_bound=price_bound,
-                    client_extensions=client_extensions,
-                    time_in_force="FOK",
-                )
-            else:
-                order_response = self.client.create_order(
-                    instrument=instrument,
-                    units=trade_details["units"],
-                    stop_loss_on_fill=stop_loss_on_fill,
-                    take_profit_on_fill=take_profit_on_fill,
-                )
-            response_ts_ms = int(time.time() * 1000)
+            def _submit_order(units: int, price_bound_val: Optional[float]) -> Dict[str, Any] | None:
+                req_ms = int(time.time() * 1000)
+                if hasattr(self.client, 'create_order_v2'):
+                    resp_local = self.client.create_order_v2(
+                        instrument=instrument,
+                        units=units,
+                        stop_loss_on_fill=stop_loss_on_fill,
+                        take_profit_on_fill=take_profit_on_fill,
+                        price_bound=price_bound_val,
+                        client_extensions=client_extensions,
+                        time_in_force="FOK",
+                    )
+                else:
+                    resp_local = self.client.create_order(
+                        instrument=instrument,
+                        units=units,
+                        stop_loss_on_fill=stop_loss_on_fill,
+                        take_profit_on_fill=take_profit_on_fill,
+                    )
+                return resp_local, req_ms, int(time.time() * 1000)
+
+            # First attempt
+            order_response, request_ts_ms, response_ts_ms = _submit_order(trade_details["units"], price_bound)
+            attempted_retry = False
 
             # 3. If order is filled, update the Position Manager and log to DB
             if order_response and "orderFillTransaction" in order_response:
@@ -223,9 +255,9 @@ class OrderManager:
                         pass
 
             elif order_response and "orderCancelTransaction" in order_response:
-                 reason = order_response['orderCancelTransaction'].get('reason')
-                 self.logger.warning(f"Order for {instrument} was cancelled. Reason: {reason}")
-                 if self.metrics:
+                reason = order_response['orderCancelTransaction'].get('reason')
+                self.logger.warning(f"Order for {instrument} was cancelled. Reason: {reason}")
+                if self.metrics:
                     try:
                         self.metrics.log({
                             'instrument': instrument,
@@ -243,6 +275,26 @@ class OrderManager:
                         })
                     except Exception:
                         pass
+                # Optional single retry on common transient reasons with refreshed price
+                try:
+                    if (not attempted_retry) and str(reason).upper() in ("PRICE_BOUND", "PRICE_BOUND_EXCEEDED", "INSUFFICIENT_LIQUIDITY"):
+                        self.logger.info(f"Retrying order once for {instrument} after cancel reason={reason}.")
+                        latest = self.client.get_bid_ask_candles_combined(instrument, count=1) or []
+                        if latest:
+                            last = latest[-1]
+                            new_ref = float(last.get('ask_close') or last.get('bid_close') or 0.0)
+                        else:
+                            new_ref = ref_price
+                        new_bound = self._build_price_bound(instrument, int(trade_details["units"]), new_ref)
+                        order_response2, request_ts_ms2, response_ts_ms2 = _submit_order(trade_details["units"], new_bound)
+                        attempted_retry = True
+                        # Promote retry response to main flow handling
+                        order_response = order_response2 or order_response
+                        request_ts_ms = request_ts_ms2 or request_ts_ms
+                        response_ts_ms = response_ts_ms2 or response_ts_ms
+                        # fall through to handling below with updated response
+                except Exception as e:
+                    self.logger.error(f"Retry submission failed for {instrument}: {e}")
             else:
                 self.logger.error(f"Order execution failed or no fill details received for {instrument}. Response: {order_response}")
                 if self.metrics:

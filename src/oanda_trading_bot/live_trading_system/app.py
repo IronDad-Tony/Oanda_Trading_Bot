@@ -13,7 +13,7 @@ import threading
 from datetime import datetime
 
 # --- Import System Components ---
-from .main import initialize_system, trading_loop
+from oanda_trading_bot.live_trading_system.main import initialize_system, trading_loop
 # from .core.system_state import SystemState # SystemState is accessed through components dict
 
 # --- Placeholder Data and Functions ---

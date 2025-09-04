@@ -5,7 +5,7 @@
   "max_position_size_per_trade": 1000,
   "max_total_risk_pct": 2.0,
   "daily_loss_limit_pct": 5.0,
-  "account_currency": "USD",
+  "account_currency": "AUD",
   "trading_loop_interval_seconds": 5,
   "risk_management": {
     "max_total_exposure_usd": 200,

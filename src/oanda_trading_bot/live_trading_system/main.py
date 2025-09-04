@@ -74,7 +74,11 @@ def initialize_system(
             account_id=oanda_account_id,
             environment=oanda_environment
         )
-        
+        # Force 'live' if environment variable says so (batch can override). Be explicit and transparent in logs.
+        if oanda_environment not in ("live", "practice"):
+            logging.warning(f"Unknown OANDA_ENVIRONMENT '{oanda_environment}', defaulting to 'practice'.")
+            oanda_environment = "practice"
+
         system_state = SystemState()
         
         # Construct absolute path for the database
@@ -83,6 +87,18 @@ def initialize_system(
         db_manager = mock_db_manager if mock_db_manager else DatabaseManager(db_path=db_full_path)
 
         instrument_monitor = InstrumentMonitor(client, system_state, config)
+
+        # Align account currency with broker account to size risk in native ccy
+        try:
+            acct = client.get_account_summary() or {}
+            acc_ccy = (((acct or {}).get('account') or {}).get('currency') or '').upper()
+            if acc_ccy:
+                config['account_currency'] = acc_ccy
+                logging.info(f"Account currency detected from OANDA: {acc_ccy}")
+            else:
+                logging.warning("Could not detect account currency from OANDA summary; using config value.")
+        except Exception as e:
+            logging.error(f"Failed to detect account currency: {e}")
 
         # --- Data and Model Components ---
         scalers_path = config.get('preprocessor', {}).get('scalers_path', 'data/training/scalers.json')

@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, :root {
+  height: 100%;
+}
+
+/* Simple utility classes */
+.card {
+  @apply rounded-lg border border-gray-200 bg-white shadow-sm dark:bg-gray-900 dark:border-gray-800;
+}
+.card-header { @apply px-4 py-2 border-b border-gray-100 dark:border-gray-800 font-medium; }
+.card-body { @apply p-4; }
+
