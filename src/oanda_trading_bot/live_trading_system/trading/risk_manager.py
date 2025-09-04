@@ -83,22 +83,92 @@ class RiskManager:
             pass
 
     def _build_price_map(self, instrument: str, oanda_client) -> Dict[str, tuple]:
+        """
+        Build a minimal price map needed for risk sizing and PnL in account currency.
+
+        Avoids spamming OANDA with invalid instruments by checking broker symbol list and
+        inverting known pairs when only the reverse exists. Treats same-currency pairs (e.g., AUD_AUD)
+        as 1:1.
+        """
         sym = instrument
         parts = sym.split('_')
         base, quote = parts[0], parts[1]
         mp: Dict[str, tuple] = {}
+
+        # Helper access to known symbols
+        try:
+            valid_symbols = set(getattr(self.iim, 'all_symbols', []) or self.iim.get_all_available_symbols())
+        except Exception:
+            valid_symbols = set()
+
+        def _fetch_pair(pair_name: str) -> Optional[tuple]:
+            try:
+                rr = oanda_client.get_bid_ask_candles_combined(pair_name, count=1) or []
+                if rr:
+                    last = rr[-1]
+                    return (
+                        Decimal(str(last.get('bid_close', 0.0))),
+                        Decimal(str(last.get('ask_close', 0.0))),
+                    )
+            except Exception:
+                pass
+            return None
+
+        def _invert(bid_ask: tuple) -> tuple:
+            # Inversion with bid/ask flip: (bid, ask) -> (1/ask, 1/bid)
+            bid, ask = bid_ask
+            try:
+                inv_bid = Decimal('1') / (ask if ask != 0 else Decimal('1'))
+                inv_ask = Decimal('1') / (bid if bid != 0 else Decimal('1'))
+            except Exception:
+                inv_bid, inv_ask = Decimal('0'), Decimal('0')
+            return (inv_bid, inv_ask)
+
+        # 1) Always include the trading instrument's latest bid/ask
         recs = oanda_client.get_bid_ask_candles_combined(sym, count=1) or []
         if recs:
             r = recs[-1]
             mp[sym] = (Decimal(str(r.get('bid_close', 0.0))), Decimal(str(r.get('ask_close', 0.0))))
-        # add conversion pairs for quote/account and base/account as needed
-        for a, b in [(quote, self.account_currency), (self.account_currency, quote), (base, self.account_currency), (self.account_currency, base)]:
+
+        # 2) Candidate conversion pairs
+        candidates = [
+            (quote, self.account_currency),
+            (self.account_currency, quote),
+            (base, self.account_currency),
+            (self.account_currency, base),
+        ]
+
+        for a, b in candidates:
             pair = f"{a}_{b}"
-            if pair not in mp:
-                rr = oanda_client.get_bid_ask_candles_combined(pair, count=1) or []
-                if rr:
-                    last = rr[-1]
-                    mp[pair] = (Decimal(str(last.get('bid_close', 0.0))), Decimal(str(last.get('ask_close', 0.0))))
+            if pair in mp:
+                continue
+
+            # Same-currency pair -> 1:1
+            if a == b:
+                mp[pair] = (Decimal('1'), Decimal('1'))
+                continue
+
+            # If direct pair exists with broker, fetch it
+            if pair in valid_symbols:
+                got = _fetch_pair(pair)
+                if got:
+                    mp[pair] = got
+                continue
+
+            # If only reversed exists, fetch and invert
+            rev = f"{b}_{a}"
+            if rev in valid_symbols:
+                got = _fetch_pair(rev)
+                if got:
+                    mp[pair] = _invert(got)
+                continue
+
+            # If broker symbol list unavailable, attempt a cautious fetch on direct pair only
+            if not valid_symbols:
+                got = _fetch_pair(pair)
+                if got:
+                    mp[pair] = got
+
         return mp
 
     def assess_trade(self, instrument: str, signal: int, price: float) -> Optional[Dict[str, Any]]:
