@@ -1,259 +1,272 @@
-# live_trading_system/ui/app.py
 """
-Streamlit UI for the Live Trading System.
+Streamlit UI for Live Trading System (reworked).
 
-Provides a professional dashboard to monitor and control the trading bot.
+This UI manages configuration (symbols, model, risk), controls
+start/stop with cold start, and shows account/positions/trades.
 """
+import os
+import threading
+from typing import Dict, Any, List, Optional
+
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import time
-import threading
-from datetime import datetime
 
-# --- Import System Components ---
 from oanda_trading_bot.live_trading_system.main import initialize_system, trading_loop
-# from .core.system_state import SystemState # SystemState is accessed through components dict
 
-# --- Placeholder Data and Functions ---
-# These will be replaced by actual system calls.
-def get_system_status():
-    if st.session_state.components:
-        return st.session_state.components["system_state"].get_status()
-    return ('STOPPED', 'red')
 
-def get_api_connection_status():
-    if st.session_state.components:
-        # A simple check. A more robust implementation could involve a heartbeat.
-        return st.session_state.components["client"] is not None
-    return False
+# -------------- Helpers --------------
+def _scan_models(project_root: str, lookback_default: int) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for d in ["trained_models", "weights"]:
+        p = os.path.join(project_root, d)
+        if not os.path.isdir(p):
+            continue
+        for fn in os.listdir(p):
+            if not fn.lower().endswith((".zip", ".pt", ".pth")):
+                continue
+            full = os.path.join(p, fn)
+            max_symbols = 9999
+            try:
+                import re
+                m = re.search(r"symbols(\d+)", fn, re.IGNORECASE)
+                if m:
+                    max_symbols = int(m.group(1))
+            except Exception:
+                pass
+            items.append({
+                "name": fn,
+                "path": full,
+                "max_symbols": max_symbols,
+                "lookback_window": lookback_default,
+                "type": "SAC" if "sac" in fn.lower() else "Torch",
+            })
+    return sorted(items, key=lambda x: (x.get("max_symbols", 0), x.get("name", "")))
 
-def get_key_metrics():
-    if st.session_state.components and get_system_status()[0] == 'RUNNING':
-        summary = st.session_state.components["client"].get_account_summary()
-        if summary and 'account' in summary:
-            account_info = summary['account']
-            return {
-                'equity': float(account_info.get('equity', 0)),
-                'pnl': float(account_info.get('pl', 0)),
-                'margin_used': float(account_info.get('marginUsed', 0)),
-                'open_positions': int(account_info.get('openPositionCount', 0))
-            }
-    # Return last known or default if not running
-    return st.session_state.get('metrics', {
-        'equity': 100000.00, 'pnl': 0.00, 'margin_used': 0.00, 'open_positions': 0
-    })
 
-def get_active_symbols():
-    if st.session_state.components:
-        pm = st.session_state.components["position_manager"]
-        return list(pm.get_all_positions().keys())
-    return []
+def _account_summary(components: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return components["client"].get_account_summary() or {}
+    except Exception:
+        return {}
 
-def get_candlestick_data(symbol):
-    if st.session_state.components:
-        client = st.session_state.components["client"]
-        candles = client.get_candles(symbol, count=100, granularity="S5")
-        if candles:
-            df = pd.DataFrame([{
-                'time': pd.to_datetime(c['time']),
-                'open': float(c['mid']['o']),
-                'high': float(c['mid']['h']),
-                'low': float(c['mid']['l']),
-                'close': float(c['mid']['c']),
-            } for c in candles])
-            return df
-    return pd.DataFrame()
 
-def get_trade_history():
-    if st.session_state.components:
-        db_manager = st.session_state.components["db_manager"]
-        history = db_manager.get_trade_history(limit=100)
-        if history:
-            return pd.DataFrame(history)
-    return pd.DataFrame()
+def _open_positions(components: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        data = components["client"].get_open_positions() or {}
+        out: List[Dict[str, Any]] = []
+        for pos in data.get("positions", []):
+            ins = pos.get("instrument")
+            long_units = int(pos.get("long", {}).get("units", "0"))
+            short_units = int(pos.get("short", {}).get("units", "0"))
+            if long_units:
+                out.append({
+                    "instrument": ins,
+                    "side": "BUY",
+                    "units": long_units,
+                    "avg_price": float(pos.get("long", {}).get("averagePrice", 0) or 0),
+                    "unrealized_pl": float(pos.get("long", {}).get("unrealizedPL", 0) or 0),
+                })
+            if short_units:
+                out.append({
+                    "instrument": ins,
+                    "side": "SELL",
+                    "units": short_units,
+                    "avg_price": float(pos.get("short", {}).get("averagePrice", 0) or 0),
+                    "unrealized_pl": float(pos.get("short", {}).get("unrealizedPL", 0) or 0),
+                })
+        return out
+    except Exception:
+        return []
 
-def get_position_cost_basis(symbol):
-    if st.session_state.components:
-        pm = st.session_state.components["position_manager"]
-        pos = pm.get_position(symbol)
-        return pos.entry_price if pos else None
+
+def _trade_history(components: Dict[str, Any], limit: int = 100) -> List[Dict[str, Any]]:
+    try:
+        return components["db_manager"].get_trade_history(limit=limit) or []
+    except Exception:
+        return []
+
+
+def _apply_config(components: Dict[str, Any], symbols: List[str], model_path: Optional[str], target_capital: Optional[float], risk_params: Dict[str, Any]) -> Optional[str]:
+    # Validate symbols against training set
+    cfg = components["config"] or {}
+    training = set(cfg.get("trading_instruments", []))
+    if not set(symbols).issubset(training):
+        return "選取的 symbols 不在訓練清單內"
+
+    # Validate target capital against equity
+    if target_capital is not None:
+        acc = _account_summary(components)
+        equity = float((((acc.get('account') or {}).get('NAV')) or ((acc.get('account') or {}).get('equity')) or 0))
+        if target_capital > equity:
+            return f"目標資金 {target_capital:.2f} 超過當前權益 {equity:.2f}"
+
+    # Apply
+    ss = components["system_state"]
+    pred = components["prediction_service"]
+    risk = components["risk_manager"]
+    tl = components["trading_logic"]
+
+    ss.set_selected_instruments(symbols)
+    if model_path:
+        pred.load_model(model_path, device=None)
+        ss.set_current_model(model_path)
+
+    update = dict(risk_params or {})
+    if target_capital is not None:
+        update["max_total_exposure_usd"] = float(target_capital)
+    risk.update_params(update)
+
+    # Prepare buffers for new selection
+    lookback = int(cfg.get("model_lookback_window", 128))
+    for sym in symbols:
+        if sym not in tl.data_buffers:
+            from collections import deque
+            tl.data_buffers[sym] = deque(maxlen=lookback)
     return None
 
-def start_system_thread():
-    # st.session_state.system_status = ('RUNNING', 'green') # Status is now handled by SystemState
-    if st.session_state.components:
-        st.session_state.trading_thread = threading.Thread(target=trading_loop, args=(st.session_state.components,), daemon=True)
-        st.session_state.trading_thread.start()
 
-def stop_system():
-    # st.session_state.system_status = ('STOPPED', 'red') # Status is now handled by SystemState
-    if st.session_state.components:
-        st.session_state.components['system_state'].stop()
-    if st.session_state.trading_thread:
-        st.session_state.trading_thread.join(timeout=10)
-
-
-# --- Page Configuration ---
-st.set_page_config(
-    page_title="Oanda 量化交易監控儀表板",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-# --- Initialize Session State ---
-if 'initialized' not in st.session_state:
-    st.session_state.initialized = True
-    st.session_state.system_status = ('STOPPED', 'red') # ('RUNNING', 'green'), ('ERROR', 'orange')
-    st.session_state.api_status = True # Placeholder
-    st.session_state.metrics = {
-        'equity': 100000.00,
-        'pnl': 0.00,
-        'margin_used': 0.00,
-        'open_positions': 0
-    }
-    st.session_state.positions = {
-        'EUR_USD': {'direction': 'LONG', 'units': 1000, 'entry_price': 1.0725, 'pnl': 12.50},
-        'USD_JPY': {'direction': 'SHORT', 'units': 2000, 'entry_price': 157.80, 'pnl': -35.00}
-    }
-    st.session_state.orders = pd.DataFrame({
-        'time': [datetime.now(), datetime.now() - pd.Timedelta(minutes=5)],
-        'symbol': ['EUR_USD', 'USD_JPY'],
-        'type': ['MARKET', 'MARKET'],
-        'side': ['BUY', 'SELL'],
-        'units': [1000, 2000],
-        'price': [1.0725, 157.80],
-        'status': ['FILLED', 'FILLED']
-    })
-    st.session_state.logs = ["[INFO] UI Initialized.", "[INFO] Awaiting system start command."]
-    st.session_state.chart_data = {}
-    st.session_state.trades = {
-        'EUR_USD': pd.DataFrame({
-            'time': [datetime.now() - pd.Timedelta(minutes=10)],
-            'action': ['BUY_OPEN'],
-            'price': [1.0725]
-        })
-    }
-    st.session_state.components = None # To store initialized system components
-    st.session_state.trading_thread = None
+def _start(components: Dict[str, Any], warmup_timeout: int = 120):
+    ss = components["system_state"]
+    tl = components["trading_logic"]
+    instruments = ss.get_selected_instruments()
+    tl.warmup_buffers(instruments, max_wait_seconds=warmup_timeout, sleep_seconds=1)
+    ss.start()
+    if "_thread" not in components or components.get("_thread") is None:
+        t = threading.Thread(target=trading_loop, args=(components,), daemon=True)
+        components["_thread"] = t
+        t.start()
 
 
-# --- UI Layout ---
+def _stop(components: Dict[str, Any]):
+    ss = components["system_state"]
+    ss.stop()
+    t = components.get("_thread")
+    if t and t.is_alive():
+        t.join(timeout=10)
+        components["_thread"] = None
 
-# --- Header ---
-header_cols = st.columns([3, 1, 1, 1])
-with header_cols[0]:
-    st.title("🤖 Oanda 量化交易監控儀表板")
 
-with header_cols[1]:
-    status, color = get_system_status()
-    st.markdown(f"<div style='text-align:center; padding: 5px; border-radius: 5px; color: white; background-color: {color};'>系統狀態: {status}</div>", unsafe_allow_html=True)
+# -------------- UI --------------
+st.set_page_config(page_title="Live Trading Dashboard", layout="wide")
 
-with header_cols[2]:
-    api_ok = get_api_connection_status()
-    api_color = "green" if api_ok else "red"
-    api_text = "正常" if api_ok else "斷線"
-    st.markdown(f"<div style='text-align:center; padding: 5px; border-radius: 5px; color: white; background-color: {api_color};'>API 連線: {api_text}</div>", unsafe_allow_html=True)
+if "components" not in st.session_state:
+    st.session_state.components = initialize_system()
+if "model_cache" not in st.session_state:
+    st.session_state.model_cache = None
 
-with header_cols[3]:
-    if get_system_status()[0] == 'STOPPED':
-        if st.button("🚀 啟動系統", use_container_width=True):
-            with st.spinner("正在初始化系統組件..."):
-                st.session_state.components = initialize_system()
-                if st.session_state.components:
-                    start_system_thread()
-                    st.success("系統啟動成功！")
-                    st.rerun()
-                else:
-                    st.error("系統初始化失敗，請檢查日誌。")
+comps = st.session_state.components
+if not comps:
+    st.error("系統初始化失敗，請檢查 .env 與 configs。")
+    st.stop()
 
-    else:
-        if st.button("🛑 停止系統", type="primary", use_container_width=True):
-            with st.spinner("正在停止系統..."):
-                stop_system()
-                st.warning("系統已停止。")
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+cfg = comps["config"] or {}
+lookback_default = int(cfg.get("model_lookback_window", 128))
+training_symbols: List[str] = cfg.get("trading_instruments", [])
 
+with st.sidebar:
+    st.header("系統設定")
+    running = getattr(comps["system_state"], 'is_running', False)
+    # Symbols
+    selected_symbols = st.multiselect("選擇交易 symbols", options=training_symbols, default=training_symbols[:min(3, len(training_symbols))])
+
+    # Models filtered by capacity
+    if st.session_state.model_cache is None:
+        st.session_state.model_cache = _scan_models(project_root, lookback_default)
+    models = [m for m in (st.session_state.model_cache or []) if m.get("max_symbols", 0) >= len(selected_symbols)]
+    model_display = [f"{m['name']} (max {m['max_symbols']})" for m in models]
+    model_choice = st.selectbox("選擇模型", options=["(不更換)"] + model_display, index=0)
+    model_path = None
+    if model_choice and model_choice != "(不更換)":
+        model_path = models[model_display.index(model_choice)]["path"]
+
+    # Target capital (account ccy)
+    acc = _account_summary(comps)
+    equity = float((((acc.get('account') or {}).get('NAV')) or ((acc.get('account') or {}).get('equity')) or 0))
+    st.caption(f"當前權益約: {equity:.2f}")
+    target_capital = st.number_input("目標資金 (帳戶幣別)", min_value=0.0, value=min(1000.0, equity) if equity>0 else 0.0, step=100.0, format="%.2f")
+
+    st.divider()
+    st.subheader("風險控制")
+    rm_cfg = (cfg.get("risk_management") or {}) if isinstance(cfg, dict) else {}
+    max_risk_per_trade = st.number_input("每筆風險%", min_value=0.0, max_value=100.0, value=float(rm_cfg.get('max_risk_per_trade_percent', 1.0)), step=0.1, format="%.2f")
+    use_atr = st.checkbox("使用 ATR 風險", value=bool(rm_cfg.get('use_atr_sizing', False)))
+    atr_period = st.number_input("ATR 期間", min_value=1, value=int(rm_cfg.get('atr_period', 14)))
+    sl_atr = st.number_input("SL ATR 倍數", min_value=0.0, value=float(rm_cfg.get('stop_loss_atr_multiplier', 2.0)), step=0.1)
+    tp_atr = st.number_input("TP ATR 倍數", min_value=0.0, value=float(rm_cfg.get('take_profit_atr_multiplier', 3.0)), step=0.1)
+    sl_pips = st.number_input("止損(pips)", min_value=0.0, value=float(rm_cfg.get('stop_loss_pips', 10)))
+    tp_pips = st.number_input("停利(pips)", min_value=0.0, value=float(rm_cfg.get('take_profit_pips', 10)))
+
+    if st.button("套用設定", disabled=running):
+        err = _apply_config(
+            comps,
+            selected_symbols,
+            model_path,
+            target_capital if target_capital > 0 else None,
+            {
+                "max_risk_per_trade_percent": max_risk_per_trade,
+                "use_atr_sizing": use_atr,
+                "atr_period": atr_period,
+                "stop_loss_atr_multiplier": sl_atr,
+                "take_profit_atr_multiplier": tp_atr,
+                "stop_loss_pips": sl_pips,
+                "take_profit_pips": tp_pips,
+            }
+        )
+        if err:
+            st.error(err)
+        else:
+            st.success("設定已套用。")
+
+    st.divider()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Start", type="primary", disabled=running):
+            _start(comps, warmup_timeout=120)
+            st.experimental_rerun()
+    with col_b:
+        if st.button("Stop", disabled=not running):
+            _stop(comps)
+            st.experimental_rerun()
+
+    if st.button("平倉所有持倉", disabled=running):
+        try:
+            comps["order_manager"].close_all_positions()
+            st.success("已送出全部平倉。")
+        except Exception as e:
+            st.error(f"平倉失敗: {e}")
+
+
+st.title("Live Trading Dashboard")
+status = "RUNNING" if getattr(comps["system_state"], 'is_running', False) else "STOPPED"
+st.caption(f"狀態: {status}")
+
+# Metrics
+acc = _account_summary(comps)
+acct = acc.get('account') or {}
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Equity", f"{float(acct.get('NAV') or acct.get('equity') or 0):.2f}")
+col2.metric("P/L", f"{float(acct.get('pl') or 0):.2f}")
+col3.metric("Margin Used", f"{float(acct.get('marginUsed') or 0):.2f}")
+col4.metric("Open Positions", f"{int(acct.get('openPositionCount') or 0)}")
 
 st.divider()
 
-# --- Key Metrics ---
-metrics = get_key_metrics()
-st.session_state.metrics = metrics # Cache the latest metrics
-metric_cols = st.columns(4)
-metric_cols[0].metric("帳戶淨值 (Equity)", f"${metrics['equity']:.2f}")
-metric_cols[1].metric("當日盈虧 (P/L)", f"${metrics['pnl']:.2f}", delta=f"{metrics['pnl']:.2f}")
-metric_cols[2].metric("已用保證金 (Margin)", f"${metrics['margin_used']:.2f}")
-metric_cols[3].metric("持倉數量 (Positions)", metrics['open_positions'])
-
-st.divider()
-
-# --- Trading Activity Chart ---
-st.subheader("交易活動圖表")
-active_symbols = get_active_symbols()
-if not active_symbols:
-    st.info("目前沒有任何持倉或活躍的交易對。")
+# Positions
+st.subheader("Open Positions")
+pos = _open_positions(comps)
+if pos:
+    st.dataframe(pd.DataFrame(pos), use_container_width=True)
 else:
-    selected_symbol = st.selectbox("選擇要查看的交易對", options=active_symbols)
-
-    if selected_symbol:
-        chart_placeholder = st.empty()
-        df = get_candlestick_data(selected_symbol)
-
-        if not df.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name=selected_symbol))
-
-            cost_basis = get_position_cost_basis(selected_symbol)
-            if cost_basis:
-                fig.add_hline(y=cost_basis, line_width=2, line_dash="dash", line_color="blue", annotation_text=f"成本價: {cost_basis}", annotation_position="bottom right")
-
-            fig.update_layout(title=f"{selected_symbol} - 5秒 K線圖", xaxis_title="時間", yaxis_title="價格", xaxis_rangeslider_visible=False, height=500)
-            chart_placeholder.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning(f"無法獲取 {selected_symbol} 的 K線圖數據。")
-
+    st.info("目前沒有持倉。")
 
 st.divider()
 
-# --- Positions and Logs ---
-tab_pos, tab_ord, tab_log = st.tabs(["當前持倉", "今日訂單", "系統日誌"])
+# Trades
+st.subheader("Trade History (Recent)")
+tr = _trade_history(comps, limit=200)
+if tr:
+    st.dataframe(pd.DataFrame(tr), use_container_width=True)
+else:
+    st.info("尚無交易紀錄。")
 
-with tab_pos:
-    st.subheader("當前持倉")
-    if st.session_state.components:
-        pm = st.session_state.components["position_manager"]
-        all_pos = pm.get_all_positions()
-        if all_pos:
-            pos_data = [{
-                'direction': p.position_type.upper(),
-                'units': p.units,
-                'entry_price': p.entry_price
-            } for inst, p in all_pos.items()]
-            pos_df = pd.DataFrame(pos_data, index=all_pos.keys())
-            st.dataframe(pos_df, use_container_width=True)
-        else:
-            st.info("目前沒有任何持倉。")
-    else:
-        st.info("系統未啟動，無法獲取持倉資訊。")
-
-with tab_ord:
-    st.subheader("最近 100 筆歷史訂單")
-    trade_history_df = get_trade_history()
-    if not trade_history_df.empty:
-        st.dataframe(trade_history_df, use_container_width=True)
-    else:
-        st.info("沒有可用的交易歷史記錄。")
-
-with tab_log:
-    st.subheader("系統日誌")
-    log_container = st.container(height=300)
-    for log in st.session_state.logs:
-        log_container.text(log)
-
-
-# --- Auto-refresh loop ---
-# This is a simple way to create a refresh loop in Streamlit
-time.sleep(5)
-st.rerun()
