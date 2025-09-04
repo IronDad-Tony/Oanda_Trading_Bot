@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo      OANDA Live Trading System (LIVE)
+echo      OANDA Live Trading System
 echo ========================================
 echo.
-echo Starts the live trading system and opens the UI in your browser.
+echo Starts the live trading system UI in your browser.
 echo - UI: http://localhost:8501
 echo.
 echo Press Ctrl+C in the terminal to stop the service.
@@ -21,8 +21,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Force OANDA environment to LIVE for this session (do not edit .env)
-set OANDA_ENVIRONMENT=live
+REM Use OANDA_ENVIRONMENT from .env (no forced override here)
 
 REM Ensure Python can import the 'src' layout package
 set "PYTHONPATH=%CD%\src;%PYTHONPATH%"
@@ -30,16 +29,13 @@ set "PYTHONPATH=%CD%\src;%PYTHONPATH%"
 echo Starting the system...
 echo.
 
-REM Launch the main script which in turn starts the Streamlit UI
-echo Launching Live Trading System...
-echo Main application file: src\oanda_trading_bot\live_trading_system\main.py
+REM Launch the new Streamlit UI directly
+echo Launching Live Trading UI...
+echo UI application file: src\oanda_trading_bot\live_ui\app.py
 echo.
 
-REM Open browser to the UI (non-blocking)
-start "" "http://localhost:8501"
-
-REM Run package entry (blocking in this window)
-python -m oanda_trading_bot.live_trading_system.main
+REM Run Streamlit (blocking in this window) on a fixed port
+python -m streamlit run src\oanda_trading_bot\live_ui\app.py --server.port 8501
 
 echo.
 echo System has been stopped.

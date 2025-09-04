@@ -189,29 +189,9 @@ def trading_loop(components: Dict[str, Any]):
     logger.info("Trading loop has been stopped.")
 
 
-def main():
-    """
-    The main entry point for the application.
-    It launches the Streamlit UI as a separate process.
-    """
-    setup_logger() 
-    
-    ui_app_path = os.path.join(os.path.dirname(__file__), 'app.py')
-    logging.info(f"Launching Streamlit UI from: {ui_app_path}")
-
-    import subprocess
-    
-    command = [sys.executable, "-m", "streamlit", "run", ui_app_path]
-    
-    try:
-        logging.info(f"Executing: {' '.join(command)}")
-        subprocess.run(command, check=True)
-    except FileNotFoundError:
-        logging.critical("Could not find `streamlit`. Please ensure it is installed and in your PATH.")
-    except subprocess.CalledProcessError as e:
-        logging.critical(f"Streamlit application failed to launch or exited with an error: {e}")
-    except Exception as e:
-        logging.critical(f"An unexpected error occurred while trying to launch Streamlit: {e}")
-
-if __name__ == "__main__":
-    main()
+"""
+NOTE:
+Legacy CLI that launched the old Streamlit UI has been removed.
+Keep using `initialize_system()` and `trading_loop()` from this module
+and launch the new UI via the updated start_live_trading_ui.bat.
+"""
