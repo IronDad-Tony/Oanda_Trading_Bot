@@ -56,6 +56,32 @@ class RiskManager:
         self.cur_mgr = CurrencyDependencyManager(self.account_currency, apply_oanda_markup=True)
         self.iim = InstrumentInfoManager()
 
+    def update_params(self, params: Dict[str, Any]):
+        """
+        Update risk parameters at runtime from a dictionary. Only known keys are applied.
+        """
+        if not params:
+            return
+        self.config.update(params)
+        # Apply supported keys to attributes
+        for key in [
+            'max_total_exposure_usd',
+            'max_risk_per_trade_percent',
+            'use_atr_sizing',
+            'atr_period',
+            'stop_loss_atr_multiplier',
+            'take_profit_atr_multiplier',
+            'stop_loss_pips',
+            'take_profit_pips',
+        ]:
+            if key in params and params[key] is not None:
+                setattr(self, key, params[key])
+        # Log summary of changes
+        try:
+            self.logger.info(f"Risk parameters updated: { {k:v for k,v in params.items() if v is not None} }")
+        except Exception:
+            pass
+
     def _build_price_map(self, instrument: str, oanda_client) -> Dict[str, tuple]:
         sym = instrument
         parts = sym.split('_')

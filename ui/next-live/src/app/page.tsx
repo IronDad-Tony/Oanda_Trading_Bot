@@ -6,7 +6,10 @@ import Link from "next/link";
 export default function Dashboard() {
   const { data: health } = useSWR("health", api.health, { refreshInterval: 3000 });
   const { data: summary } = useSWR("summary", api.accountSummary, { refreshInterval: 5000 });
-  const { data: positions } = useSWR("positions", api.positions, { refreshInterval: 5000 });
+  const { data: positions, mutate: mutPos } = useSWR("positions", api.positions, { refreshInterval: 5000 });
+  const { data: status, mutate: mutStatus } = useSWR("status", api.sessionStatus, { refreshInterval: 3000 });
+  async function start() { try { await api.sessionStart(120); await Promise.all([mutStatus(), mutPos()]); } catch (e:any) { alert(e.message); } }
+  async function stop() { try { await api.sessionStop(); await Promise.all([mutStatus(), mutPos()]); } catch (e:any) { alert(e.message); } }
 
   const equity = Number(summary?.account?.NAV ?? summary?.account?.equity ?? 0);
   const pnl = Number(summary?.account?.pl ?? 0);
@@ -17,8 +20,15 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <div className="text-sm rounded px-2 py-1 border bg-white dark:bg-gray-900">
-          Engine: <span className={health?.engine === "running" ? "text-green-600" : "text-gray-500"}>{health?.engine ?? "unknown"}</span>
+        <div className="flex items-center gap-2">
+          <div className="text-sm rounded px-2 py-1 border bg-white dark:bg-gray-900">
+            Engine: <span className={(status?.running ? "text-green-600" : "text-gray-500")}>{status?.running ? 'running' : 'stopped'}</span>
+          </div>
+          {status?.running ? (
+            <button onClick={stop} className="px-3 py-2 rounded border text-sm">Stop</button>
+          ) : (
+            <button onClick={start} className="px-3 py-2 rounded bg-black text-white text-sm dark:bg-white dark:text-black">Start</button>
+          )}
         </div>
       </div>
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -82,4 +92,3 @@ function Metric({ title, value, trend }: { title: string; value: string; trend?:
     </div>
   );
 }
-
