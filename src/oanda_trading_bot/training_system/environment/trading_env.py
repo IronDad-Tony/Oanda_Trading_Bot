@@ -487,28 +487,17 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         if ask_price_qc <= 0:
             return
 
+        # Position notional is in quote currency: abs(units) * ask_price
         position_value_qc = abs(units) * ask_price_qc
-        
-        # Corrected currency conversion logic
-        # To convert a value from quote currency to base currency, we need the base/quote rate.
-        # get_specific_rate(base, quote) returns quote/base. We need get_specific_rate(quote, base) to get base/quote.
-        exchange_rate_quote_to_base = self.currency_manager.get_specific_rate(
-            details.quote_currency, details.base_currency, all_prices_map, is_for_conversion=True
-        )
-        
-        if exchange_rate_quote_to_base is None or exchange_rate_quote_to_base <= 0:
-            logger.warning(f"Could not get exchange rate for {details.quote_currency}/{details.base_currency} for margin calculation. Setting margin to 0.")
+        margin_required_qc = position_value_qc * Decimal(str(details.margin_rate))
+
+        # Convert margin from quote currency to account currency directly
+        exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+        if exchange_rate_qc_to_ac is None or exchange_rate_qc_to_ac <= 0:
+            logger.warning(f"Could not get exchange rate for {details.quote_currency}->{self.account_currency if hasattr(self,'account_currency') else 'AC'} for margin calculation. Setting margin to 0.")
             self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
             return
-
-        position_value_base = position_value_qc * exchange_rate_quote_to_base
-        margin_required_base = position_value_base * Decimal(str(details.margin_rate))
-        
-        # This converts from base currency to account currency.
-        exchange_rate_base_to_ac = self.currency_manager.convert_to_account_currency(
-            details.base_currency, all_prices_map
-        )
-        margin_required_ac = margin_required_base * exchange_rate_base_to_ac
+        margin_required_ac = margin_required_qc * exchange_rate_qc_to_ac
         self.margin_used_per_position_ac[slot_idx] = margin_required_ac
 
     def _execute_trade(self, slot_idx: int, units_to_trade: Decimal, trade_price_qc: Decimal, timestamp: pd.Timestamp, all_prices_map: Dict[str, Tuple[Decimal, Decimal]]) -> Tuple[Decimal, Decimal]:
