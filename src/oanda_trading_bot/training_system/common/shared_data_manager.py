@@ -55,6 +55,10 @@ class SharedTrainingDataManager:
         self.stop_requested = False
         self.training_start_time = None
 
+        # Throttled warning state for queue-full events
+        self._last_warn = {'metrics': 0.0, 'trades': 0.0, 'diagnostics': 0.0}
+        self._warn_min_interval = 5.0  # seconds
+
         # NEW: To store the latest 'info' dict from the environment
         self.current_env_info = {}
         
@@ -63,9 +67,9 @@ class SharedTrainingDataManager:
         
         # multiprocessing Queues for communication from trainer
         manager = self.get_manager()
-        self.metrics_mp_queue = manager.Queue(maxsize=max_metrics * 2) # Larger buffer for mp queue
-        self.trades_mp_queue = manager.Queue(maxsize=max_trades * 2)  # Larger buffer for mp queue
-        self.diagnostics_mp_queue = manager.Queue(maxsize=max_diagnostics * 2) # NEW: For diagnostics
+        self.metrics_mp_queue = manager.Queue(maxsize=max_metrics * 5) # Larger buffer for mp queue
+        self.trades_mp_queue = manager.Queue(maxsize=max_trades * 5)  # Larger buffer for mp queue
+        self.diagnostics_mp_queue = manager.Queue(maxsize=max_diagnostics * 5) # NEW: For diagnostics
 
         # Internal deques for UI to read from (populated from mp_queues)
         self.metrics_queue = deque(maxlen=max_metrics)
@@ -101,6 +105,39 @@ class SharedTrainingDataManager:
         
         logger.info("SharedTrainingDataManager 初始化完成 (使用 multiprocessing.Queue)")
     
+    def _put_drop_oldest_nonblocking(self, q, name: str, item: dict, warn_key: str):
+        """Attempt non-blocking put; if full, drop one oldest item and retry.
+        Emits a throttled warning identified by warn_key.
+        """
+        try:
+            q.put_nowait(item)
+            return True
+        except multiprocessing.queues.Full:
+            # Drop one oldest (non-blocking) and retry
+            try:
+                q.get_nowait()
+            except Exception:
+                pass
+            success = False
+            try:
+                q.put_nowait(item)
+                success = True
+            except Exception:
+                success = False
+            # Throttle warnings
+            try:
+                now = time.monotonic()
+            except Exception:
+                now = time.time()
+            last = self._last_warn.get(warn_key, 0.0)
+            if now - last >= self._warn_min_interval:
+                logger.warning(f"{name} multiprocessing queue is full. Dropping oldest to make room.")
+                self._last_warn[warn_key] = now
+            return success
+        except Exception as e:
+            logger.error(f"Error putting to {name.lower()}_mp_queue: {e}", exc_info=False)
+            return False
+
     def _pull_data_from_mp_queues(self):
         """Internal method to pull data from multiprocessing queues into internal deques."""
         with self.lock: # Protect access to internal deques
@@ -202,12 +239,9 @@ class SharedTrainingDataManager:
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
         
-        try:
-            self.metrics_mp_queue.put_nowait(metric) # Use put_nowait to avoid blocking trainer
-        except multiprocessing.queues.Full:
-            logger.warning("Metrics multiprocessing queue is full. Metric may be lost.")
-        except Exception as e:
-            logger.error(f"Error putting to metrics_mp_queue: {e}", exc_info=False)        # Update current and performance stats directly (thread-safe due to GIL or explicit lock if needed)
+        # Non-blocking put with drop-oldest strategy to avoid backpressure
+        self._put_drop_oldest_nonblocking(self.metrics_mp_queue, 'Metrics', metric, 'metrics')
+        # Update current and performance stats directly (thread-safe due to GIL or explicit lock if needed)
         with self.lock:
             self.current_metrics = {
                 'step': step,
@@ -243,12 +277,8 @@ class SharedTrainingDataManager:
             'data': diagnostics_data
         }
         
-        try:
-            self.diagnostics_mp_queue.put_nowait(record)
-        except multiprocessing.queues.Full:
-            logger.warning("Diagnostics multiprocessing queue is full. Record may be lost.")
-        except Exception as e:
-            logger.error(f"Error putting to diagnostics_mp_queue: {e}", exc_info=False)
+        # Non-blocking put with drop-oldest strategy
+        self._put_drop_oldest_nonblocking(self.diagnostics_mp_queue, 'Diagnostics', record, 'diagnostics')
 
     def add_trade_record(self, symbol: str, action: str, price: float, 
                         quantity: float, profit_loss: float, 
@@ -277,12 +307,8 @@ class SharedTrainingDataManager:
             'timestamp': ts.isoformat()  # 保留實際時間戳作為輔助信息
         }
         
-        try:
-            self.trades_mp_queue.put_nowait(trade) # Use put_nowait
-        except multiprocessing.queues.Full:
-            logger.warning("Trades multiprocessing queue is full. Trade record may be lost.")
-        except Exception as e:
-            logger.error(f"Error putting to trades_mp_queue: {e}", exc_info=False)
+        # Non-blocking put with drop-oldest strategy
+        self._put_drop_oldest_nonblocking(self.trades_mp_queue, 'Trades', trade, 'trades')
 
         # Update symbol_stats directly (thread-safe due to GIL or explicit lock)
         with self.lock:

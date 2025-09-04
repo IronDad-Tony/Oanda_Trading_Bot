@@ -840,7 +840,12 @@ def create_real_time_charts():
 
 
     if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # Robust ISO-8601 parsing: handles mixed presence of microseconds and timezone offsets
+        try:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601', utc=True, errors='coerce')
+        except Exception:
+            # Fallback for older pandas versions
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
     
     # Ensure required columns are present and handle potential NaN from initialization
     for col in ['actor_loss', 'critic_loss', 'l2_norm', 'grad_norm']:
@@ -1121,7 +1126,10 @@ def create_real_time_charts():
         if all_trades:
             trades_df = pd.DataFrame(all_trades)
             if 'timestamp' in trades_df.columns:
-                trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
+                try:
+                    trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], format='ISO8601', utc=True, errors='coerce')
+                except Exception:
+                    trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], utc=True, errors='coerce')
               # Create sub-tabs for different trading activity views
             trade_tab1, trade_tab2, trade_tab3 = st.tabs([
                 "📈 Trades Over Time", "📊 P&L Distribution", "🎯 Symbol Activity"
@@ -1508,10 +1516,17 @@ def display_training_status():
             if len(times_from_deque) >= 2: # Check if populated successfully and has enough elements
                 if isinstance(times_from_deque[0], str):
                     try:
-                        times_from_deque = [pd.to_datetime(t) for t in times_from_deque]
+                        times_from_deque = [
+                            # Use robust ISO-8601 parsing per element
+                            (pd.to_datetime(t, format='ISO8601', utc=True, errors='coerce') if isinstance(t, str)
+                             else pd.to_datetime(t, utc=True, errors='coerce'))
+                            for t in times_from_deque
+                        ]
                     except Exception as e:
                         st.warning(f"Error converting timestamps to datetime: {e}")
-                        times_from_deque = [] # Reset if conversion fails            if len(times_from_deque) >= 2 and len(global_steps_from_deque) >=2: # Ensure both have enough data
+                        times_from_deque = []  # Reset if conversion fails
+                # Ensure both have enough data
+                if len(times_from_deque) >= 2 and len(global_steps_from_deque) >= 2:
                 dt = (times_from_deque[-1] - times_from_deque[0]).total_seconds()
                 d_global_steps = global_steps_from_deque[-1] - global_steps_from_deque[0]
 
