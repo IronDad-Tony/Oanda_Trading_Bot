@@ -58,6 +58,9 @@ try:
     if not _import_logged:
         logger.info("trading_env.py (V5.0): Successfully imported and stored common.config values.")
     from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from oanda_trading_bot.training_system.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from oanda_trading_bot.common.instrument_info_manager import InstrumentDetails, InstrumentInfoManager;
+    from oanda_trading_bot.training_system.data_manager.currency_route_planner import (
+        compute_required_pairs_for_training, compute_conversion_rate_along_route,
+    )
     if not _import_logged:
         logger.info("trading_env.py (V5.0): Successfully imported other dependencies.")
         _import_logged = True
@@ -71,6 +74,9 @@ except ImportError as e_initial_import_v5:
         _config_values_env_v5 = {"TIMESTEPS": _TIMESTEPS_R, "MAX_SYMBOLS_ALLOWED": _MAX_SYMBOLS_ALLOWED_R, "ACCOUNT_CURRENCY": _ACCOUNT_CURRENCY_R, "DEFAULT_INITIAL_CAPITAL": _DEFAULT_INITIAL_CAPITAL_R, "OANDA_MARGIN_CLOSEOUT_LEVEL": _OANDA_MARGIN_CLOSEOUT_LEVEL_R, "TRADE_COMMISSION_PERCENTAGE": _TRADE_COMMISSION_PERCENTAGE_R, "OANDA_API_KEY": _OANDA_API_KEY_R, "ATR_PERIOD": _ATR_PERIOD_R, "STOP_LOSS_ATR_MULTIPLIER": _STOP_LOSS_ATR_MULTIPLIER_R, "MAX_ACCOUNT_RISK_PERCENTAGE": _MAX_ACCOUNT_RISK_PERCENTAGE_R}
         logger.info("trading_env.py (V5.0): Successfully re-imported and stored common.config after path adjustment.")
         from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from oanda_trading_bot.training_system.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from oanda_trading_bot.common.instrument_info_manager import InstrumentDetails, InstrumentInfoManager;
+        from oanda_trading_bot.training_system.data_manager.currency_route_planner import (
+            compute_required_pairs_for_training, compute_conversion_rate_along_route,
+        )
         # Import enhanced reward calculator
         try:
             from oanda_trading_bot.training_system.environment.enhanced_reward_calculator import EnhancedRewardCalculator
@@ -156,6 +162,18 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         # 初始化統一的貨幣轉換管理器
         from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager
         self.currency_manager = CurrencyDependencyManager(ACCOUNT_CURRENCY, apply_oanda_markup=True)
+        # Precompute conversion routes for active symbols' quote currencies to account currency
+        self._conversion_routes_map = {}
+        try:
+            required_symbols, routes = compute_required_pairs_for_training(
+                trading_symbols=list(self.active_symbols_for_episode) if hasattr(self, 'active_symbols_for_episode') else [],
+                account_currency=ACCOUNT_CURRENCY,
+                instrument_info_manager=self.instrument_info_manager,
+            )
+            for sym, route in routes.items():
+                self._conversion_routes_map[str(route.from_ccy).upper()] = route
+        except Exception as _e_routes_init:
+            logger.debug(f"Route precompute skipped: {_e_routes_init}")
         if commission_percentage_override is not None:
             self.commission_percentage = Decimal(str(commission_percentage_override))
         else:
@@ -434,7 +452,15 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         """
         Gets the exchange rate to convert from a given currency to the account currency.
         """
-        # Corrected to use the new currency manager method
+        try:
+            ccy = str(currency).upper()
+            route = getattr(self, '_conversion_routes_map', {}).get(ccy)
+            if route is not None:
+                rate = compute_conversion_rate_along_route(route, all_prices_map, apply_oanda_markup=True)
+                if rate is not None and rate > 0:
+                    return rate
+        except Exception as _e_conv:
+            logger.debug(f"Route-based conversion failed, falling back: {_e_conv}")
         return self.currency_manager.convert_to_account_currency(currency, all_prices_map)
 
     def _round_trade_units(self, units: Decimal, precision: int) -> Decimal:

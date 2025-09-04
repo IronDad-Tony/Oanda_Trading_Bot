@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple
+from typing import List, Set, Tuple, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -24,17 +24,35 @@ def ensure_currency_data_for_trading(
     try:
         # Lazy imports to avoid circulars and keep module import cheap
         from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
-        from oanda_trading_bot.training_system.data_manager.currency_manager import (
-            get_required_conversion_pairs,
+        from oanda_trading_bot.training_system.data_manager.currency_route_planner import (
+            compute_required_pairs_for_training,
         )
+        # Fallback for legacy logic
+        try:
+            from oanda_trading_bot.training_system.data_manager.currency_manager import (
+                get_required_conversion_pairs,
+            )
+        except Exception:
+            get_required_conversion_pairs = None  # type: ignore
 
         instrument_info_manager = InstrumentInfoManager()
-        available_instruments = set(instrument_info_manager.get_all_available_symbols())
 
-        required_pairs = get_required_conversion_pairs(
-            trading_symbols, available_instruments
+        # Prefer robust graph-based route computation
+        required_symbols, route_map = compute_required_pairs_for_training(
+            trading_symbols=trading_symbols,
+            account_currency=account_currency,
+            instrument_info_manager=instrument_info_manager,
         )
-        all_symbols = set(trading_symbols) | required_pairs
+        all_symbols = set(required_symbols)
+
+        # If no routes were discovered (e.g., API not available), fall back
+        if not all_symbols or all(sym in trading_symbols for sym in all_symbols):
+            if get_required_conversion_pairs is not None:
+                available_instruments = set(instrument_info_manager.get_all_available_symbols())
+                required_pairs = get_required_conversion_pairs(trading_symbols, available_instruments)
+                all_symbols = set(trading_symbols) | required_pairs
+            else:
+                all_symbols = set(trading_symbols)
 
         if perform_download:
             from oanda_trading_bot.training_system.data_manager.oanda_downloader import (
@@ -57,4 +75,3 @@ def ensure_currency_data_for_trading(
             exc_info=True,
         )
         return False, set(trading_symbols)
-
