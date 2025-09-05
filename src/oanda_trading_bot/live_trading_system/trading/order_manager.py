@@ -193,6 +193,9 @@ class OrderManager:
                 return resp_local, req_ms, int(time.time() * 1000)
 
             # First attempt
+            # Update last-order timestamp at submission time to avoid rapid re-submits while pending
+            request_time_ms = int(time.time() * 1000)
+            self._last_order_ts_ms[instrument] = request_time_ms
             order_response, request_ts_ms, response_ts_ms = _submit_order(trade_details["units"], price_bound)
             attempted_retry = False
 

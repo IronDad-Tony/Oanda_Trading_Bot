@@ -250,6 +250,14 @@ class StrategyPoolManager(nn.Module):
             weights = weights / (weights.sum(dim=1, keepdim=True).clamp_min(1e-8))
 
         weights = self.dropout(weights)
+        # Regime-aware blending (if regime set and weights exist)
+        if self.current_regime and self.current_regime in self.regime_weights:
+            rw = self.regime_weights[self.current_regime].to(weights.device)
+            if rw.numel() >= self.num_actual_strategies:
+                rw = rw[: self.num_actual_strategies]
+                rw = torch.softmax(rw, dim=0)
+                weights = weights * rw.unsqueeze(0)
+                weights = weights / (weights.sum(dim=1, keepdim=True).clamp_min(1e-8))
 
         # 2) Collect strategy signals per asset
         all_signals = torch.zeros(b, n, self.num_actual_strategies, device=asset_features_batch.device)
@@ -332,3 +340,12 @@ class StrategyPoolManager(nn.Module):
         if not hasattr(self, '_portfolio_head'):
             self._portfolio_head = DifferentiableMeanVarianceHead(risk_aversion=1.0, scale=10.0).to(alpha.device)
         return self._portfolio_head(alpha, vol_est)
+
+    # Regime control helpers
+    def set_current_regime(self, name: Optional[str]):
+        self.current_regime = name
+
+    def set_regime_weights(self, name: str, weights: torch.Tensor):
+        if not isinstance(weights, torch.Tensor):
+            raise ValueError("weights must be a torch.Tensor")
+        self.regime_weights[name] = weights.detach().clone()
