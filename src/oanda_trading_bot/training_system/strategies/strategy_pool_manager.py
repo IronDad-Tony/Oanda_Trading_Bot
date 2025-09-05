@@ -275,8 +275,7 @@ class StrategyPoolManager(nn.Module):
                     self.logger.error(f"Strategy {self.strategy_names[i]} failed for asset {asset_idx}: {e}")
                     all_signals[:, asset_idx, i] = 0.0
 
-        combined = torch.sum(all_signals * weights.unsqueeze(1), dim=2)
-        actions = combined.unsqueeze(-1)
+        combined = torch.sum(all_signals * weights.unsqueeze(1), dim=2)  # [B,N]\n        actions = combined.unsqueeze(-1)  # default output [B,N,1]
 
         # diagnostics
         self.last_strategy_weights = weights.detach().cpu()
@@ -323,3 +322,13 @@ class StrategyPoolManager(nn.Module):
             'last_market_state_features': self.last_market_state_features,
             'temperature': float(self.temperature.item()) if self.temperature is not None else None,
         }
+
+    # Optional: expose a helper to map alpha -> portfolio weights via differentiable head
+    def compute_portfolio_weights(self, alpha: torch.Tensor, vol_est: Optional[torch.Tensor] = None) -> torch.Tensor:
+        try:
+            from oanda_trading_bot.training_system.models.portfolio_head import DifferentiableMeanVarianceHead
+        except Exception:
+            raise RuntimeError("portfolio_head module not available")
+        if not hasattr(self, '_portfolio_head'):
+            self._portfolio_head = DifferentiableMeanVarianceHead(risk_aversion=1.0, scale=10.0).to(alpha.device)
+        return self._portfolio_head(alpha, vol_est)
