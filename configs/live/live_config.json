@@ -1,7 +1,7 @@
 {
   "trading_instruments": ["EUR_USD", "GBP_USD", "XAU_USD", "NAS100_USD", "US30_USD"],
   "trading_granularity": "S5",
-  "model_lookback_window": 128,
+  "model_lookback_window": 256,
   "max_position_size_per_trade": 1000,
   "max_total_risk_pct": 2.0,
   "daily_loss_limit_pct": 5.0,
@@ -21,7 +21,7 @@
     "path": "database/trading_history.db"
   },
   "preprocessor": {
-    "scalers_path": "tests/live_trading_system/tests/dummy_scalers.json"
+    "scalers_path": "data/scalers/mtf_scalers.json"
   },
   "model": {
     "path": "weights/sac_model_symbols5.zip"

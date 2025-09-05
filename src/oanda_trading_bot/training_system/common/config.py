@@ -198,6 +198,13 @@ else:
 # 混合精度訓練 (如果GPU支持且希望加速)
 USE_AMP = GPU_OPTIMIZED
 
+# --- Overrides to align main training system with upgraded live pipeline ---
+# Ensure global sequence length aligns with 256-step window
+try:
+    TIMESTEPS = 256  # override default 128 for main training system
+except Exception:
+    pass
+
 # 數值穩定性配置
 GRADIENT_CLIP_NORM = 1.0            # 梯度裁剪範數
 ENABLE_GRADIENT_CLIPPING = True     # 是否啟用梯度裁剪

@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 import pywt  # For Wavelet features
 from sklearn.preprocessing import StandardScaler
+from oanda_trading_bot.common.mtf_features import compute_mtf_features
 
 logger = logging.getLogger("LiveTradingSystem")
 
@@ -113,8 +114,35 @@ class LivePreprocessor:
         processed_df = pd.DataFrame(index=df.index)
         
         # Basic features
-        processed_df['log_ret'] = self._calculate_log_returns(df['mid_c'])
-        processed_df['volume_log'] = np.log1p(df['volume'])
+        # Prefer mid from available columns; if mid_c missing, compute from bid/ask
+        mid_source = None
+        for c in ('mid_c', 'mid_close', 'mid'):
+            if c in df.columns:
+                mid_source = c
+                break
+        if mid_source is None and {'bid_close','ask_close'}.issubset(df.columns):
+            df['mid'] = (pd.to_numeric(df['bid_close'], errors='coerce') + pd.to_numeric(df['ask_close'], errors='coerce')) / 2.0
+            mid_source = 'mid'
+        if mid_source is None:
+            # Fallback: if any close-like column exists
+            for c in ('close','ask_c','bid_c'):
+                if c in df.columns:
+                    mid_source = c
+                    break
+        if mid_source is None:
+            logger.error("No mid/close price column available to compute features.")
+            return np.array([])
+
+        processed_df['log_ret'] = self._calculate_log_returns(pd.to_numeric(df[mid_source], errors='coerce'))
+        if 'volume' in df.columns:
+            processed_df['volume_log'] = np.log1p(pd.to_numeric(df['volume'], errors='coerce'))
+
+        # Multi-timeframe features (1T, 15T, 1H)
+        try:
+            mtf = compute_mtf_features(df, timeframes=['1T','15T','1H'])
+            processed_df = pd.concat([processed_df, mtf], axis=1)
+        except Exception as e:
+            logger.error(f"Failed to compute multi-timeframe features: {e}", exc_info=True)
 
         # Advanced features based on model config
         if self.model_config.get('use_fourier_features'):

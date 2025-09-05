@@ -1,4 +1,4 @@
-# Configuration for the Enhanced Transformer Model
+﻿# Configuration for the Enhanced Transformer Model
 # Adjusted import path to be an absolute path from the 'src' root
 from oanda_trading_bot.training_system.common.config import MAX_SYMBOLS_ALLOWED
 
@@ -8,7 +8,7 @@ ModelConfig = {
     'num_heads': 8,
     'intermediate_dim': 1024,
     'dropout_rate': 0.1,
-    'max_sequence_length': 128, # This can also be reviewed if sequences are shorter
+    'max_sequence_length': 256, # This can also be reviewed if sequences are shorter
     'num_symbols': MAX_SYMBOLS_ALLOWED,
     'output_dim': 128,
     'use_adaptive_attention': True,

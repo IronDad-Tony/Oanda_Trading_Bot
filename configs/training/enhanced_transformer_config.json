@@ -2,8 +2,8 @@
   "model": {
     "type": "EnhancedUniversalTradingTransformer",
     "model_dim": 768,
-    "num_layers": 16,
-    "num_heads": 24,
+    "num_layers": 24,
+    "num_heads": 12,
     "ffn_dim": 3072,
     "dropout_rate": 0.1,
     "use_multi_scale": true,
