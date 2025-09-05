@@ -1527,19 +1527,19 @@ def display_training_status():
                         times_from_deque = []  # Reset if conversion fails
                 # Ensure both have enough data
                 if len(times_from_deque) >= 2 and len(global_steps_from_deque) >= 2:
-                dt = (times_from_deque[-1] - times_from_deque[0]).total_seconds()
-                d_global_steps = global_steps_from_deque[-1] - global_steps_from_deque[0]
+                    dt = (times_from_deque[-1] - times_from_deque[0]).total_seconds()
+                    d_global_steps = global_steps_from_deque[-1] - global_steps_from_deque[0]
 
-                if dt > 0 and d_global_steps > 0:
-                    steps_per_sec = d_global_steps / dt
-                
-                # Calculate session steps left based on current session progress
-                session_steps_left = session_target_steps - current_session_steps
-                
-                if steps_per_sec > 0 and session_steps_left > 0:
-                    eta_sec = int(session_steps_left / steps_per_sec)
-                    h, m, s = eta_sec // 3600, (eta_sec % 3600) // 60, eta_sec % 60
-                    eta_text = f"ETA: {h:02d}:{m:02d}:{s:02d}"
+                    if dt > 0 and d_global_steps > 0:
+                        steps_per_sec = d_global_steps / dt
+                    
+                    # Calculate session steps left based on current session progress
+                    session_steps_left = session_target_steps - current_session_steps
+                    
+                    if steps_per_sec > 0 and session_steps_left > 0:
+                        eta_sec = int(session_steps_left / steps_per_sec)
+                        h, m, s = eta_sec // 3600, (eta_sec % 3600) // 60, eta_sec % 60
+                        eta_text = f"ETA: {h:02d}:{m:02d}:{s:02d}"
 
     # Display status based on training state
     if status == 'running':        # Calculate progress based on session steps
