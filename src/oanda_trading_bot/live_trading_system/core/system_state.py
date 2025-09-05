@@ -68,8 +68,7 @@ class SystemState:
                 
                 api_key = os.getenv("OANDA_API_KEY")
                 account_id = os.getenv("OANDA_ACCOUNT_ID")
-                environment = os.getenv("OANDA_ENVIRONMENT", "practice")
-                base_url = "https://api-fxtrade.oanda.com/v3" if environment == "live" else "https://api-fxpractice.oanda.com/v3"
+                # OANDA environment variable is not required; detection is handled downstream.
 
                 if not api_key or not account_id:
                     logger.error("OANDA_API_KEY or OANDA_ACCOUNT_ID not found in .env file.")
@@ -78,7 +77,7 @@ class SystemState:
                 self.instrument_info_manager = ActualIIM(
                     api_key=api_key,
                     account_id=account_id,
-                    base_url=base_url,
+                    base_url=None,
                     force_refresh=True  # 首次啟動時強制刷新
                 )
             except (ImportError, ValueError) as e:

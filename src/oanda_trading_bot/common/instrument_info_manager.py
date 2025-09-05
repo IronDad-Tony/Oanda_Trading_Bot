@@ -99,9 +99,21 @@ class InstrumentInfoManager:
         self.account_id = account_id or OANDA_ACCOUNT_ID
         self.base_url = base_url or OANDA_BASE_URL
 
-        if not self.api_key or not self.account_id or not self.base_url:
-            msg = "OANDA_API_KEY, OANDA_ACCOUNT_ID, or OANDA_BASE_URL not configured. InstrumentInfoManager cannot work."
+        if not self.api_key or not self.account_id:
+            msg = "OANDA_API_KEY or OANDA_ACCOUNT_ID not configured. InstrumentInfoManager cannot work."
             logger.critical(msg)
+            self._instrument_cache = {}
+            self._initialized = True
+            return
+        
+        # Auto-detect base_url if not provided or to correct mismatched environment
+        try:
+            self.base_url = self.base_url or self._auto_detect_base_url()
+        except Exception as e:
+            logger.warning(f"Base URL auto-detection failed: {e}. Falling back to configured value: {self.base_url}")
+        
+        if not self.base_url:
+            logger.critical("OANDA_BASE_URL could not be determined.")
             self._instrument_cache = {}
             self._initialized = True
             return
@@ -111,6 +123,25 @@ class InstrumentInfoManager:
         if force_refresh or self._is_cache_expired(): self._fetch_all_instruments_details()
         self._initialized = True
         logger.info(f"InstrumentInfoManager initialized. Cache contains {len(self._instrument_cache)} instruments.")
+
+    def _auto_detect_base_url(self) -> Optional[str]:
+        candidates = [
+            "https://api-fxtrade.oanda.com/v3",
+            "https://api-fxpractice.oanda.com/v3",
+        ]
+        session = requests.Session()
+        session.headers.update({"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
+        for url in candidates:
+            try:
+                resp = session.get(f"{url}/accounts/{self.account_id}/summary", timeout=OANDA_API_TIMEOUT_SECONDS)
+                if resp.status_code == 200 and isinstance(resp.json(), dict):
+                    logger.info(f"Detected OANDA base URL: {url}")
+                    return url
+                else:
+                    logger.debug(f"Probe {url} returned {resp.status_code}")
+            except Exception as e:
+                logger.debug(f"Probe error for {url}: {e}")
+        return None
 
     def _is_cache_expired(self) -> bool:
         if self._last_fetch_time is None: return True

@@ -61,23 +61,26 @@ def initialize_system(
         # --- Core Components ---
         oanda_api_key = os.getenv("OANDA_API_KEY")
         oanda_account_id = os.getenv("OANDA_ACCOUNT_ID")
-        oanda_environment = os.getenv("OANDA_ENVIRONMENT", "practice")
 
         if not oanda_api_key or not oanda_account_id:
             logging.critical("CRITICAL: OANDA_API_KEY or OANDA_ACCOUNT_ID not found in .env file.")
             logging.critical(f"Attempted to load .env from: {dotenv_path}")
             return None
 
-        # Correctly initialize OandaClient with individual arguments
-        client = mock_client if mock_client else OandaClient(
-            api_key=oanda_api_key,
-            account_id=oanda_account_id,
-            environment=oanda_environment
-        )
-        # Force 'live' if environment variable says so (batch can override). Be explicit and transparent in logs.
-        if oanda_environment not in ("live", "practice"):
-            logging.warning(f"Unknown OANDA_ENVIRONMENT '{oanda_environment}', defaulting to 'practice'.")
-            oanda_environment = "practice"
+        # Initialize OandaClient without requiring OANDA_ENVIRONMENT by probing
+        if mock_client:
+            client = mock_client
+        else:
+            # Try live first; if summary probe fails, switch to practice
+            client = OandaClient(api_key=oanda_api_key, account_id=oanda_account_id, environment="live")
+            try:
+                summary = client.get_account_summary()
+                if not summary:
+                    logging.info("Live summary probe returned no data; switching to practice.")
+                    client = OandaClient(api_key=oanda_api_key, account_id=oanda_account_id, environment="practice")
+            except Exception:
+                logging.info("Live environment probe failed; switching to practice.")
+                client = OandaClient(api_key=oanda_api_key, account_id=oanda_account_id, environment="practice")
 
         system_state = SystemState()
         

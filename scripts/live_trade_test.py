@@ -10,9 +10,8 @@ from oanda_trading_bot.live_trading_system.main import initialize_system
 
 
 def main():
-    env = os.getenv('OANDA_ENVIRONMENT', 'practice').lower()
     confirm = os.getenv('CONFIRM_LIVE_TRADING', 'NO').upper()
-    if env == 'live' and confirm != 'YES':
+    if confirm != 'YES':
         print("Refusing to run live trades without CONFIRM_LIVE_TRADING=YES")
         return
 
@@ -77,4 +76,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
