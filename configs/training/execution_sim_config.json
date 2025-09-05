@@ -1,8 +1,8 @@
 {
   "simulate_order_latency": true,
-  "execution_delay_mean_steps": 0,
+  "execution_delay_mean_steps": 2,
   "execution_delay_jitter_steps": 1,
-  "max_slippage_pips": 0.1,
-  "slippage_sigma_pips": 0.05,
+  "max_slippage_pips": 0.8,
+  "slippage_sigma_pips": 0.3,
   "reject_if_slippage_exceeds_bound": true
 }
