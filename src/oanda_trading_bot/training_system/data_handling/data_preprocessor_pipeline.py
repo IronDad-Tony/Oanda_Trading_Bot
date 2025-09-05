@@ -1,24 +1,24 @@
-import torch
+﻿import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 
-# 導入必要的模組
-# 從 mmap_dataset.py 導入 UniversalMemoryMappedDataset
+# å°Žå…¥å¿…è¦çš„æ¨¡çµ„
+# å¾ž mmap_dataset.py å°Žå…¥ UniversalMemoryMappedDataset
 from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset
-# 從 enhanced_transformer.py 導入 EnhancedTransformer
+# å¾ž enhanced_transformer.py å°Žå…¥ EnhancedTransformer
 from oanda_trading_bot.training_system.models.enhanced_transformer import EnhancedTransformer
-# 從 common.config 導入 MAX_SYMBOLS_ALLOWED 和 TIMESTEPS
+# å¾ž common.config å°Žå…¥ MAX_SYMBOLS_ALLOWED å’Œ TIMESTEPS
 from oanda_trading_bot.training_system.common.config import MAX_SYMBOLS_ALLOWED, TIMESTEPS
-# 從 common.logger_setup 導入 logger
+# å¾ž common.logger_setup å°Žå…¥ logger
 from oanda_trading_bot.training_system.common.logger_setup import logger
 
 class DualTrackDataProcessor(nn.Module):
     """
-    雙軌數據預處理器。
-    該模組負責從 UniversalMemoryMappedDataset 獲取數據，
-    並生成兩種特徵：原始特徵 (Raw Features) 和高維特徵 (Transformed Features)。
+    é›™è»Œæ•¸æ“šé è™•ç†å™¨ã€‚
+    è©²æ¨¡çµ„è² è²¬å¾ž UniversalMemoryMappedDataset ç²å–æ•¸æ“šï¼Œ
+    ä¸¦ç”Ÿæˆå…©ç¨®ç‰¹å¾µï¼šåŽŸå§‹ç‰¹å¾µ (Raw Features) å’Œé«˜ç¶­ç‰¹å¾µ (Transformed Features)ã€‚
     """
     def __init__(self, 
                  enhanced_transformer_config: Dict[str, Any],
@@ -33,13 +33,13 @@ class DualTrackDataProcessor(nn.Module):
         self.timesteps_history = timesteps_history
         self.device = device
         
-        # 實例化 EnhancedTransformer
-        # EnhancedTransformer 預期輸入形狀為 [batch_size, num_active_symbols, seq_len, input_dim]
-        # 這裡的 input_dim 應該是來自 mmap_dataset 的 features_tensor 的最後一個維度
+        # å¯¦ä¾‹åŒ– EnhancedTransformer
+        # EnhancedTransformer é æœŸè¼¸å…¥å½¢ç‹€ç‚º [batch_size, num_active_symbols, seq_len, input_dim]
+        # é€™è£¡çš„ input_dim æ‡‰è©²æ˜¯ä¾†è‡ª mmap_dataset çš„ features_tensor çš„æœ€å¾Œä¸€å€‹ç¶­åº¦
         self.enhanced_transformer = EnhancedTransformer(
-            input_dim=self.num_features_per_symbol, # 來自 mmap_dataset 的特徵數量
-            # 這裡需要從 enhanced_transformer_config 中獲取所有 EnhancedTransformer 所需的參數
-            # 這些參數在 configs/training/enhanced_model_config.py 中定義
+            input_dim=self.num_features_per_symbol, # ä¾†è‡ª mmap_dataset çš„ç‰¹å¾µæ•¸é‡
+            # é€™è£¡éœ€è¦å¾ž enhanced_transformer_config ä¸­ç²å–æ‰€æœ‰ EnhancedTransformer æ‰€éœ€çš„åƒæ•¸
+            # é€™äº›åƒæ•¸åœ¨ configs/training/enhanced_model_config.py ä¸­å®šç¾©
             d_model=enhanced_transformer_config.get('hidden_dim', 256),
             transformer_nhead=enhanced_transformer_config.get('num_heads', 8),
             num_encoder_layers=enhanced_transformer_config.get('num_layers', 6),
@@ -51,7 +51,7 @@ class DualTrackDataProcessor(nn.Module):
             use_msfe=enhanced_transformer_config.get('use_msfe', True),
             msfe_hidden_dim=enhanced_transformer_config.get('msfe_hidden_dim'),
             msfe_scales=enhanced_transformer_config.get('msfe_scales', [3, 5, 7, 11]),
-            use_final_norm=enhanced_transformer_config.get('use_final_norm', True), # 假設 True
+            use_final_norm=enhanced_transformer_config.get('use_final_norm', True), # å‡è¨­ True
             use_adaptive_attention=enhanced_transformer_config.get('use_adaptive_attention', True),
             num_market_states=enhanced_transformer_config.get('num_market_states', 4),
             use_gmm_market_state_detector=enhanced_transformer_config.get('use_gmm_market_state_detector', False),
@@ -61,19 +61,18 @@ class DualTrackDataProcessor(nn.Module):
             cts_time_scales=enhanced_transformer_config.get('cts_time_scales', [1, 3, 5]),
             cts_fusion_type=enhanced_transformer_config.get('cts_fusion_type', "hierarchical_attention"),
             use_symbol_embedding=enhanced_transformer_config.get('use_symbol_embedding', True),
-            symbol_embedding_dim=enhanced_transformer_config.get('symbol_embedding_dim', 16), # 新增，確保有預設值
+            symbol_embedding_dim=enhanced_transformer_config.get('symbol_embedding_dim', 16), # æ–°å¢žï¼Œç¢ºä¿æœ‰é è¨­å€¼
             use_fourier_features=enhanced_transformer_config.get('use_fourier_features', False),
-            fourier_num_modes=enhanced_transformer_config.get('fourier_num_modes'), # 假設有預設值或從common.config讀取
+            fourier_num_modes=enhanced_transformer_config.get('fourier_num_modes'), # å‡è¨­æœ‰é è¨­å€¼æˆ–å¾žcommon.configè®€å–
             use_wavelet_features=enhanced_transformer_config.get('use_wavelet_features', False),
-            wavelet_name=enhanced_transformer_config.get('wavelet_name'), # 假設有預設值或從common.config讀取
-            wavelet_levels=enhanced_transformer_config.get('wavelet_levels'), # 假設有預設值或從common.config讀取
+            wavelet_name=enhanced_transformer_config.get('wavelet_name'), # å‡è¨­æœ‰é è¨­å€¼æˆ–å¾žcommon.configè®€å–
+            wavelet_levels=enhanced_transformer_config.get('wavelet_levels'), # å‡è¨­æœ‰é è¨­å€¼æˆ–å¾žcommon.configè®€å–
             trainable_wavelet_filters=enhanced_transformer_config.get('trainable_wavelet_filters', False),
             use_layer_norm_before=enhanced_transformer_config.get('use_layer_norm_before', True),
             output_activation=enhanced_transformer_config.get('output_activation'),
             positional_encoding_type=enhanced_transformer_config.get('positional_encoding_type', "sinusoidal"),
             use_cross_asset_attention=enhanced_transformer_config.get('use_cross_asset_attention', True),
-            num_cross_asset_layers=enhanced_transformer_config.get('num_cross_asset_layers', 4),
-            device=self.device
+            num_cross_asset_layers=enhanced_transformer_config.get('num_cross_asset_layers', 4),\n            use_graph_attn=enhanced_transformer_config.get('use_graph_attn', True),\n            graph_layers=enhanced_transformer_config.get('graph_layers', 2),\n            graph_heads=enhanced_transformer_config.get('graph_heads', 4),\n            graph_topk=enhanced_transformer_config.get('graph_topk', 5),\n            device=self.device
         ).to(self.device)
         
         logger.info(f"DualTrackDataProcessor initialized. Transformer output dim: {self.enhanced_transformer.output_dim}")
@@ -86,25 +85,25 @@ class DualTrackDataProcessor(nn.Module):
                       raw_ohlcv_data_batch: Optional[List[pd.DataFrame]] = None # For GMM
                      ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        處理一個批次的數據，生成原始特徵和高維特徵。
+        è™•ç†ä¸€å€‹æ‰¹æ¬¡çš„æ•¸æ“šï¼Œç”ŸæˆåŽŸå§‹ç‰¹å¾µå’Œé«˜ç¶­ç‰¹å¾µã€‚
 
         Args:
-            features_batch (torch.Tensor): 來自 UniversalMemoryMappedDataset 的預處理特徵。
-                                          形狀: (batch_size, num_symbols, timesteps_history, num_features_per_symbol)
-            raw_prices_batch (torch.Tensor): 來自 UniversalMemoryMappedDataset 的原始價格數據。
-                                            形狀: (batch_size, num_symbols, timesteps_history, num_raw_price_features)
-            symbol_ids_batch (Optional[torch.Tensor]): 符號 ID，形狀 (batch_size, num_symbols)。
-            padding_mask_batch (Optional[torch.Tensor]): 填充遮罩，形狀 (batch_size, num_symbols)。
-                                                          True 表示該符號是填充的虛擬符號。
-            raw_ohlcv_data_batch (Optional[List[pd.DataFrame]]): 原始 OHLCV 數據，用於 GMM。
+            features_batch (torch.Tensor): ä¾†è‡ª UniversalMemoryMappedDataset çš„é è™•ç†ç‰¹å¾µã€‚
+                                          å½¢ç‹€: (batch_size, num_symbols, timesteps_history, num_features_per_symbol)
+            raw_prices_batch (torch.Tensor): ä¾†è‡ª UniversalMemoryMappedDataset çš„åŽŸå§‹åƒ¹æ ¼æ•¸æ“šã€‚
+                                            å½¢ç‹€: (batch_size, num_symbols, timesteps_history, num_raw_price_features)
+            symbol_ids_batch (Optional[torch.Tensor]): ç¬¦è™Ÿ IDï¼Œå½¢ç‹€ (batch_size, num_symbols)ã€‚
+            padding_mask_batch (Optional[torch.Tensor]): å¡«å……é®ç½©ï¼Œå½¢ç‹€ (batch_size, num_symbols)ã€‚
+                                                          True è¡¨ç¤ºè©²ç¬¦è™Ÿæ˜¯å¡«å……çš„è™›æ“¬ç¬¦è™Ÿã€‚
+            raw_ohlcv_data_batch (Optional[List[pd.DataFrame]]): åŽŸå§‹ OHLCV æ•¸æ“šï¼Œç”¨æ–¼ GMMã€‚
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
-                - raw_features (torch.Tensor): 作為原始特徵的 features_batch。
-                - transformed_features (torch.Tensor): 來自 EnhancedTransformer 的高維特徵。
-                                                       形狀: (batch_size, num_symbols, transformer_output_dim)
+                - raw_features (torch.Tensor): ä½œç‚ºåŽŸå§‹ç‰¹å¾µçš„ features_batchã€‚
+                - transformed_features (torch.Tensor): ä¾†è‡ª EnhancedTransformer çš„é«˜ç¶­ç‰¹å¾µã€‚
+                                                       å½¢ç‹€: (batch_size, num_symbols, transformer_output_dim)
         """
-        # 確保所有輸入張量都在正確的設備上
+        # ç¢ºä¿æ‰€æœ‰è¼¸å…¥å¼µé‡éƒ½åœ¨æ­£ç¢ºçš„è¨­å‚™ä¸Š
         features_batch = features_batch.to(self.device)
         raw_prices_batch = raw_prices_batch.to(self.device)
         if symbol_ids_batch is not None:
@@ -112,22 +111,23 @@ class DualTrackDataProcessor(nn.Module):
         if padding_mask_batch is not None:
             padding_mask_batch = padding_mask_batch.to(self.device)
 
-        # 1. 原始特徵 (Raw Features): 直接使用來自 UniversalMemoryMappedDataset 的 features_batch
-        # 計畫中提到 "原始特徵 (Raw Features): 經過標準化和預處理的價量數據"，
-        # 這與 UniversalMemoryMappedDataset 輸出的 features_batch 相符。
+        # 1. åŽŸå§‹ç‰¹å¾µ (Raw Features): ç›´æŽ¥ä½¿ç”¨ä¾†è‡ª UniversalMemoryMappedDataset çš„ features_batch
+        # è¨ˆç•«ä¸­æåˆ° "åŽŸå§‹ç‰¹å¾µ (Raw Features): ç¶“éŽæ¨™æº–åŒ–å’Œé è™•ç†çš„åƒ¹é‡æ•¸æ“š"ï¼Œ
+        # é€™èˆ‡ UniversalMemoryMappedDataset è¼¸å‡ºçš„ features_batch ç›¸ç¬¦ã€‚
         raw_features = features_batch
 
-        # 2. 高維特徵 (Transformed Features): 透過 EnhancedTransformer 處理
-        # EnhancedTransformer 期望的輸入字典
+        # 2. é«˜ç¶­ç‰¹å¾µ (Transformed Features): é€éŽ EnhancedTransformer è™•ç†
+        # EnhancedTransformer æœŸæœ›çš„è¼¸å…¥å­—å…¸
         transformer_input_dict = {
-            "src": features_batch, # 主要輸入
+            "src": features_batch, # ä¸»è¦è¼¸å…¥
             "symbol_ids": symbol_ids_batch,
             "src_key_padding_mask": padding_mask_batch,
-            "raw_ohlcv_data_batch": raw_ohlcv_data_batch # 傳遞給 GMM 使用
+            "raw_ohlcv_data_batch": raw_ohlcv_data_batch # å‚³éžçµ¦ GMM ä½¿ç”¨
         }
         
-        # 執行 EnhancedTransformer 的前向傳播
-        # EnhancedTransformer 的輸出形狀預期為 (batch_size, num_symbols, output_dim)
+        # åŸ·è¡Œ EnhancedTransformer çš„å‰å‘å‚³æ’­
+        # EnhancedTransformer çš„è¼¸å‡ºå½¢ç‹€é æœŸç‚º (batch_size, num_symbols, output_dim)
         transformed_features = self.enhanced_transformer(transformer_input_dict)
         
         return raw_features, transformed_features
+

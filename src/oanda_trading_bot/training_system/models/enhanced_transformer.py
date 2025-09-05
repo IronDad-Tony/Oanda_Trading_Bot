@@ -1,14 +1,14 @@
 # src/models/enhanced_transformer.py
 """
-增強版通用多資產交易Transformer模型
-基於原有UniversalTradingTransformer，大幅提升模型複雜度和學習能力
+å¢žå¼·ç‰ˆé€šç”¨å¤šè³‡ç”¢äº¤æ˜“Transformeræ¨¡åž‹
+åŸºæ–¼åŽŸæœ‰UniversalTradingTransformerï¼Œå¤§å¹…æå‡æ¨¡åž‹è¤‡é›œåº¦å’Œå­¸ç¿’èƒ½åŠ›
 
-主要增強：
-1. 深度架構：12-16層Transformer
-2. 多尺度特徵提取：並行處理不同時間窗口
-3. 自適應注意力機制：動態調整注意力權重
-4. 跨時間尺度融合：整合多個時間維度信息
-5. 殘差連接優化：改善深度網絡訓練
+ä¸»è¦å¢žå¼·ï¼š
+1. æ·±åº¦æž¶æ§‹ï¼š12-16å±¤Transformer
+2. å¤šå°ºåº¦ç‰¹å¾µæå–ï¼šä¸¦è¡Œè™•ç†ä¸åŒæ™‚é–“çª—å£
+3. è‡ªé©æ‡‰æ³¨æ„åŠ›æ©Ÿåˆ¶ï¼šå‹•æ…‹èª¿æ•´æ³¨æ„åŠ›æ¬Šé‡
+4. è·¨æ™‚é–“å°ºåº¦èžåˆï¼šæ•´åˆå¤šå€‹æ™‚é–“ç¶­åº¦ä¿¡æ¯
+5. æ®˜å·®é€£æŽ¥å„ªåŒ–ï¼šæ”¹å–„æ·±åº¦ç¶²çµ¡è¨“ç·´
 """
 
 import torch
@@ -21,8 +21,9 @@ import logging
 import pywt # Added for wavelet functionality
 import os # Added for os.path.exists
 from oanda_trading_bot.training_system.features.market_state_detector import GMMMarketStateDetector # Added for GMM integration
-from oanda_trading_bot.training_system.models.transformer_model import PositionalEncoding # Added import
-from oanda_trading_bot.training_system.models.custom_layers import CrossTimeScaleFusion # <--- 導入 CrossTimeScaleFusion
+from oanda_trading_bot.training_system.models.transformer_model import PositionalEncoding
+from oanda_trading_bot.training_system.models.custom_layers import CrossTimeScaleFusion
+from oanda_trading_bot.training_system.models.graph_layers import GraphBlock
 
 try:
     from oanda_trading_bot.training_system.common.logger_setup import logger
@@ -256,14 +257,14 @@ class MultiLevelWaveletBlock(nn.Module):
 
 
 class MultiScaleFeatureExtractor(nn.Module):
-    """多尺度特徵提取器：並行處理不同時間窗口"""
+    """å¤šå°ºåº¦ç‰¹å¾µæå–å™¨ï¼šä¸¦è¡Œè™•ç†ä¸åŒæ™‚é–“çª—å£"""
     
     def __init__(self, input_dim: int, hidden_dim: int, scales: List[int] = [3, 5, 7, 11]):
         super().__init__()
         self.scales = scales
         self.hidden_dim = hidden_dim
         
-        # 每個尺度的卷積層
+        # æ¯å€‹å°ºåº¦çš„å·ç©å±¤
         num_scales = len(scales)
         base_out_channels = hidden_dim // num_scales
         remainder = hidden_dim % num_scales
@@ -280,7 +281,7 @@ class MultiScaleFeatureExtractor(nn.Module):
                          kernel_size=scale, padding=scale//2, groups=1)
             )
         
-        # 特徵融合層
+        # ç‰¹å¾µèžåˆå±¤
         # The input to this linear layer is the sum of current_out_channels, which should now be hidden_dim
         self.fusion_layer = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim), # This should now be correct
@@ -289,16 +290,16 @@ class MultiScaleFeatureExtractor(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # 時間注意力權重
+        # æ™‚é–“æ³¨æ„åŠ›æ¬Šé‡
         self.temporal_attention = nn.MultiheadAttention(
             embed_dim=hidden_dim,
-            num_heads=8, # 可以考慮也設為可配置
+            num_heads=8, # å¯ä»¥è€ƒæ…®ä¹Ÿè¨­ç‚ºå¯é…ç½®
             batch_first=True
         )
 
-        # 自適應池化層
-        # 假設我們希望將序列長度池化到 TIMESTEPS // 2，或者一個可配置的固定值
-        # 這裡我們暫時使用 TIMESTEPS // 2 作為示例
+        # è‡ªé©æ‡‰æ± åŒ–å±¤
+        # å‡è¨­æˆ‘å€‘å¸Œæœ›å°‡åºåˆ—é•·åº¦æ± åŒ–åˆ° TIMESTEPS // 2ï¼Œæˆ–è€…ä¸€å€‹å¯é…ç½®çš„å›ºå®šå€¼
+        # é€™è£¡æˆ‘å€‘æš«æ™‚ä½¿ç”¨ TIMESTEPS // 2 ä½œç‚ºç¤ºä¾‹
         self.adaptive_pool_output_size = TIMESTEPS // 2 
         self.adaptive_pool = nn.AdaptiveAvgPool1d(output_size=self.adaptive_pool_output_size)
         
@@ -307,57 +308,57 @@ class MultiScaleFeatureExtractor(nn.Module):
         Args:
             x: [batch_size, seq_len, input_dim]
         Returns:
-            多尺度融合特徵: [batch_size, pooled_seq_len, hidden_dim]
+            å¤šå°ºåº¦èžåˆç‰¹å¾µ: [batch_size, pooled_seq_len, hidden_dim]
         """
         batch_size, seq_len, input_dim = x.shape
         
-        # 轉換為卷積格式: [batch, channels, seq_len]
+        # è½‰æ›ç‚ºå·ç©æ ¼å¼: [batch, channels, seq_len]
         x_conv = x.transpose(1, 2)
         
-        # 並行多尺度特徵提取
+        # ä¸¦è¡Œå¤šå°ºåº¦ç‰¹å¾µæå–
         scale_features = []
         for conv in self.scale_convs:
             scale_feat = conv(x_conv)  # [batch, hidden_dim//len(scales), seq_len]
             scale_features.append(scale_feat)
         
-        # 拼接所有尺度特徵
+        # æ‹¼æŽ¥æ‰€æœ‰å°ºåº¦ç‰¹å¾µ
         multi_scale = torch.cat(scale_features, dim=1)  # [batch, hidden_dim, seq_len]
         
-        # 轉回時序格式
+        # è½‰å›žæ™‚åºæ ¼å¼
         multi_scale = multi_scale.transpose(1, 2)  # [batch, seq_len, hidden_dim]
         
-        # 特徵融合
+        # ç‰¹å¾µèžåˆ
         fused_features = self.fusion_layer(multi_scale)
         
-        # 時間維度自注意力
+        # æ™‚é–“ç¶­åº¦è‡ªæ³¨æ„åŠ›
         attended_features, _ = self.temporal_attention(
             fused_features, fused_features, fused_features
         )
         
-        # 殘差連接
+        # æ®˜å·®é€£æŽ¥
         output_features = attended_features + fused_features
 
-        # 應用自適應池化
-        # 轉換為池化層期望的格式: [batch, channels, seq_len]
-        # 在這裡, channels 是 hidden_dim, seq_len 是當前的序列長度
+        # æ‡‰ç”¨è‡ªé©æ‡‰æ± åŒ–
+        # è½‰æ›ç‚ºæ± åŒ–å±¤æœŸæœ›çš„æ ¼å¼: [batch, channels, seq_len]
+        # åœ¨é€™è£¡, channels æ˜¯ hidden_dim, seq_len æ˜¯ç•¶å‰çš„åºåˆ—é•·åº¦
         output_features_pooled = output_features.transpose(1, 2) # [batch_size, hidden_dim, seq_len]
         output_features_pooled = self.adaptive_pool(output_features_pooled) # [batch_size, hidden_dim, self.adaptive_pool_output_size]
         
-        # 轉回標準格式: [batch_size, pooled_seq_len, hidden_dim]
+        # è½‰å›žæ¨™æº–æ ¼å¼: [batch_size, pooled_seq_len, hidden_dim]
         output_features_pooled = output_features_pooled.transpose(1, 2)
         
         return output_features_pooled
 
 
 class MarketStateDetector(nn.Module):
-    """市場狀態檢測器：檢測趨勢、波動、均值回歸、突破等市場狀態"""
+    """å¸‚å ´ç‹€æ…‹æª¢æ¸¬å™¨ï¼šæª¢æ¸¬è¶¨å‹¢ã€æ³¢å‹•ã€å‡å€¼å›žæ­¸ã€çªç ´ç­‰å¸‚å ´ç‹€æ…‹"""
     
     def __init__(self, d_model: int, num_market_states: int = 4): # Added num_market_states
         super().__init__()
         self.d_model = d_model
         self.num_market_states = num_market_states # Store it
         
-        # 狀態特徵提取器
+        # ç‹€æ…‹ç‰¹å¾µæå–å™¨
         self.state_extractors = nn.ModuleDict({
             'trend': nn.Sequential(
                 nn.Linear(d_model, d_model // 2),
@@ -385,7 +386,7 @@ class MarketStateDetector(nn.Module):
             )
         })
         
-        # 狀態融合網絡
+        # ç‹€æ…‹èžåˆç¶²çµ¡
         # Input features: 1 (trend) + 1 (volatility) + 1 (momentum) + num_market_states (regime)
         fusion_input_dim = 3 + self.num_market_states
         self.state_fusion = nn.Sequential(
@@ -400,15 +401,15 @@ class MarketStateDetector(nn.Module):
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]: # Return type changed for clarity, was torch.Tensor
         """
         Args:
-            x: [batch_size, d_model] 或 [batch_size, seq_len, d_model]
+            x: [batch_size, d_model] æˆ– [batch_size, seq_len, d_model]
         Returns:
-            包含各種市場狀態的字典
+            åŒ…å«å„ç¨®å¸‚å ´ç‹€æ…‹çš„å­—å…¸
         """
         if x.dim() == 3:
-            # 如果是序列，取平均
+            # å¦‚æžœæ˜¯åºåˆ—ï¼Œå–å¹³å‡
             x = x.mean(dim=1)
         
-        # 提取各種狀態特徵
+        # æå–å„ç¨®ç‹€æ…‹ç‰¹å¾µ
         states = {}
         state_features = []
         
@@ -421,7 +422,7 @@ class MarketStateDetector(nn.Module):
             else:
                 state_features.append(state_value)  # [batch, 1]
         
-        # 拼接所有狀態特徵
+        # æ‹¼æŽ¥æ‰€æœ‰ç‹€æ…‹ç‰¹å¾µ
         # concatenated_states = torch.cat(state_features, dim=-1)  # [batch, 7]
         # Corrected concatenation logic
         processed_state_features = []
@@ -432,7 +433,7 @@ class MarketStateDetector(nn.Module):
                 processed_state_features.append(feat)
         concatenated_states = torch.cat(processed_state_features, dim=-1) # [batch, 3 + num_market_states]
         
-        # 融合得到最終市場狀態
+        # èžåˆå¾—åˆ°æœ€çµ‚å¸‚å ´ç‹€æ…‹
         final_market_state = self.state_fusion(concatenated_states)
         states['final_state'] = final_market_state # [batch, num_market_states]
         
@@ -440,7 +441,7 @@ class MarketStateDetector(nn.Module):
 
 
 class AdaptiveAttentionLayer(nn.Module):
-    """自適應注意力層：根據市場狀態動態調整注意力模式"""
+    """è‡ªé©æ‡‰æ³¨æ„åŠ›å±¤ï¼šæ ¹æ“šå¸‚å ´ç‹€æ…‹å‹•æ…‹èª¿æ•´æ³¨æ„åŠ›æ¨¡å¼"""
     
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1, num_market_states: int = 4): # Added num_market_states
         super().__init__()
@@ -542,7 +543,7 @@ class AdaptiveAttentionLayer(nn.Module):
 
 
 class EnhancedTransformerLayer(nn.Module):
-    """增強版Transformer層：集成自適應注意力和改進的FFN"""
+    """å¢žå¼·ç‰ˆTransformerå±¤ï¼šé›†æˆè‡ªé©æ‡‰æ³¨æ„åŠ›å’Œæ”¹é€²çš„FFN"""
     
     def __init__(self, d_model: int, num_heads: int, ffn_dim: int, 
                  dropout: float = 0.1, use_adaptive_attention: bool = True, num_market_states: int = 4,
@@ -551,7 +552,7 @@ class EnhancedTransformerLayer(nn.Module):
         self.use_adaptive_attention = use_adaptive_attention
         self.use_layer_norm_before = use_layer_norm_before # Store the parameter
         
-        # 自適應注意力層 or 標準多頭注意力
+        # è‡ªé©æ‡‰æ³¨æ„åŠ›å±¤ or æ¨™æº–å¤šé ­æ³¨æ„åŠ›
         if self.use_adaptive_attention:
             self.attention_layer = AdaptiveAttentionLayer(d_model, num_heads, dropout, num_market_states=num_market_states)
         else:
@@ -563,7 +564,7 @@ class EnhancedTransformerLayer(nn.Module):
                 batch_first=True
             )
 
-        # 增強的前饋網絡
+        # å¢žå¼·çš„å‰é¥‹ç¶²çµ¡
         self.ffn = nn.Sequential(
             nn.Linear(d_model, ffn_dim),
             nn.GELU(),
@@ -575,11 +576,11 @@ class EnhancedTransformerLayer(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # 層歸一化
+        # å±¤æ­¸ä¸€åŒ–
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         
-        # 門控機制
+        # é–€æŽ§æ©Ÿåˆ¶
         self.gate = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.Sigmoid()
@@ -589,7 +590,7 @@ class EnhancedTransformerLayer(nn.Module):
                 key_padding_mask: Optional[torch.Tensor] = None,
                 external_market_state_probs: Optional[torch.Tensor] = None) -> torch.Tensor: # MODIFIED PARAMETER
         
-        # 自適應注意力子層
+        # è‡ªé©æ‡‰æ³¨æ„åŠ›å­å±¤
         normed_x = self.norm1(x)
         if self.use_adaptive_attention:
             # Pass external_market_state_probs to AdaptiveAttentionLayer
@@ -605,7 +606,7 @@ class EnhancedTransformerLayer(nn.Module):
                                           # However, AdaptiveAttentionLayer *does* include a residual.
                                           # This means behavior differs based on use_adaptive_attention.
         
-        # FFN子層
+        # FFNå­å±¤
         ffn_input = self.norm2(attn_output) # If attn_output doesn't have residual, this norm is on raw attention.
         ffn_output = self.ffn(ffn_input)
         
@@ -653,7 +654,11 @@ class EnhancedTransformer(nn.Module):
                  use_layer_norm_before: bool = True, 
                  output_activation: Optional[str] = None, 
                  positional_encoding_type: str = "sinusoidal", 
-                 device: str = DEVICE
+                 device: str = DEVICE,
+                 use_graph_attn: bool = False,
+                 graph_layers: int = 0,
+                 graph_heads: int = 4,
+                 graph_topk: int = 5
                 ):
         super().__init__()
         self.device = device
@@ -748,21 +753,21 @@ class EnhancedTransformer(nn.Module):
         
         # --- Cross-Time-Scale Fusion (CTS) Initialization ---
         if self.use_cts_fusion:
-            # 如果未提供 cts_time_scales, 使用預設值
+            # å¦‚æžœæœªæä¾› cts_time_scales, ä½¿ç”¨é è¨­å€¼
             if cts_time_scales is None:
-                cts_time_scales = [1, 3, 5] # 預設時間尺度: 包含原始尺度(1), 短期(3), 中期(5)
-                logger.info(f"CrossTimeScaleFusion: 'cts_time_scales' 未提供, 使用預設值: {cts_time_scales}")
+                cts_time_scales = [1, 3, 5] # é è¨­æ™‚é–“å°ºåº¦: åŒ…å«åŽŸå§‹å°ºåº¦(1), çŸ­æœŸ(3), ä¸­æœŸ(5)
+                logger.info(f"CrossTimeScaleFusion: 'cts_time_scales' æœªæä¾›, ä½¿ç”¨é è¨­å€¼: {cts_time_scales}")
             
             self.cts_fusion_module = CrossTimeScaleFusion(
                 d_model=d_model,
                 time_scales=cts_time_scales,
-                fusion_type=cts_fusion_type, # 從配置中讀取融合類型
-                dropout_rate=dropout # 使用模型主 dropout 率
+                fusion_type=cts_fusion_type, # å¾žé…ç½®ä¸­è®€å–èžåˆé¡žåž‹
+                dropout_rate=dropout # ä½¿ç”¨æ¨¡åž‹ä¸» dropout çŽ‡
             )
-            logger.info(f"CrossTimeScaleFusion 模組已啟用, 類型: {cts_fusion_type}, 尺度: {cts_time_scales}.")
+            logger.info(f"CrossTimeScaleFusion æ¨¡çµ„å·²å•Ÿç”¨, é¡žåž‹: {cts_fusion_type}, å°ºåº¦: {cts_time_scales}.")
         else:
             self.cts_fusion_module = None
-            logger.info("CrossTimeScaleFusion 模組未啟用。")
+            logger.info("CrossTimeScaleFusion æ¨¡çµ„æœªå•Ÿç”¨ã€‚")
 
         # --- Cross-Asset Attention Initialization (optional) ---
         if self.use_cross_asset_attention and self.num_cross_asset_layers > 0:
@@ -810,10 +815,10 @@ class EnhancedTransformer(nn.Module):
         else:
             self.output_activation_fn = nn.Identity()
             
-        self.dropout_layer = nn.Dropout(dropout) # 通用 dropout 層
+        self.dropout_layer = nn.Dropout(dropout) # é€šç”¨ dropout å±¤
 
     def _generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
-        """生成自回歸任務所需的方形後續遮罩"""
+        """ç”Ÿæˆè‡ªå›žæ­¸ä»»å‹™æ‰€éœ€çš„æ–¹å½¢å¾ŒçºŒé®ç½©"""
         mask = (torch.triu(torch.ones(sz, sz), diagonal=1) == 1).transpose(0, 1)
         return mask
 
@@ -978,7 +983,7 @@ class EnhancedTransformer(nn.Module):
         x = self.final_norm(x) 
 
         if return_full_sequence:
-            # 回傳完整序列 [batch, num_symbols, seq_len, d_model]
+            # å›žå‚³å®Œæ•´åºåˆ— [batch, num_symbols, seq_len, d_model]
             x_full = x.reshape(batch_size, num_active_symbols, seq_len, self.d_model)
             if symbol_padding_mask is not None:
                 mask_expanded = symbol_padding_mask.unsqueeze(-1).unsqueeze(-1).expand_as(x_full)
@@ -1088,3 +1093,5 @@ class EnhancedTransformer(nn.Module):
         return config
 
 # Ensure this class is defined after all its dependencies like EnhancedTransformerLayer, etc.
+
+
