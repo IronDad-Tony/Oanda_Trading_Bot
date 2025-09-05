@@ -1,78 +1,79 @@
-# src/common/config.py
+﻿# src/common/config.py
 """
-核心配置文件
-儲存專案中常用的固定參數和路徑設置。
+æ ¸å¿ƒé…ç½®æ–‡ä»¶
+å„²å­˜å°ˆæ¡ˆä¸­å¸¸ç”¨çš„å›ºå®šåƒæ•¸å’Œè·¯å¾‘è¨­ç½®ã€‚
 """
 import os
 from pathlib import Path
 import torch
 from dotenv import load_dotenv
 
-# 避免循環導入，推遲日誌記錄器的導入
+# é¿å…å¾ªç’°å°Žå…¥ï¼ŒæŽ¨é²æ—¥èªŒè¨˜éŒ„å™¨çš„å°Žå…¥
 
-# --- 基礎路徑 ---
-# Path(__file__) 會獲取當前文件 (config.py) 的路徑
-# .resolve() 將路徑轉換為絕對路徑
-# .parent 指向上一級目錄 (common)
-# .parent.parent.parent.parent.parent 指向專案根目錄
+# --- åŸºç¤Žè·¯å¾‘ ---
+# Path(__file__) æœƒç²å–ç•¶å‰æ–‡ä»¶ (config.py) çš„è·¯å¾‘
+# .resolve() å°‡è·¯å¾‘è½‰æ›ç‚ºçµ•å°è·¯å¾‘
+# .parent æŒ‡å‘ä¸Šä¸€ç´šç›®éŒ„ (common)
+# .parent.parent.parent.parent.parent æŒ‡å‘å°ˆæ¡ˆæ ¹ç›®éŒ„
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
-print(f"BASE_DIR in config.py: {BASE_DIR}") # 調試時使用
+print(f"BASE_DIR in config.py: {BASE_DIR}") # èª¿è©¦æ™‚ä½¿ç”¨
 
-# 新增：指向 enhanced_transformer_config.json 的路徑
+# æ–°å¢žï¼šæŒ‡å‘ enhanced_transformer_config.json çš„è·¯å¾‘
 ENHANCED_TRANSFORMER_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_transformer_config.json"
 
-# 新增：指向 quantum_strategy_config.json 的路徑
+# æ–°å¢žï¼šæŒ‡å‘ quantum_strategy_config.json çš„è·¯å¾‘
 QUANTUM_STRATEGY_CONFIG_PATH = BASE_DIR / "configs" / "quantum_strategy_config.json"
 
-# 新增：指向 enhanced_model_config.json 的路徑
+# æ–°å¢žï¼šæŒ‡å‘ enhanced_model_config.json çš„è·¯å¾‘
 ENHANCED_MODEL_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_model_config.json"
 
-# --- Quantum Strategy 配置 ---
-QUANTUM_STRATEGY_NUM_STRATEGIES = 28  # 總策略數量，根據 strategies/__init__.py 自動更新或手動確認
+# --- Quantum Strategy é…ç½® ---
+QUANTUM_STRATEGY_NUM_STRATEGIES = 28  # ç¸½ç­–ç•¥æ•¸é‡ï¼Œæ ¹æ“š strategies/__init__.py è‡ªå‹•æ›´æ–°æˆ–æ‰‹å‹•ç¢ºèª
 QUANTUM_STRATEGY_DROPOUT_RATE = 0.1 # Dropout rate for quantum strategy layer
 QUANTUM_STRATEGY_INITIAL_TEMPERATURE = 1.0 # Initial temperature for Gumbel-Softmax
 QUANTUM_STRATEGY_USE_GUMBEL_SOFTMAX = True # Whether to use Gumbel-Softmax for strategy selection
 QUANTUM_ADAPTIVE_LR = 0.0001 # Learning rate for the quantum strategy layer's adaptive weights
 QUANTUM_PERFORMANCE_EMA_ALPHA = 0.1 # EMA alpha for tracking strategy performance
 
-# 加載 .env 文件中的環境變量
-# load_dotenv 會自動尋找專案根目錄下的 .env 文件
+# åŠ è¼‰ .env æ–‡ä»¶ä¸­çš„ç’°å¢ƒè®Šé‡
+# load_dotenv æœƒè‡ªå‹•å°‹æ‰¾å°ˆæ¡ˆæ ¹ç›®éŒ„ä¸‹çš„ .env æ–‡ä»¶
 dotenv_path = BASE_DIR / ".env"
 if dotenv_path.exists():
     load_dotenv(dotenv_path=dotenv_path)
-    print(f".env file loaded from: {dotenv_path}") # 調試時使用
+    print(f".env file loaded from: {dotenv_path}") # èª¿è©¦æ™‚ä½¿ç”¨
 else:
-    print(f".env file not found at: {dotenv_path}, please create it.") # 調試時使用
-    # 在實際部署或運行時，如果.env不存在，應該有更強的警告或錯誤處理
+    print(f".env file not found at: {dotenv_path}, please create it.") # èª¿è©¦æ™‚ä½¿ç”¨
+    # åœ¨å¯¦éš›éƒ¨ç½²æˆ–é‹è¡Œæ™‚ï¼Œå¦‚æžœ.envä¸å­˜åœ¨ï¼Œæ‡‰è©²æœ‰æ›´å¼·çš„è­¦å‘Šæˆ–éŒ¯èª¤è™•ç†
     pass
 
-# --- OANDA API 配置 ---
+# --- OANDA API é…ç½® ---
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
-OANDA_BASE_URL = os.getenv("OANDA_BASE_URL", "https://api-fxpractice.oanda.com/v3") # 默認為練習帳戶
-ACCOUNT_CURRENCY = os.getenv("ACCOUNT_CURRENCY", "AUD") # 您的帳戶基礎貨幣
+OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice").lower()
+OANDA_BASE_URL = os.getenv("OANDA_BASE_URL") or ("https://api-fxtrade.oanda.com/v3" if OANDA_ENVIRONMENT=="live" else "https://api-fxpractice.oanda.com/v3")
+ACCOUNT_CURRENCY = os.getenv("ACCOUNT_CURRENCY", "AUD") # æ‚¨çš„å¸³æˆ¶åŸºç¤Žè²¨å¹£
 
-# --- 數據庫與文件路徑 ---
+# --- æ•¸æ“šåº«èˆ‡æ–‡ä»¶è·¯å¾‘ ---
 DATABASE_DIR = BASE_DIR / "data" / "database"
-DATABASE_NAME = "oanda_s5_data.db" # S5數據的資料庫名
+DATABASE_NAME = "oanda_s5_data.db" # S5æ•¸æ“šçš„è³‡æ–™åº«å
 DATABASE_PATH = DATABASE_DIR / DATABASE_NAME
 
-WEIGHTS_DIR = BASE_DIR / "weights" # 儲存模型權重
-LOGS_DIR = BASE_DIR / "logs" # 儲存日誌文件
-MMAP_DATA_DIR = BASE_DIR / "data" / "mmap_s5_universal" # 記憶體映射文件的儲存位置
+WEIGHTS_DIR = BASE_DIR / "weights" # å„²å­˜æ¨¡åž‹æ¬Šé‡
+LOGS_DIR = BASE_DIR / "logs" # å„²å­˜æ—¥èªŒæ–‡ä»¶
+MMAP_DATA_DIR = BASE_DIR / "data" / "mmap_s5_universal" # è¨˜æ†¶é«”æ˜ å°„æ–‡ä»¶çš„å„²å­˜ä½ç½®
 
-# 確保目錄存在
+# ç¢ºä¿ç›®éŒ„å­˜åœ¨
 DATABASE_DIR.mkdir(parents=True, exist_ok=True)
 WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 MMAP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- 數據參數 ---
-# 初始考慮的交易對列表 (可以從UI選擇，這裡作為預設或後備)
-# 為了快速啟動，先用幾個常見的，您可以後續修改或通過UI傳入
+# --- æ•¸æ“šåƒæ•¸ ---
+# åˆå§‹è€ƒæ…®çš„äº¤æ˜“å°åˆ—è¡¨ (å¯ä»¥å¾žUIé¸æ“‡ï¼Œé€™è£¡ä½œç‚ºé è¨­æˆ–å¾Œå‚™)
+# ç‚ºäº†å¿«é€Ÿå•Ÿå‹•ï¼Œå…ˆç”¨å¹¾å€‹å¸¸è¦‹çš„ï¼Œæ‚¨å¯ä»¥å¾ŒçºŒä¿®æ”¹æˆ–é€šéŽUIå‚³å…¥
 DEFAULT_SYMBOLS = ["EUR_USD", "USD_JPY", "GBP_USD", "AUD_USD", "XAU_USD"]
-GRANULARITY = "S5" # 數據時間粒度
-MAX_SYMBOLS_ALLOWED = 10 # UI允許選擇的最大交易對數量 (用於Transformer輸入維度等)
+GRANULARITY = "S5" # æ•¸æ“šæ™‚é–“ç²’åº¦
+MAX_SYMBOLS_ALLOWED = 10 # UIå…è¨±é¸æ“‡çš„æœ€å¤§äº¤æ˜“å°æ•¸é‡ (ç”¨æ–¼Transformerè¼¸å…¥ç¶­åº¦ç­‰)
 PRICE_COLUMNS = ['bid_open', 'bid_high', 'bid_low', 'bid_close',
                  'ask_open', 'ask_high', 'ask_low', 'ask_close', 'volume']
 PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
@@ -81,110 +82,110 @@ PRICE_TYPES = {'open': ['bid_open', 'ask_open'],
                'close': ['bid_close', 'ask_close']}
 
 
-# --- 模型與訓練參數 ---
-# Large Transformer 配置 - Phase 4 升級
-TIMESTEPS = 128             # 輸入Transformer的時間步長 (序列長度)
-TRANSFORMER_MODEL_DIM = 512 # Large Transformer維度 (從512提升到768)
-TRANSFORMER_NUM_LAYERS = 12  # Large模型層數 (從12提升到16)
-TRANSFORMER_NUM_HEADS = 16   # Large模型注意力頭數 (從16提升到24)
-TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 2  # FFN維度 (3072)
+# --- æ¨¡åž‹èˆ‡è¨“ç·´åƒæ•¸ ---
+# Large Transformer é…ç½® - Phase 4 å‡ç´š
+TIMESTEPS = 128             # è¼¸å…¥Transformerçš„æ™‚é–“æ­¥é•· (åºåˆ—é•·åº¦)
+TRANSFORMER_MODEL_DIM = 512 # Large Transformerç¶­åº¦ (å¾ž512æå‡åˆ°768)
+TRANSFORMER_NUM_LAYERS = 12  # Largeæ¨¡åž‹å±¤æ•¸ (å¾ž12æå‡åˆ°16)
+TRANSFORMER_NUM_HEADS = 16   # Largeæ¨¡åž‹æ³¨æ„åŠ›é ­æ•¸ (å¾ž16æå‡åˆ°24)
+TRANSFORMER_FFN_DIM = TRANSFORMER_MODEL_DIM * 2  # FFNç¶­åº¦ (3072)
 TRANSFORMER_DROPOUT_RATE = 0.1
 TRANSFORMER_LAYER_NORM_EPS = 1e-5
-TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING = 5000 # PositionalEncoding 的 max_len
-TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 192     # Transformer處理後，每個symbol的輸出特徵維度 (動態適應)
+TRANSFORMER_MAX_SEQ_LEN_POS_ENCODING = 5000 # PositionalEncoding çš„ max_len
+TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 192     # Transformerè™•ç†å¾Œï¼Œæ¯å€‹symbolçš„è¼¸å‡ºç‰¹å¾µç¶­åº¦ (å‹•æ…‹é©æ‡‰)
 
-# 增強版Transformer特有配置
-ENHANCED_TRANSFORMER_USE_MULTI_SCALE = True    # 啟用多尺度特徵提取器
-ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION = True  # 啟用跨時間尺度融合
-ENHANCED_TRANSFORMER_MULTI_SCALE_KERNELS = [3, 5, 7, 11]  # 多尺度卷積核大小
-ENHANCED_TRANSFORMER_TIME_SCALES = [5, 15, 30, 60]  # 跨時間尺度
+# å¢žå¼·ç‰ˆTransformerç‰¹æœ‰é…ç½®
+ENHANCED_TRANSFORMER_USE_MULTI_SCALE = True    # å•Ÿç”¨å¤šå°ºåº¦ç‰¹å¾µæå–å™¨
+ENHANCED_TRANSFORMER_USE_CROSS_TIME_FUSION = True  # å•Ÿç”¨è·¨æ™‚é–“å°ºåº¦èžåˆ
+ENHANCED_TRANSFORMER_MULTI_SCALE_KERNELS = [3, 5, 7, 11]  # å¤šå°ºåº¦å·ç©æ ¸å¤§å°
+ENHANCED_TRANSFORMER_TIME_SCALES = [5, 15, 30, 60]  # è·¨æ™‚é–“å°ºåº¦
 
-# 新增：Fourier 和 Wavelet 特徵配置
-FOURIER_NUM_MODES = 16  # Fourier 特徵的模式數量 (可調整)
-WAVELET_LEVELS = 4      # Wavelet 分解的層級 (可調整)
-WAVELET_NAME = 'db4'    # Wavelet 母波名稱 (可調整, e.g., 'db4', 'haar', 'sym5')
+# æ–°å¢žï¼šFourier å’Œ Wavelet ç‰¹å¾µé…ç½®
+FOURIER_NUM_MODES = 16  # Fourier ç‰¹å¾µçš„æ¨¡å¼æ•¸é‡ (å¯èª¿æ•´)
+WAVELET_LEVELS = 4      # Wavelet åˆ†è§£çš„å±¤ç´š (å¯èª¿æ•´)
+WAVELET_NAME = 'db4'    # Wavelet æ¯æ³¢åç¨± (å¯èª¿æ•´, e.g., 'db4', 'haar', 'sym5')
 
 
 # src/common/config.py
-# ... (其他配置) ...
+# ... (å…¶ä»–é…ç½®) ...
 
-# --- Trainer 與評估配置 ---
-TRAINER_DEFAULT_TOTAL_TIMESTEPS = 1_000_000 # 訓練器默認的總訓練步數
-TRAINER_MODEL_NAME_PREFIX = "sac_universal_trader" # 保存模型文件的前綴
-TRAINER_SAVE_FREQ_STEPS = 20000             # 回調中定期保存模型的頻率 (步數)
-TRAINER_EVAL_FREQ_STEPS = 10000             # 回調中執行評估的頻率 (步數)
-TRAINER_N_EVAL_EPISODES = 3                 # 每次評估運行的episode數量
-TRAINER_DETERMINISTIC_EVAL = True           # 評估時是否使用確定性動作
+# --- Trainer èˆ‡è©•ä¼°é…ç½® ---
+TRAINER_DEFAULT_TOTAL_TIMESTEPS = 1_000_000 # è¨“ç·´å™¨é»˜èªçš„ç¸½è¨“ç·´æ­¥æ•¸
+TRAINER_MODEL_NAME_PREFIX = "sac_universal_trader" # ä¿å­˜æ¨¡åž‹æ–‡ä»¶çš„å‰ç¶´
+TRAINER_SAVE_FREQ_STEPS = 20000             # å›žèª¿ä¸­å®šæœŸä¿å­˜æ¨¡åž‹çš„é »çŽ‡ (æ­¥æ•¸)
+TRAINER_EVAL_FREQ_STEPS = 10000             # å›žèª¿ä¸­åŸ·è¡Œè©•ä¼°çš„é »çŽ‡ (æ­¥æ•¸)
+TRAINER_N_EVAL_EPISODES = 3                 # æ¯æ¬¡è©•ä¼°é‹è¡Œçš„episodeæ•¸é‡
+TRAINER_DETERMINISTIC_EVAL = True           # è©•ä¼°æ™‚æ˜¯å¦ä½¿ç”¨ç¢ºå®šæ€§å‹•ä½œ
 
-# 早停相關配置 (用於 UniversalCheckpointCallback)
-EARLY_STOPPING_PATIENCE = 10 # 連續10次評估無顯著改善則早停
-EARLY_STOPPING_MIN_DELTA_PERCENT = 0.1 # 至少改善 0.1% 才算顯著 (相對於最佳值的百分比)
-EARLY_STOPPING_MIN_EVALS = 20 # 至少評估20次後才開始檢查早停
+# æ—©åœç›¸é—œé…ç½® (ç”¨æ–¼ UniversalCheckpointCallback)
+EARLY_STOPPING_PATIENCE = 10 # é€£çºŒ10æ¬¡è©•ä¼°ç„¡é¡¯è‘—æ”¹å–„å‰‡æ—©åœ
+EARLY_STOPPING_MIN_DELTA_PERCENT = 0.1 # è‡³å°‘æ”¹å–„ 0.1% æ‰ç®—é¡¯è‘— (ç›¸å°æ–¼æœ€ä½³å€¼çš„ç™¾åˆ†æ¯”)
+EARLY_STOPPING_MIN_EVALS = 20 # è‡³å°‘è©•ä¼°20æ¬¡å¾Œæ‰é–‹å§‹æª¢æŸ¥æ—©åœ
 
-# Transformer 權重範數記錄頻率 (用於 UniversalCheckpointCallback)
-# 設定為每步記錄L2範數和梯度範數
-LOG_TRANSFORMER_NORM_FREQ_STEPS = 1  # 每1步記錄一次（即每步都記錄）
+# Transformer æ¬Šé‡ç¯„æ•¸è¨˜éŒ„é »çŽ‡ (ç”¨æ–¼ UniversalCheckpointCallback)
+# è¨­å®šç‚ºæ¯æ­¥è¨˜éŒ„L2ç¯„æ•¸å’Œæ¢¯åº¦ç¯„æ•¸
+LOG_TRANSFORMER_NORM_FREQ_STEPS = 1  # æ¯1æ­¥è¨˜éŒ„ä¸€æ¬¡ï¼ˆå³æ¯æ­¥éƒ½è¨˜éŒ„ï¼‰
 
-# 劃分訓練集和驗證集的時間點 (ISO格式 UTC)
-# 示例：假設我們總共有從 2023-01-01 到 2024-01-01 的數據
-# 我們可以用前10個月做訓練，後2個月做驗證
-# 這些值需要您根據實際下載的數據範圍來設定
-# 為了能跑通，我們先設一些能用的值，您之後需要根據您的數據調整
-# 假設我們下載了從 2024-01-01 到 2024-05-24 的數據
-# 訓練集: 2024-01-01T00:00:00Z 到 2024-04-30T23:59:59Z
-# 驗證集: 2024-05-01T00:00:00Z 到 2024-05-22T23:59:59Z (假設23,24日市場關閉或數據不穩定)
-# 這些日期需要保證數據庫中有對應的數據，否則Dataset會是空的
-# 為了讓 __main__ 測試能跑，我們先用一個較短且固定的範圍
+# åŠƒåˆ†è¨“ç·´é›†å’Œé©—è­‰é›†çš„æ™‚é–“é»ž (ISOæ ¼å¼ UTC)
+# ç¤ºä¾‹ï¼šå‡è¨­æˆ‘å€‘ç¸½å…±æœ‰å¾ž 2023-01-01 åˆ° 2024-01-01 çš„æ•¸æ“š
+# æˆ‘å€‘å¯ä»¥ç”¨å‰10å€‹æœˆåšè¨“ç·´ï¼Œå¾Œ2å€‹æœˆåšé©—è­‰
+# é€™äº›å€¼éœ€è¦æ‚¨æ ¹æ“šå¯¦éš›ä¸‹è¼‰çš„æ•¸æ“šç¯„åœä¾†è¨­å®š
+# ç‚ºäº†èƒ½è·‘é€šï¼Œæˆ‘å€‘å…ˆè¨­ä¸€äº›èƒ½ç”¨çš„å€¼ï¼Œæ‚¨ä¹‹å¾Œéœ€è¦æ ¹æ“šæ‚¨çš„æ•¸æ“šèª¿æ•´
+# å‡è¨­æˆ‘å€‘ä¸‹è¼‰äº†å¾ž 2024-01-01 åˆ° 2024-05-24 çš„æ•¸æ“š
+# è¨“ç·´é›†: 2024-01-01T00:00:00Z åˆ° 2024-04-30T23:59:59Z
+# é©—è­‰é›†: 2024-05-01T00:00:00Z åˆ° 2024-05-22T23:59:59Z (å‡è¨­23,24æ—¥å¸‚å ´é—œé–‰æˆ–æ•¸æ“šä¸ç©©å®š)
+# é€™äº›æ—¥æœŸéœ€è¦ä¿è­‰æ•¸æ“šåº«ä¸­æœ‰å°æ‡‰çš„æ•¸æ“šï¼Œå¦å‰‡Datasetæœƒæ˜¯ç©ºçš„
+# ç‚ºäº†è®“ __main__ æ¸¬è©¦èƒ½è·‘ï¼Œæˆ‘å€‘å…ˆç”¨ä¸€å€‹è¼ƒçŸ­ä¸”å›ºå®šçš„ç¯„åœ
 DEFAULT_TRAIN_START_ISO = "2024-05-20T00:00:00Z"
-DEFAULT_TRAIN_END_ISO = "2024-05-21T23:59:59Z" # 2天訓練數據
+DEFAULT_TRAIN_END_ISO = "2024-05-21T23:59:59Z" # 2å¤©è¨“ç·´æ•¸æ“š
 DEFAULT_EVAL_START_ISO = "2024-05-22T00:00:00Z"
-DEFAULT_EVAL_END_ISO = "2024-05-22T11:59:59Z"  # 12小時驗證數據
+DEFAULT_EVAL_END_ISO = "2024-05-22T11:59:59Z"  # 12å°æ™‚é©—è­‰æ•¸æ“š
 
-# 確保您的 WEIGHTS_DIR/best_model 目錄存在，如果Callback要保存最佳模型到那裡
-BEST_MODEL_SUBDIR = "best_model" # 相對於 WEIGHTS_DIR
+# ç¢ºä¿æ‚¨çš„ WEIGHTS_DIR/best_model ç›®éŒ„å­˜åœ¨ï¼Œå¦‚æžœCallbackè¦ä¿å­˜æœ€ä½³æ¨¡åž‹åˆ°é‚£è£¡
+BEST_MODEL_SUBDIR = "best_model" # ç›¸å°æ–¼ WEIGHTS_DIR
 
-# SAC 相關
-SAC_GAMMA = 0.95             # 折扣因子
-SAC_LEARNING_RATE = 3e-5     # 學習率
-SAC_BATCH_SIZE = 102          # 根據用戶要求設定批次大小
-SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # 每個交易對的緩衝區大小因子，恢復為 500
-SAC_LEARNING_STARTS_FACTOR = 200 # 學習開始前收集的最小樣本數因子 (總樣本 = N_symbols * BATCH_SIZE * factor)
-SAC_TRAIN_FREQ_STEPS = 32    # 減少訓練頻率以提高效率
-SAC_GRADIENT_STEPS = 16      # 每次訓練迭代執行多少梯度步數，設定為 16
-SAC_ENT_COEF = 'auto'        # 熵系數 ('auto' 或 float)
-SAC_TARGET_UPDATE_INTERVAL = 1 # Target network 更新頻率 (相對於gradient_steps)
-SAC_TAU = 0.005              # Target network 軟更新系數
+# SAC ç›¸é—œ
+SAC_GAMMA = 0.95             # æŠ˜æ‰£å› å­
+SAC_LEARNING_RATE = 3e-5     # å­¸ç¿’çŽ‡
+SAC_BATCH_SIZE = 102          # æ ¹æ“šç”¨æˆ¶è¦æ±‚è¨­å®šæ‰¹æ¬¡å¤§å°
+SAC_BUFFER_SIZE_PER_SYMBOL_FACTOR = 500 # æ¯å€‹äº¤æ˜“å°çš„ç·©è¡å€å¤§å°å› å­ï¼Œæ¢å¾©ç‚º 500
+SAC_LEARNING_STARTS_FACTOR = 200 # å­¸ç¿’é–‹å§‹å‰æ”¶é›†çš„æœ€å°æ¨£æœ¬æ•¸å› å­ (ç¸½æ¨£æœ¬ = N_symbols * BATCH_SIZE * factor)
+SAC_TRAIN_FREQ_STEPS = 32    # æ¸›å°‘è¨“ç·´é »çŽ‡ä»¥æé«˜æ•ˆçŽ‡
+SAC_GRADIENT_STEPS = 16      # æ¯æ¬¡è¨“ç·´è¿­ä»£åŸ·è¡Œå¤šå°‘æ¢¯åº¦æ­¥æ•¸ï¼Œè¨­å®šç‚º 16
+SAC_ENT_COEF = 'auto'        # ç†µç³»æ•¸ ('auto' æˆ– float)
+SAC_TARGET_UPDATE_INTERVAL = 1 # Target network æ›´æ–°é »çŽ‡ (ç›¸å°æ–¼gradient_steps)
+SAC_TAU = 0.005              # Target network è»Ÿæ›´æ–°ç³»æ•¸
 
-# 訓練流程相關
-INITIAL_CAPITAL = 100000.0              # 初始模擬資金 (以ACCOUNT_CURRENCY計價)
-MAX_EPISODE_STEPS_DEFAULT = 100000       # 每個訓練episode的最大步數 (可調整)
-TOTAL_TRAINING_TIMESTEPS_TARGET = 10_000_000 # 總訓練目標步數 (可根據需要調整)
-SAVE_MODEL_INTERVAL_STEPS = 2000       # 模型保存間隔 (按總訓練steps)
+# è¨“ç·´æµç¨‹ç›¸é—œ
+INITIAL_CAPITAL = 100000.0              # åˆå§‹æ¨¡æ“¬è³‡é‡‘ (ä»¥ACCOUNT_CURRENCYè¨ˆåƒ¹)
+MAX_EPISODE_STEPS_DEFAULT = 100000       # æ¯å€‹è¨“ç·´episodeçš„æœ€å¤§æ­¥æ•¸ (å¯èª¿æ•´)
+TOTAL_TRAINING_TIMESTEPS_TARGET = 10_000_000 # ç¸½è¨“ç·´ç›®æ¨™æ­¥æ•¸ (å¯æ ¹æ“šéœ€è¦èª¿æ•´)
+SAVE_MODEL_INTERVAL_STEPS = 2000       # æ¨¡åž‹ä¿å­˜é–“éš” (æŒ‰ç¸½è¨“ç·´steps)
 
-# --- GPU優化配置 ---
+# --- GPUå„ªåŒ–é…ç½® ---
 def setup_gpu_optimization():
-    """設置GPU優化配置"""
+    """è¨­ç½®GPUå„ªåŒ–é…ç½®"""
     try:
         if torch.cuda.is_available():
-            # 啟用TensorFloat-32 (TF32) 以提高性能
+            # å•Ÿç”¨TensorFloat-32 (TF32) ä»¥æé«˜æ€§èƒ½
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             
-            # 設置cuDNN基準測試以優化卷積性能
+            # è¨­ç½®cuDNNåŸºæº–æ¸¬è©¦ä»¥å„ªåŒ–å·ç©æ€§èƒ½
             torch.backends.cudnn.benchmark = True
             
-            # 使用PyTorch預設的記憶體管理策略，讓CUDA自動管理
-            # 移除自定義的記憶體分配限制，讓系統動態調整
-            print("GPU優化：使用PyTorch預設記憶體管理策略")
+            # ä½¿ç”¨PyTorché è¨­çš„è¨˜æ†¶é«”ç®¡ç†ç­–ç•¥ï¼Œè®“CUDAè‡ªå‹•ç®¡ç†
+            # ç§»é™¤è‡ªå®šç¾©çš„è¨˜æ†¶é«”åˆ†é…é™åˆ¶ï¼Œè®“ç³»çµ±å‹•æ…‹èª¿æ•´
+            print("GPUå„ªåŒ–ï¼šä½¿ç”¨PyTorché è¨­è¨˜æ†¶é«”ç®¡ç†ç­–ç•¥")
             
-            # 啟用混合精度訓練
+            # å•Ÿç”¨æ··åˆç²¾åº¦è¨“ç·´
             return True
     except Exception as e:
         print(f"Warning: GPU optimization setup failed: {e}")
         print("Continuing with CPU-only mode...")
     return False
 
-# 設備配置
+# è¨­å‚™é…ç½®
 GPU_OPTIMIZED = setup_gpu_optimization()
 if torch.cuda.is_available():
     DEVICE = "cuda"
@@ -195,7 +196,7 @@ else:
     DEVICE = "cpu"
     print("CUDA GPU not detected, using CPU mode")
 
-# 混合精度訓練 (如果GPU支持且希望加速)
+# æ··åˆç²¾åº¦è¨“ç·´ (å¦‚æžœGPUæ”¯æŒä¸”å¸Œæœ›åŠ é€Ÿ)
 USE_AMP = GPU_OPTIMIZED
 
 # --- Overrides to align main training system with upgraded live pipeline ---
@@ -205,78 +206,78 @@ try:
 except Exception:
     pass
 
-# 數值穩定性配置
-GRADIENT_CLIP_NORM = 1.0            # 梯度裁剪範數
-ENABLE_GRADIENT_CLIPPING = True     # 是否啟用梯度裁剪
-NAN_CHECK_FREQUENCY = 500           # NaN檢查頻率
-AMP_LOSS_SCALE_INIT = 2**15         # AMP初始損失縮放因子 (降低以提高穩定性)
+# æ•¸å€¼ç©©å®šæ€§é…ç½®
+GRADIENT_CLIP_NORM = 1.0            # æ¢¯åº¦è£å‰ªç¯„æ•¸
+ENABLE_GRADIENT_CLIPPING = True     # æ˜¯å¦å•Ÿç”¨æ¢¯åº¦è£å‰ª
+NAN_CHECK_FREQUENCY = 500           # NaNæª¢æŸ¥é »çŽ‡
+AMP_LOSS_SCALE_INIT = 2**15         # AMPåˆå§‹æå¤±ç¸®æ”¾å› å­ (é™ä½Žä»¥æé«˜ç©©å®šæ€§)
 
-# 如果檢測到數值不穩定，自動禁用AMP
+# å¦‚æžœæª¢æ¸¬åˆ°æ•¸å€¼ä¸ç©©å®šï¼Œè‡ªå‹•ç¦ç”¨AMP
 AUTO_DISABLE_AMP_ON_INSTABILITY = True
 
-# 早期停止容忍的NaN檢測次數
+# æ—©æœŸåœæ­¢å®¹å¿çš„NaNæª¢æ¸¬æ¬¡æ•¸
 MAX_NAN_TOLERANCE = 10
 
-# --- 日誌配置 ---
-# AMP 轉換日誌控制 - 減少重複的 DEBUG 訊息頻率
-AMP_CONVERSION_LOG_INTERVAL = 100   # 每 N 次 AMP 轉換才記錄一次日誌訊息
+# --- æ—¥èªŒé…ç½® ---
+# AMP è½‰æ›æ—¥èªŒæŽ§åˆ¶ - æ¸›å°‘é‡è¤‡çš„ DEBUG è¨Šæ¯é »çŽ‡
+AMP_CONVERSION_LOG_INTERVAL = 100   # æ¯ N æ¬¡ AMP è½‰æ›æ‰è¨˜éŒ„ä¸€æ¬¡æ—¥èªŒè¨Šæ¯
 
-# --- 風險管理參數 ---
-MAX_ACCOUNT_RISK_PERCENTAGE = 0.02  # 單筆交易最大可承受賬戶風險百分比 (例如 2%)
-MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY = 0.10 # 單個倉位最大名義價值佔總淨值的百分比 (例如 10%)
-ATR_PERIOD = 28                     # 計算ATR的週期
-ATR_STOP_LOSS_MULTIPLIER = 3.5      # ATR止損倍數
-STOP_LOSS_ATR_MULTIPLIER = 3.5      # ATR止損倍數 <--- 確保這一行存在且未註釋!
-# DEFAULT_PIP_VALUE = {               # 主要貨幣對的近似點值 (相對於USD, 1標準手)
+# --- é¢¨éšªç®¡ç†åƒæ•¸ ---
+MAX_ACCOUNT_RISK_PERCENTAGE = 0.02  # å–®ç­†äº¤æ˜“æœ€å¤§å¯æ‰¿å—è³¬æˆ¶é¢¨éšªç™¾åˆ†æ¯” (ä¾‹å¦‚ 2%)
+MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY = 0.10 # å–®å€‹å€‰ä½æœ€å¤§åç¾©åƒ¹å€¼ä½”ç¸½æ·¨å€¼çš„ç™¾åˆ†æ¯” (ä¾‹å¦‚ 10%)
+ATR_PERIOD = 28                     # è¨ˆç®—ATRçš„é€±æœŸ
+ATR_STOP_LOSS_MULTIPLIER = 3.5      # ATRæ­¢æå€æ•¸
+STOP_LOSS_ATR_MULTIPLIER = 3.5      # ATRæ­¢æå€æ•¸ <--- ç¢ºä¿é€™ä¸€è¡Œå­˜åœ¨ä¸”æœªè¨»é‡‹!
+# DEFAULT_PIP_VALUE = {               # ä¸»è¦è²¨å¹£å°çš„è¿‘ä¼¼é»žå€¼ (ç›¸å°æ–¼USD, 1æ¨™æº–æ‰‹)
 #     "AUD_USD": 10.0, "EUR_USD": 10.0, "GBP_USD": 10.0,
-#     "USD_CAD": 7.0, "USD_CHF": 10.0, "USD_JPY": 9.0, # 近似值，實際會變化
-#     "XAU_USD": 10.0 # 黃金
+#     "USD_CAD": 7.0, "USD_CHF": 10.0, "USD_JPY": 9.0, # è¿‘ä¼¼å€¼ï¼Œå¯¦éš›æœƒè®ŠåŒ–
+#     "XAU_USD": 10.0 # é»ƒé‡‘
 # }
-# 實際點值和保證金率會從OANDA API獲取，這裡作為無法獲取時的後備或參考
-TRADE_COMMISSION_PERCENTAGE = 0.0  # 名義交易手續費百分比 (例如 0.01%)
-                                      # 如果OANDA點差已包含手續費，可以設為 0.0
+# å¯¦éš›é»žå€¼å’Œä¿è­‰é‡‘çŽ‡æœƒå¾žOANDA APIç²å–ï¼Œé€™è£¡ä½œç‚ºç„¡æ³•ç²å–æ™‚çš„å¾Œå‚™æˆ–åƒè€ƒ
+TRADE_COMMISSION_PERCENTAGE = 0.0  # åç¾©äº¤æ˜“æ‰‹çºŒè²»ç™¾åˆ†æ¯” (ä¾‹å¦‚ 0.01%)
+                                      # å¦‚æžœOANDAé»žå·®å·²åŒ…å«æ‰‹çºŒè²»ï¼Œå¯ä»¥è¨­ç‚º 0.0
 
-# OANDA 強制平倉保證金水平 (Margin Closeout Percentage)
+# OANDA å¼·åˆ¶å¹³å€‰ä¿è­‰é‡‘æ°´å¹³ (Margin Closeout Percentage)
 OANDA_MARGIN_CLOSEOUT_LEVEL = 0.50 # 50%
 
-# --- 實盤交易相關 ---
-LIVE_TRADING_POLL_INTERVAL = 5 # 實盤交易時輪詢市場數據和執行決策的間隔（秒）
-OANDA_MAX_BATCH_CANDLES = 4800 # OANDA API 單次請求最大蠟燭數
-OANDA_REQUEST_INTERVAL = 0.1   # API 請求間隔 (秒)，避免過於頻繁
-OANDA_API_TIMEOUT_SECONDS = 20 # <--- 新增：API請求的通用超時時間 (秒)
+# --- å¯¦ç›¤äº¤æ˜“ç›¸é—œ ---
+LIVE_TRADING_POLL_INTERVAL = 5 # å¯¦ç›¤äº¤æ˜“æ™‚è¼ªè©¢å¸‚å ´æ•¸æ“šå’ŒåŸ·è¡Œæ±ºç­–çš„é–“éš”ï¼ˆç§’ï¼‰
+OANDA_MAX_BATCH_CANDLES = 4800 # OANDA API å–®æ¬¡è«‹æ±‚æœ€å¤§è Ÿç‡­æ•¸
+OANDA_REQUEST_INTERVAL = 0.1   # API è«‹æ±‚é–“éš” (ç§’)ï¼Œé¿å…éŽæ–¼é »ç¹
+OANDA_API_TIMEOUT_SECONDS = 20 # <--- æ–°å¢žï¼šAPIè«‹æ±‚çš„é€šç”¨è¶…æ™‚æ™‚é–“ (ç§’)
 
-# --- UI 相關 ---
-STREAMLIT_THEME = "dark" # Streamlit UI主題 ("light" 或 "dark")
-PLOT_REFRESH_INTERVAL_SECONDS = 5 # UI圖表刷新間隔
-MAX_TRADE_LOG_DISPLAY = 100     # UI中顯示最近交易的條數
+# --- UI ç›¸é—œ ---
+STREAMLIT_THEME = "dark" # Streamlit UIä¸»é¡Œ ("light" æˆ– "dark")
+PLOT_REFRESH_INTERVAL_SECONDS = 5 # UIåœ–è¡¨åˆ·æ–°é–“éš”
+MAX_TRADE_LOG_DISPLAY = 100     # UIä¸­é¡¯ç¤ºæœ€è¿‘äº¤æ˜“çš„æ¢æ•¸
 
-# --- 貨幣轉換相關 ---
-# 假設基礎匯率對，用於將非USD計價的symbol盈虧轉换為USD，再轉換為ACCOUNT_CURRENCY
-# 這些會在 LiveTrader 中嘗試從OANDA獲取實時匯率，這裡僅作結構示例
+# --- è²¨å¹£è½‰æ›ç›¸é—œ ---
+# å‡è¨­åŸºç¤ŽåŒ¯çŽ‡å°ï¼Œç”¨æ–¼å°‡éžUSDè¨ˆåƒ¹çš„symbolç›ˆè™§è½‰æ¢ç‚ºUSDï¼Œå†è½‰æ›ç‚ºACCOUNT_CURRENCY
+# é€™äº›æœƒåœ¨ LiveTrader ä¸­å˜—è©¦å¾žOANDAç²å–å¯¦æ™‚åŒ¯çŽ‡ï¼Œé€™è£¡åƒ…ä½œçµæ§‹ç¤ºä¾‹
 # KEY_FOREX_PAIRS_FOR_CONVERSION = ["AUD/USD", "EUR/USD", "GBP/USD", "USD/JPY", "USD/CAD", "USD/CHF"]
 
-# --- 環境設置 (PyTorch) ---
-# 統一的CUDA內存分配配置
+# --- ç’°å¢ƒè¨­ç½® (PyTorch) ---
+# çµ±ä¸€çš„CUDAå…§å­˜åˆ†é…é…ç½®
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256,expandable_segments:True"
 
-# 這些在您的舊代碼中已有，可以保留或根據需要調整
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1' # 主要用於調試，生產環境中可考慮移除
+# é€™äº›åœ¨æ‚¨çš„èˆŠä»£ç¢¼ä¸­å·²æœ‰ï¼Œå¯ä»¥ä¿ç•™æˆ–æ ¹æ“šéœ€è¦èª¿æ•´
+# os.environ['CUDA_LAUNCH_BLOCKING'] = '1' # ä¸»è¦ç”¨æ–¼èª¿è©¦ï¼Œç”Ÿç”¢ç’°å¢ƒä¸­å¯è€ƒæ…®ç§»é™¤
 # os.environ['TORCH_USE_CUDA_DSA'] = '1'
 # torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cudnn.allow_tf32 = True
 # torch.set_float32_matmul_precision('high') # PyTorch 1.12+
 
-# 驗證API金鑰是否已加載
+# é©—è­‰APIé‡‘é‘°æ˜¯å¦å·²åŠ è¼‰
 if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
-    print(f"警告: OANDA_API_KEY 或 OANDA_ACCOUNT_ID 未在 .env 文件中找到或未正確加載。請檢查 {dotenv_path}。")
-    # 在實際運行時，這裡可能需要更強的錯誤處理，例如直接退出程序
-    # raise ValueError("OANDA API Key or Account ID not configured.") # 或者
+    print(f"è­¦å‘Š: OANDA_API_KEY æˆ– OANDA_ACCOUNT_ID æœªåœ¨ .env æ–‡ä»¶ä¸­æ‰¾åˆ°æˆ–æœªæ­£ç¢ºåŠ è¼‰ã€‚è«‹æª¢æŸ¥ {dotenv_path}ã€‚")
+    # åœ¨å¯¦éš›é‹è¡Œæ™‚ï¼Œé€™è£¡å¯èƒ½éœ€è¦æ›´å¼·çš„éŒ¯èª¤è™•ç†ï¼Œä¾‹å¦‚ç›´æŽ¥é€€å‡ºç¨‹åº
+    # raise ValueError("OANDA API Key or Account ID not configured.") # æˆ–è€…
     # sys.exit("OANDA API Key or Account ID not configured.")
 
 
-# --- 輔助函數 (可選，放在這裡方便全局訪問) ---
+# --- è¼”åŠ©å‡½æ•¸ (å¯é¸ï¼Œæ”¾åœ¨é€™è£¡æ–¹ä¾¿å…¨å±€è¨ªå•) ---
 def get_granularity_seconds(granularity_str: str) -> int:
-    """根據OANDA的粒度字符串返回對應的秒數"""
+    """æ ¹æ“šOANDAçš„ç²’åº¦å­—ç¬¦ä¸²è¿”å›žå°æ‡‰çš„ç§’æ•¸"""
     if granularity_str.startswith("S"):
         return int(granularity_str[1:])
     elif granularity_str.startswith("M"):
@@ -287,28 +288,28 @@ def get_granularity_seconds(granularity_str: str) -> int:
         return 24 * 3600
     elif granularity_str == "W":
         return 7 * 24 * 3600
-    elif granularity_str == "Mo": # OANDA的月是 'M'，但我們這裡用 'Mo' 避免與分鐘衝突
-        return 30 * 24 * 3600 # 近似值
-    raise ValueError(f"未知的粒度: {granularity_str}")
+    elif granularity_str == "Mo": # OANDAçš„æœˆæ˜¯ 'M'ï¼Œä½†æˆ‘å€‘é€™è£¡ç”¨ 'Mo' é¿å…èˆ‡åˆ†é˜è¡çª
+        return 30 * 24 * 3600 # è¿‘ä¼¼å€¼
+    raise ValueError(f"æœªçŸ¥çš„ç²’åº¦: {granularity_str}")
 
 GRANULARITY_SECONDS = get_granularity_seconds(GRANULARITY)
 
-# --- 輸出一些關鍵配置以供檢查 (可選) ---
+# --- è¼¸å‡ºä¸€äº›é—œéµé…ç½®ä»¥ä¾›æª¢æŸ¥ (å¯é¸) ---
 print(f"Configuration loaded. Base directory: {BASE_DIR}")
 print(f"Using device: {DEVICE}")
 print(f"Database path: {DATABASE_PATH}")
 print(f"Default symbols: {DEFAULT_SYMBOLS}")
 print(f"Granularity: {GRANULARITY} ({GRANULARITY_SECONDS} seconds)")
 
-# --- 在文件末尾導入日誌記錄器以避免循環導入 ---
+# --- åœ¨æ–‡ä»¶æœ«å°¾å°Žå…¥æ—¥èªŒè¨˜éŒ„å™¨ä»¥é¿å…å¾ªç’°å°Žå…¥ ---
 try:
     from .logger_setup import logger
 except ImportError:
-    # 如果相對導入失敗，嘗試絕對導入
+    # å¦‚æžœç›¸å°å°Žå…¥å¤±æ•—ï¼Œå˜—è©¦çµ•å°å°Žå…¥
     try:
         from oanda_trading_bot.training_system.common.logger_setup import logger
     except ImportError:
-        # 最終後備：創建一個簡單的日誌記錄器
+        # æœ€çµ‚å¾Œå‚™ï¼šå‰µå»ºä¸€å€‹ç°¡å–®çš„æ—¥èªŒè¨˜éŒ„å™¨
         import logging
         logger = logging.getLogger("config_fallback")
         logger.setLevel(logging.INFO)

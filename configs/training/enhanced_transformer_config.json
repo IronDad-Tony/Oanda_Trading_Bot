@@ -1,14 +1,16 @@
 {
   "model": {
     "type": "EnhancedUniversalTradingTransformer",
-    "model_dim": 768,
-    "num_layers": 24,
-    "num_heads": 12,
-    "ffn_dim": 3072,
+    "model_dim": 1024,
+    "num_layers": 32,
+    "num_heads": 16,
+    "ffn_dim": 4096,
     "dropout_rate": 0.1,
     "use_multi_scale": true,
     "use_cross_time_fusion": true,
-    "use_symbol_embedding": true
+    "use_symbol_embedding": true,
+    "use_cross_asset_attention": true,
+    "num_cross_asset_layers": 8
   },
   "training": {
     "total_timesteps": 2000000,

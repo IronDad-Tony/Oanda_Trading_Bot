@@ -21,7 +21,7 @@ def main():
     env = DummyVecEnv([lambda: MiniDictTradingEnv(symbols=symbols, feat=feat, seq=seq, ctx=ctx)])
 
     policy_kwargs = dict(
-        net_arch=[1024, 1024, 1024],
+        net_arch=[2048, 2048, 1024],
         activation_fn=torch.nn.ReLU,
     )
 
@@ -41,7 +41,7 @@ def main():
         device=device,
     )
 
-    total_timesteps = 10_000
+    total_timesteps = 6_000
     model.learn(total_timesteps=total_timesteps, progress_bar=True)
 
     # Save to the expected live model path

@@ -71,6 +71,8 @@ class DualTrackDataProcessor(nn.Module):
             use_layer_norm_before=enhanced_transformer_config.get('use_layer_norm_before', True),
             output_activation=enhanced_transformer_config.get('output_activation'),
             positional_encoding_type=enhanced_transformer_config.get('positional_encoding_type', "sinusoidal"),
+            use_cross_asset_attention=enhanced_transformer_config.get('use_cross_asset_attention', True),
+            num_cross_asset_layers=enhanced_transformer_config.get('num_cross_asset_layers', 4),
             device=self.device
         ).to(self.device)
         

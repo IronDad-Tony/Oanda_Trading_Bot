@@ -642,6 +642,8 @@ class EnhancedTransformer(nn.Module):
                  cts_fusion_type: str = "hierarchical_attention", # "hierarchical_attention", "simple_attention", "concat", "average"
                  use_symbol_embedding: bool = True,
                  symbol_embedding_dim: int = 16,
+                 use_cross_asset_attention: bool = False,
+                 num_cross_asset_layers: int = 0,
                  use_fourier_features: bool = False,
                  fourier_num_modes: int = FOURIER_NUM_MODES, 
                  use_wavelet_features: bool = False,
@@ -670,6 +672,8 @@ class EnhancedTransformer(nn.Module):
         self.use_fourier_features = use_fourier_features
         self.use_wavelet_features = use_wavelet_features
         self.positional_encoding_type = positional_encoding_type
+        self.use_cross_asset_attention = bool(use_cross_asset_attention)
+        self.num_cross_asset_layers = int(num_cross_asset_layers) if num_cross_asset_layers is not None else 0
         
         self.num_market_states = num_market_states
         self.gmm_detector: Optional[GMMMarketStateDetector] = None
@@ -759,6 +763,27 @@ class EnhancedTransformer(nn.Module):
         else:
             self.cts_fusion_module = None
             logger.info("CrossTimeScaleFusion 模組未啟用。")
+
+        # --- Cross-Asset Attention Initialization (optional) ---
+        if self.use_cross_asset_attention and self.num_cross_asset_layers > 0:
+            try:
+                cross_layer = nn.TransformerEncoderLayer(
+                    d_model=d_model,
+                    nhead=transformer_nhead,
+                    dim_feedforward=dim_feedforward,
+                    dropout=dropout,
+                    activation='gelu',
+                    batch_first=True,
+                    norm_first=True,
+                )
+                self.cross_asset_encoder = nn.TransformerEncoder(cross_layer, num_layers=self.num_cross_asset_layers)
+                logger.info(f"Cross-asset attention enabled: layers={self.num_cross_asset_layers}, d_model={d_model}, heads={transformer_nhead}")
+            except Exception as e:
+                logger.error(f"Failed to initialize cross-asset attention: {e}")
+                self.cross_asset_encoder = None
+                self.use_cross_asset_attention = False
+        else:
+            self.cross_asset_encoder = None
 
         # --- Transformer Layers Initialization --- (existing code)
         self.transformer_layers = nn.ModuleList([
@@ -960,7 +985,15 @@ class EnhancedTransformer(nn.Module):
                 x_full = x_full.masked_fill(mask_expanded, 0.0)
             return x_full
 
-        x_agg = x[:, -1, :] 
+        x_agg = x[:, -1, :]  # [B*N, d_model]
+        if self.use_cross_asset_attention and self.cross_asset_encoder is not None:
+            x_sym = x_agg.reshape(batch_size, num_active_symbols, self.d_model)
+            try:
+                x_sym = self.cross_asset_encoder(x_sym, src_key_padding_mask=symbol_padding_mask)
+            except Exception as e:
+                logger.error(f"Cross-asset forward failed: {e}")
+            x_agg = x_sym.reshape(batch_size * num_active_symbols, self.d_model)
+
         output = self.output_projection(x_agg) # [B*N, output_dim]
         output = self.output_activation_fn(output)
         output = output.reshape(batch_size, num_active_symbols, self.output_dim)
