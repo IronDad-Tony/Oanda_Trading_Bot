@@ -1,14 +1,14 @@
-# src/models/enhanced_transformer.py
+﻿# src/models/enhanced_transformer.py
 """
-Ã¥Â¢Å¾Ã¥Â¼Â·Ã§â€°Ë†Ã©â‚¬Å¡Ã§â€Â¨Ã¥Â¤Å¡Ã¨Â³â€¡Ã§â€Â¢Ã¤ÂºÂ¤Ã¦Ëœâ€œTransformerÃ¦Â¨Â¡Ã¥Å¾â€¹
-Ã¥Å¸ÂºÃ¦â€“Â¼Ã¥Å½Å¸Ã¦Å“â€°UniversalTradingTransformerÃ¯Â¼Å’Ã¥Â¤Â§Ã¥Â¹â€¦Ã¦ÂÂÃ¥Ââ€¡Ã¦Â¨Â¡Ã¥Å¾â€¹Ã¨Â¤â€¡Ã©â€ºÅ“Ã¥ÂºÂ¦Ã¥â€™Å’Ã¥Â­Â¸Ã§Â¿â€™Ã¨Æ’Â½Ã¥Å â€º
+ÃƒÂ¥Ã‚Â¢Ã…Â¾ÃƒÂ¥Ã‚Â¼Ã‚Â·ÃƒÂ§Ã¢â‚¬Â°Ã‹â€ ÃƒÂ©Ã¢â€šÂ¬Ã…Â¡ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ÃƒÂ¥Ã‚Â¤Ã…Â¡ÃƒÂ¨Ã‚Â³Ã¢â‚¬Â¡ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¢ÃƒÂ¤Ã‚ÂºÃ‚Â¤ÃƒÂ¦Ã‹Å“Ã¢â‚¬Å“TransformerÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ¥Ã…Â¾Ã¢â‚¬Â¹
+ÃƒÂ¥Ã…Â¸Ã‚ÂºÃƒÂ¦Ã¢â‚¬â€œÃ‚Â¼ÃƒÂ¥Ã…Â½Ã…Â¸ÃƒÂ¦Ã…â€œÃ¢â‚¬Â°UniversalTradingTransformerÃƒÂ¯Ã‚Â¼Ã…â€™ÃƒÂ¥Ã‚Â¤Ã‚Â§ÃƒÂ¥Ã‚Â¹Ã¢â‚¬Â¦ÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¥Ã‚ÂÃ¢â‚¬Â¡ÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ¥Ã…Â¾Ã¢â‚¬Â¹ÃƒÂ¨Ã‚Â¤Ã¢â‚¬Â¡ÃƒÂ©Ã¢â‚¬ÂºÃ…â€œÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ¥Ã¢â‚¬â„¢Ã…â€™ÃƒÂ¥Ã‚Â­Ã‚Â¸ÃƒÂ§Ã‚Â¿Ã¢â‚¬â„¢ÃƒÂ¨Ã†â€™Ã‚Â½ÃƒÂ¥Ã…Â Ã¢â‚¬Âº
 
-Ã¤Â¸Â»Ã¨Â¦ÂÃ¥Â¢Å¾Ã¥Â¼Â·Ã¯Â¼Å¡
-1. Ã¦Â·Â±Ã¥ÂºÂ¦Ã¦Å¾Â¶Ã¦Â§â€¹Ã¯Â¼Å¡12-16Ã¥Â±Â¤Transformer
-2. Ã¥Â¤Å¡Ã¥Â°ÂºÃ¥ÂºÂ¦Ã§â€°Â¹Ã¥Â¾ÂµÃ¦ÂÂÃ¥Ââ€“Ã¯Â¼Å¡Ã¤Â¸Â¦Ã¨Â¡Å’Ã¨â„¢â€¢Ã§Ââ€ Ã¤Â¸ÂÃ¥ÂÅ’Ã¦â„¢â€šÃ©â€“â€œÃ§Âªâ€”Ã¥ÂÂ£
-3. Ã¨â€¡ÂªÃ©ÂÂ©Ã¦â€¡â€°Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¦Â©Å¸Ã¥Ë†Â¶Ã¯Â¼Å¡Ã¥â€¹â€¢Ã¦â€¦â€¹Ã¨ÂªÂ¿Ã¦â€¢Â´Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¦Â¬Å Ã©â€¡Â
-4. Ã¨Â·Â¨Ã¦â„¢â€šÃ©â€“â€œÃ¥Â°ÂºÃ¥ÂºÂ¦Ã¨Å¾ÂÃ¥ÂË†Ã¯Â¼Å¡Ã¦â€¢Â´Ã¥ÂË†Ã¥Â¤Å¡Ã¥â‚¬â€¹Ã¦â„¢â€šÃ©â€“â€œÃ§Â¶Â­Ã¥ÂºÂ¦Ã¤Â¿Â¡Ã¦ÂÂ¯
-5. Ã¦Â®ËœÃ¥Â·Â®Ã©â‚¬Â£Ã¦Å½Â¥Ã¥â€žÂªÃ¥Å’â€“Ã¯Â¼Å¡Ã¦â€Â¹Ã¥â€“â€žÃ¦Â·Â±Ã¥ÂºÂ¦Ã§Â¶Â²Ã§ÂµÂ¡Ã¨Â¨â€œÃ§Â·Â´
+ÃƒÂ¤Ã‚Â¸Ã‚Â»ÃƒÂ¨Ã‚Â¦Ã‚ÂÃƒÂ¥Ã‚Â¢Ã…Â¾ÃƒÂ¥Ã‚Â¼Ã‚Â·ÃƒÂ¯Ã‚Â¼Ã…Â¡
+1. ÃƒÂ¦Ã‚Â·Ã‚Â±ÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ¦Ã…Â¾Ã‚Â¶ÃƒÂ¦Ã‚Â§Ã¢â‚¬Â¹ÃƒÂ¯Ã‚Â¼Ã…Â¡12-16ÃƒÂ¥Ã‚Â±Ã‚Â¤Transformer
+2. ÃƒÂ¥Ã‚Â¤Ã…Â¡ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚ÂµÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¥Ã‚ÂÃ¢â‚¬â€œÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¤Ã‚Â¸Ã‚Â¦ÃƒÂ¨Ã‚Â¡Ã…â€™ÃƒÂ¨Ã¢â€žÂ¢Ã¢â‚¬Â¢ÃƒÂ§Ã‚ÂÃ¢â‚¬Â ÃƒÂ¤Ã‚Â¸Ã‚ÂÃƒÂ¥Ã‚ÂÃ…â€™ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ©Ã¢â‚¬â€œÃ¢â‚¬Å“ÃƒÂ§Ã‚ÂªÃ¢â‚¬â€ÃƒÂ¥Ã‚ÂÃ‚Â£
+3. ÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ©Ã‚ÂÃ‚Â©ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¦Ã‚Â©Ã…Â¸ÃƒÂ¥Ã‹â€ Ã‚Â¶ÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¥Ã¢â‚¬Â¹Ã¢â‚¬Â¢ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ¨Ã‚ÂªÃ‚Â¿ÃƒÂ¦Ã¢â‚¬Â¢Ã‚Â´ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¦Ã‚Â¬Ã…Â ÃƒÂ©Ã¢â‚¬Â¡Ã‚Â
+4. ÃƒÂ¨Ã‚Â·Ã‚Â¨ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ©Ã¢â‚¬â€œÃ¢â‚¬Å“ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ¨Ã…Â¾Ã‚ÂÃƒÂ¥Ã‚ÂÃ‹â€ ÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¦Ã¢â‚¬Â¢Ã‚Â´ÃƒÂ¥Ã‚ÂÃ‹â€ ÃƒÂ¥Ã‚Â¤Ã…Â¡ÃƒÂ¥Ã¢â€šÂ¬Ã¢â‚¬Â¹ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ©Ã¢â‚¬â€œÃ¢â‚¬Å“ÃƒÂ§Ã‚Â¶Ã‚Â­ÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ¤Ã‚Â¿Ã‚Â¡ÃƒÂ¦Ã‚ÂÃ‚Â¯
+5. ÃƒÂ¦Ã‚Â®Ã‹Å“ÃƒÂ¥Ã‚Â·Ã‚Â®ÃƒÂ©Ã¢â€šÂ¬Ã‚Â£ÃƒÂ¦Ã…Â½Ã‚Â¥ÃƒÂ¥Ã¢â‚¬Å¾Ã‚ÂªÃƒÂ¥Ã…â€™Ã¢â‚¬â€œÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¦Ã¢â‚¬ÂÃ‚Â¹ÃƒÂ¥Ã¢â‚¬â€œÃ¢â‚¬Å¾ÃƒÂ¦Ã‚Â·Ã‚Â±ÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ§Ã‚Â¶Ã‚Â²ÃƒÂ§Ã‚ÂµÃ‚Â¡ÃƒÂ¨Ã‚Â¨Ã¢â‚¬Å“ÃƒÂ§Ã‚Â·Ã‚Â´
 """
 
 import torch
@@ -24,6 +24,7 @@ from oanda_trading_bot.training_system.features.market_state_detector import GMM
 from oanda_trading_bot.training_system.models.transformer_model import PositionalEncoding
 from oanda_trading_bot.training_system.models.custom_layers import CrossTimeScaleFusion
 from oanda_trading_bot.training_system.models.graph_layers import GraphBlock
+from oanda_trading_bot.training_system.models.time_blocks import TimePatchify, DilatedTCNBlock
 from oanda_trading_bot.training_system.models.time_blocks import TimePatchify, DilatedTCNBlock
 
 try:
@@ -258,14 +259,14 @@ class MultiLevelWaveletBlock(nn.Module):
 
 
 class MultiScaleFeatureExtractor(nn.Module):
-    """Ã¥Â¤Å¡Ã¥Â°ÂºÃ¥ÂºÂ¦Ã§â€°Â¹Ã¥Â¾ÂµÃ¦ÂÂÃ¥Ââ€“Ã¥â„¢Â¨Ã¯Â¼Å¡Ã¤Â¸Â¦Ã¨Â¡Å’Ã¨â„¢â€¢Ã§Ââ€ Ã¤Â¸ÂÃ¥ÂÅ’Ã¦â„¢â€šÃ©â€“â€œÃ§Âªâ€”Ã¥ÂÂ£"""
+    """ÃƒÂ¥Ã‚Â¤Ã…Â¡ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚ÂµÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¥Ã‚ÂÃ¢â‚¬â€œÃƒÂ¥Ã¢â€žÂ¢Ã‚Â¨ÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¤Ã‚Â¸Ã‚Â¦ÃƒÂ¨Ã‚Â¡Ã…â€™ÃƒÂ¨Ã¢â€žÂ¢Ã¢â‚¬Â¢ÃƒÂ§Ã‚ÂÃ¢â‚¬Â ÃƒÂ¤Ã‚Â¸Ã‚ÂÃƒÂ¥Ã‚ÂÃ…â€™ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ©Ã¢â‚¬â€œÃ¢â‚¬Å“ÃƒÂ§Ã‚ÂªÃ¢â‚¬â€ÃƒÂ¥Ã‚ÂÃ‚Â£"""
     
     def __init__(self, input_dim: int, hidden_dim: int, scales: List[int] = [3, 5, 7, 11]):
         super().__init__()
         self.scales = scales
         self.hidden_dim = hidden_dim
         
-        # Ã¦Â¯ÂÃ¥â‚¬â€¹Ã¥Â°ÂºÃ¥ÂºÂ¦Ã§Å¡â€žÃ¥ÂÂ·Ã§Â©ÂÃ¥Â±Â¤
+        # ÃƒÂ¦Ã‚Â¯Ã‚ÂÃƒÂ¥Ã¢â€šÂ¬Ã¢â‚¬Â¹ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾ÃƒÂ¥Ã‚ÂÃ‚Â·ÃƒÂ§Ã‚Â©Ã‚ÂÃƒÂ¥Ã‚Â±Ã‚Â¤
         num_scales = len(scales)
         base_out_channels = hidden_dim // num_scales
         remainder = hidden_dim % num_scales
@@ -282,7 +283,7 @@ class MultiScaleFeatureExtractor(nn.Module):
                          kernel_size=scale, padding=scale//2, groups=1)
             )
         
-        # Ã§â€°Â¹Ã¥Â¾ÂµÃ¨Å¾ÂÃ¥ÂË†Ã¥Â±Â¤
+        # ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚ÂµÃƒÂ¨Ã…Â¾Ã‚ÂÃƒÂ¥Ã‚ÂÃ‹â€ ÃƒÂ¥Ã‚Â±Ã‚Â¤
         # The input to this linear layer is the sum of current_out_channels, which should now be hidden_dim
         self.fusion_layer = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim), # This should now be correct
@@ -291,16 +292,16 @@ class MultiScaleFeatureExtractor(nn.Module):
             nn.Dropout(0.1)
         )
         
-        # Ã¦â„¢â€šÃ©â€“â€œÃ¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¦Â¬Å Ã©â€¡Â
+        # ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ©Ã¢â‚¬â€œÃ¢â‚¬Å“ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¦Ã‚Â¬Ã…Â ÃƒÂ©Ã¢â‚¬Â¡Ã‚Â
         self.temporal_attention = nn.MultiheadAttention(
             embed_dim=hidden_dim,
-            num_heads=8, # Ã¥ÂÂ¯Ã¤Â»Â¥Ã¨â‚¬Æ’Ã¦â€¦Â®Ã¤Â¹Å¸Ã¨Â¨Â­Ã§â€šÂºÃ¥ÂÂ¯Ã©â€¦ÂÃ§Â½Â®
+            num_heads=8, # ÃƒÂ¥Ã‚ÂÃ‚Â¯ÃƒÂ¤Ã‚Â»Ã‚Â¥ÃƒÂ¨Ã¢â€šÂ¬Ã†â€™ÃƒÂ¦Ã¢â‚¬Â¦Ã‚Â®ÃƒÂ¤Ã‚Â¹Ã…Â¸ÃƒÂ¨Ã‚Â¨Ã‚Â­ÃƒÂ§Ã¢â‚¬Å¡Ã‚ÂºÃƒÂ¥Ã‚ÂÃ‚Â¯ÃƒÂ©Ã¢â‚¬Â¦Ã‚ÂÃƒÂ§Ã‚Â½Ã‚Â®
             batch_first=True
         )
 
-        # Ã¨â€¡ÂªÃ©ÂÂ©Ã¦â€¡â€°Ã¦Â±Â Ã¥Å’â€“Ã¥Â±Â¤
-        # Ã¥Ââ€¡Ã¨Â¨Â­Ã¦Ë†â€˜Ã¥â‚¬â€˜Ã¥Â¸Å’Ã¦Å“â€ºÃ¥Â°â€¡Ã¥ÂºÂÃ¥Ë†â€”Ã©â€¢Â·Ã¥ÂºÂ¦Ã¦Â±Â Ã¥Å’â€“Ã¥Ë†Â° TIMESTEPS // 2Ã¯Â¼Å’Ã¦Ë†â€“Ã¨â‚¬â€¦Ã¤Â¸â‚¬Ã¥â‚¬â€¹Ã¥ÂÂ¯Ã©â€¦ÂÃ§Â½Â®Ã§Å¡â€žÃ¥â€ºÂºÃ¥Â®Å¡Ã¥â‚¬Â¼
-        # Ã©â‚¬â„¢Ã¨Â£Â¡Ã¦Ë†â€˜Ã¥â‚¬â€˜Ã¦Å¡Â«Ã¦â„¢â€šÃ¤Â½Â¿Ã§â€Â¨ TIMESTEPS // 2 Ã¤Â½Å“Ã§â€šÂºÃ§Â¤ÂºÃ¤Â¾â€¹
+        # ÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ©Ã‚ÂÃ‚Â©ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ¦Ã‚Â±Ã‚Â ÃƒÂ¥Ã…â€™Ã¢â‚¬â€œÃƒÂ¥Ã‚Â±Ã‚Â¤
+        # ÃƒÂ¥Ã‚ÂÃ¢â‚¬Â¡ÃƒÂ¨Ã‚Â¨Ã‚Â­ÃƒÂ¦Ã‹â€ Ã¢â‚¬ËœÃƒÂ¥Ã¢â€šÂ¬Ã¢â‚¬ËœÃƒÂ¥Ã‚Â¸Ã…â€™ÃƒÂ¦Ã…â€œÃ¢â‚¬ÂºÃƒÂ¥Ã‚Â°Ã¢â‚¬Â¡ÃƒÂ¥Ã‚ÂºÃ‚ÂÃƒÂ¥Ã‹â€ Ã¢â‚¬â€ÃƒÂ©Ã¢â‚¬Â¢Ã‚Â·ÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ¦Ã‚Â±Ã‚Â ÃƒÂ¥Ã…â€™Ã¢â‚¬â€œÃƒÂ¥Ã‹â€ Ã‚Â° TIMESTEPS // 2ÃƒÂ¯Ã‚Â¼Ã…â€™ÃƒÂ¦Ã‹â€ Ã¢â‚¬â€œÃƒÂ¨Ã¢â€šÂ¬Ã¢â‚¬Â¦ÃƒÂ¤Ã‚Â¸Ã¢â€šÂ¬ÃƒÂ¥Ã¢â€šÂ¬Ã¢â‚¬Â¹ÃƒÂ¥Ã‚ÂÃ‚Â¯ÃƒÂ©Ã¢â‚¬Â¦Ã‚ÂÃƒÂ§Ã‚Â½Ã‚Â®ÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾ÃƒÂ¥Ã¢â‚¬ÂºÃ‚ÂºÃƒÂ¥Ã‚Â®Ã…Â¡ÃƒÂ¥Ã¢â€šÂ¬Ã‚Â¼
+        # ÃƒÂ©Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÂ¨Ã‚Â£Ã‚Â¡ÃƒÂ¦Ã‹â€ Ã¢â‚¬ËœÃƒÂ¥Ã¢â€šÂ¬Ã¢â‚¬ËœÃƒÂ¦Ã…Â¡Ã‚Â«ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ¤Ã‚Â½Ã‚Â¿ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ TIMESTEPS // 2 ÃƒÂ¤Ã‚Â½Ã…â€œÃƒÂ§Ã¢â‚¬Å¡Ã‚ÂºÃƒÂ§Ã‚Â¤Ã‚ÂºÃƒÂ¤Ã‚Â¾Ã¢â‚¬Â¹
         self.adaptive_pool_output_size = TIMESTEPS // 2 
         self.adaptive_pool = nn.AdaptiveAvgPool1d(output_size=self.adaptive_pool_output_size)
         
@@ -309,57 +310,57 @@ class MultiScaleFeatureExtractor(nn.Module):
         Args:
             x: [batch_size, seq_len, input_dim]
         Returns:
-            Ã¥Â¤Å¡Ã¥Â°ÂºÃ¥ÂºÂ¦Ã¨Å¾ÂÃ¥ÂË†Ã§â€°Â¹Ã¥Â¾Âµ: [batch_size, pooled_seq_len, hidden_dim]
+            ÃƒÂ¥Ã‚Â¤Ã…Â¡ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ¨Ã…Â¾Ã‚ÂÃƒÂ¥Ã‚ÂÃ‹â€ ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚Âµ: [batch_size, pooled_seq_len, hidden_dim]
         """
         batch_size, seq_len, input_dim = x.shape
         
-        # Ã¨Â½â€°Ã¦Ââ€ºÃ§â€šÂºÃ¥ÂÂ·Ã§Â©ÂÃ¦Â Â¼Ã¥Â¼Â: [batch, channels, seq_len]
+        # ÃƒÂ¨Ã‚Â½Ã¢â‚¬Â°ÃƒÂ¦Ã‚ÂÃ¢â‚¬ÂºÃƒÂ§Ã¢â‚¬Å¡Ã‚ÂºÃƒÂ¥Ã‚ÂÃ‚Â·ÃƒÂ§Ã‚Â©Ã‚ÂÃƒÂ¦Ã‚Â Ã‚Â¼ÃƒÂ¥Ã‚Â¼Ã‚Â: [batch, channels, seq_len]
         x_conv = x.transpose(1, 2)
         
-        # Ã¤Â¸Â¦Ã¨Â¡Å’Ã¥Â¤Å¡Ã¥Â°ÂºÃ¥ÂºÂ¦Ã§â€°Â¹Ã¥Â¾ÂµÃ¦ÂÂÃ¥Ââ€“
+        # ÃƒÂ¤Ã‚Â¸Ã‚Â¦ÃƒÂ¨Ã‚Â¡Ã…â€™ÃƒÂ¥Ã‚Â¤Ã…Â¡ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚ÂµÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¥Ã‚ÂÃ¢â‚¬â€œ
         scale_features = []
         for conv in self.scale_convs:
             scale_feat = conv(x_conv)  # [batch, hidden_dim//len(scales), seq_len]
             scale_features.append(scale_feat)
         
-        # Ã¦â€¹Â¼Ã¦Å½Â¥Ã¦â€°â‚¬Ã¦Å“â€°Ã¥Â°ÂºÃ¥ÂºÂ¦Ã§â€°Â¹Ã¥Â¾Âµ
+        # ÃƒÂ¦Ã¢â‚¬Â¹Ã‚Â¼ÃƒÂ¦Ã…Â½Ã‚Â¥ÃƒÂ¦Ã¢â‚¬Â°Ã¢â€šÂ¬ÃƒÂ¦Ã…â€œÃ¢â‚¬Â°ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚Âµ
         multi_scale = torch.cat(scale_features, dim=1)  # [batch, hidden_dim, seq_len]
         
-        # Ã¨Â½â€°Ã¥â€ºÅ¾Ã¦â„¢â€šÃ¥ÂºÂÃ¦Â Â¼Ã¥Â¼Â
+        # ÃƒÂ¨Ã‚Â½Ã¢â‚¬Â°ÃƒÂ¥Ã¢â‚¬ÂºÃ…Â¾ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ¥Ã‚ÂºÃ‚ÂÃƒÂ¦Ã‚Â Ã‚Â¼ÃƒÂ¥Ã‚Â¼Ã‚Â
         multi_scale = multi_scale.transpose(1, 2)  # [batch, seq_len, hidden_dim]
         
-        # Ã§â€°Â¹Ã¥Â¾ÂµÃ¨Å¾ÂÃ¥ÂË†
+        # ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚ÂµÃƒÂ¨Ã…Â¾Ã‚ÂÃƒÂ¥Ã‚ÂÃ‹â€ 
         fused_features = self.fusion_layer(multi_scale)
         
-        # Ã¦â„¢â€šÃ©â€“â€œÃ§Â¶Â­Ã¥ÂºÂ¦Ã¨â€¡ÂªÃ¦Â³Â¨Ã¦â€žÂÃ¥Å â€º
+        # ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ©Ã¢â‚¬â€œÃ¢â‚¬Å“ÃƒÂ§Ã‚Â¶Ã‚Â­ÃƒÂ¥Ã‚ÂºÃ‚Â¦ÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬Âº
         attended_features, _ = self.temporal_attention(
             fused_features, fused_features, fused_features
         )
         
-        # Ã¦Â®ËœÃ¥Â·Â®Ã©â‚¬Â£Ã¦Å½Â¥
+        # ÃƒÂ¦Ã‚Â®Ã‹Å“ÃƒÂ¥Ã‚Â·Ã‚Â®ÃƒÂ©Ã¢â€šÂ¬Ã‚Â£ÃƒÂ¦Ã…Â½Ã‚Â¥
         output_features = attended_features + fused_features
 
-        # Ã¦â€¡â€°Ã§â€Â¨Ã¨â€¡ÂªÃ©ÂÂ©Ã¦â€¡â€°Ã¦Â±Â Ã¥Å’â€“
-        # Ã¨Â½â€°Ã¦Ââ€ºÃ§â€šÂºÃ¦Â±Â Ã¥Å’â€“Ã¥Â±Â¤Ã¦Å“Å¸Ã¦Å“â€ºÃ§Å¡â€žÃ¦Â Â¼Ã¥Â¼Â: [batch, channels, seq_len]
-        # Ã¥Å“Â¨Ã©â‚¬â„¢Ã¨Â£Â¡, channels Ã¦ËœÂ¯ hidden_dim, seq_len Ã¦ËœÂ¯Ã§â€¢Â¶Ã¥â€°ÂÃ§Å¡â€žÃ¥ÂºÂÃ¥Ë†â€”Ã©â€¢Â·Ã¥ÂºÂ¦
+        # ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ©Ã‚ÂÃ‚Â©ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ¦Ã‚Â±Ã‚Â ÃƒÂ¥Ã…â€™Ã¢â‚¬â€œ
+        # ÃƒÂ¨Ã‚Â½Ã¢â‚¬Â°ÃƒÂ¦Ã‚ÂÃ¢â‚¬ÂºÃƒÂ§Ã¢â‚¬Å¡Ã‚ÂºÃƒÂ¦Ã‚Â±Ã‚Â ÃƒÂ¥Ã…â€™Ã¢â‚¬â€œÃƒÂ¥Ã‚Â±Ã‚Â¤ÃƒÂ¦Ã…â€œÃ…Â¸ÃƒÂ¦Ã…â€œÃ¢â‚¬ÂºÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾ÃƒÂ¦Ã‚Â Ã‚Â¼ÃƒÂ¥Ã‚Â¼Ã‚Â: [batch, channels, seq_len]
+        # ÃƒÂ¥Ã…â€œÃ‚Â¨ÃƒÂ©Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÂ¨Ã‚Â£Ã‚Â¡, channels ÃƒÂ¦Ã‹Å“Ã‚Â¯ hidden_dim, seq_len ÃƒÂ¦Ã‹Å“Ã‚Â¯ÃƒÂ§Ã¢â‚¬Â¢Ã‚Â¶ÃƒÂ¥Ã¢â‚¬Â°Ã‚ÂÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾ÃƒÂ¥Ã‚ÂºÃ‚ÂÃƒÂ¥Ã‹â€ Ã¢â‚¬â€ÃƒÂ©Ã¢â‚¬Â¢Ã‚Â·ÃƒÂ¥Ã‚ÂºÃ‚Â¦
         output_features_pooled = output_features.transpose(1, 2) # [batch_size, hidden_dim, seq_len]
         output_features_pooled = self.adaptive_pool(output_features_pooled) # [batch_size, hidden_dim, self.adaptive_pool_output_size]
         
-        # Ã¨Â½â€°Ã¥â€ºÅ¾Ã¦Â¨â„¢Ã¦Âºâ€“Ã¦Â Â¼Ã¥Â¼Â: [batch_size, pooled_seq_len, hidden_dim]
+        # ÃƒÂ¨Ã‚Â½Ã¢â‚¬Â°ÃƒÂ¥Ã¢â‚¬ÂºÃ…Â¾ÃƒÂ¦Ã‚Â¨Ã¢â€žÂ¢ÃƒÂ¦Ã‚ÂºÃ¢â‚¬â€œÃƒÂ¦Ã‚Â Ã‚Â¼ÃƒÂ¥Ã‚Â¼Ã‚Â: [batch_size, pooled_seq_len, hidden_dim]
         output_features_pooled = output_features_pooled.transpose(1, 2)
         
         return output_features_pooled
 
 
 class MarketStateDetector(nn.Module):
-    """Ã¥Â¸â€šÃ¥Â Â´Ã§â€¹â‚¬Ã¦â€¦â€¹Ã¦ÂªÂ¢Ã¦Â¸Â¬Ã¥â„¢Â¨Ã¯Â¼Å¡Ã¦ÂªÂ¢Ã¦Â¸Â¬Ã¨Â¶Â¨Ã¥â€¹Â¢Ã£â‚¬ÂÃ¦Â³Â¢Ã¥â€¹â€¢Ã£â‚¬ÂÃ¥Ââ€¡Ã¥â‚¬Â¼Ã¥â€ºÅ¾Ã¦Â­Â¸Ã£â‚¬ÂÃ§ÂªÂÃ§Â Â´Ã§Â­â€°Ã¥Â¸â€šÃ¥Â Â´Ã§â€¹â‚¬Ã¦â€¦â€¹"""
+    """ÃƒÂ¥Ã‚Â¸Ã¢â‚¬Å¡ÃƒÂ¥Ã‚Â Ã‚Â´ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ¦Ã‚ÂªÃ‚Â¢ÃƒÂ¦Ã‚Â¸Ã‚Â¬ÃƒÂ¥Ã¢â€žÂ¢Ã‚Â¨ÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¦Ã‚ÂªÃ‚Â¢ÃƒÂ¦Ã‚Â¸Ã‚Â¬ÃƒÂ¨Ã‚Â¶Ã‚Â¨ÃƒÂ¥Ã¢â‚¬Â¹Ã‚Â¢ÃƒÂ£Ã¢â€šÂ¬Ã‚ÂÃƒÂ¦Ã‚Â³Ã‚Â¢ÃƒÂ¥Ã¢â‚¬Â¹Ã¢â‚¬Â¢ÃƒÂ£Ã¢â€šÂ¬Ã‚ÂÃƒÂ¥Ã‚ÂÃ¢â‚¬Â¡ÃƒÂ¥Ã¢â€šÂ¬Ã‚Â¼ÃƒÂ¥Ã¢â‚¬ÂºÃ…Â¾ÃƒÂ¦Ã‚Â­Ã‚Â¸ÃƒÂ£Ã¢â€šÂ¬Ã‚ÂÃƒÂ§Ã‚ÂªÃ‚ÂÃƒÂ§Ã‚Â Ã‚Â´ÃƒÂ§Ã‚Â­Ã¢â‚¬Â°ÃƒÂ¥Ã‚Â¸Ã¢â‚¬Å¡ÃƒÂ¥Ã‚Â Ã‚Â´ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹"""
     
     def __init__(self, d_model: int, num_market_states: int = 4): # Added num_market_states
         super().__init__()
         self.d_model = d_model
         self.num_market_states = num_market_states # Store it
         
-        # Ã§â€¹â‚¬Ã¦â€¦â€¹Ã§â€°Â¹Ã¥Â¾ÂµÃ¦ÂÂÃ¥Ââ€“Ã¥â„¢Â¨
+        # ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚ÂµÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¥Ã‚ÂÃ¢â‚¬â€œÃƒÂ¥Ã¢â€žÂ¢Ã‚Â¨
         self.state_extractors = nn.ModuleDict({
             'trend': nn.Sequential(
                 nn.Linear(d_model, d_model // 2),
@@ -387,7 +388,7 @@ class MarketStateDetector(nn.Module):
             )
         })
         
-        # Ã§â€¹â‚¬Ã¦â€¦â€¹Ã¨Å¾ÂÃ¥ÂË†Ã§Â¶Â²Ã§ÂµÂ¡
+        # ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ¨Ã…Â¾Ã‚ÂÃƒÂ¥Ã‚ÂÃ‹â€ ÃƒÂ§Ã‚Â¶Ã‚Â²ÃƒÂ§Ã‚ÂµÃ‚Â¡
         # Input features: 1 (trend) + 1 (volatility) + 1 (momentum) + num_market_states (regime)
         fusion_input_dim = 3 + self.num_market_states
         self.state_fusion = nn.Sequential(
@@ -402,15 +403,15 @@ class MarketStateDetector(nn.Module):
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]: # Return type changed for clarity, was torch.Tensor
         """
         Args:
-            x: [batch_size, d_model] Ã¦Ë†â€“ [batch_size, seq_len, d_model]
+            x: [batch_size, d_model] ÃƒÂ¦Ã‹â€ Ã¢â‚¬â€œ [batch_size, seq_len, d_model]
         Returns:
-            Ã¥Å’â€¦Ã¥ÂÂ«Ã¥Ââ€žÃ§Â¨Â®Ã¥Â¸â€šÃ¥Â Â´Ã§â€¹â‚¬Ã¦â€¦â€¹Ã§Å¡â€žÃ¥Â­â€”Ã¥â€¦Â¸
+            ÃƒÂ¥Ã…â€™Ã¢â‚¬Â¦ÃƒÂ¥Ã‚ÂÃ‚Â«ÃƒÂ¥Ã‚ÂÃ¢â‚¬Å¾ÃƒÂ§Ã‚Â¨Ã‚Â®ÃƒÂ¥Ã‚Â¸Ã¢â‚¬Å¡ÃƒÂ¥Ã‚Â Ã‚Â´ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾ÃƒÂ¥Ã‚Â­Ã¢â‚¬â€ÃƒÂ¥Ã¢â‚¬Â¦Ã‚Â¸
         """
         if x.dim() == 3:
-            # Ã¥Â¦â€šÃ¦Å¾Å“Ã¦ËœÂ¯Ã¥ÂºÂÃ¥Ë†â€”Ã¯Â¼Å’Ã¥Ââ€“Ã¥Â¹Â³Ã¥Ââ€¡
+            # ÃƒÂ¥Ã‚Â¦Ã¢â‚¬Å¡ÃƒÂ¦Ã…Â¾Ã…â€œÃƒÂ¦Ã‹Å“Ã‚Â¯ÃƒÂ¥Ã‚ÂºÃ‚ÂÃƒÂ¥Ã‹â€ Ã¢â‚¬â€ÃƒÂ¯Ã‚Â¼Ã…â€™ÃƒÂ¥Ã‚ÂÃ¢â‚¬â€œÃƒÂ¥Ã‚Â¹Ã‚Â³ÃƒÂ¥Ã‚ÂÃ¢â‚¬Â¡
             x = x.mean(dim=1)
         
-        # Ã¦ÂÂÃ¥Ââ€“Ã¥Ââ€žÃ§Â¨Â®Ã§â€¹â‚¬Ã¦â€¦â€¹Ã§â€°Â¹Ã¥Â¾Âµ
+        # ÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¥Ã‚ÂÃ¢â‚¬â€œÃƒÂ¥Ã‚ÂÃ¢â‚¬Å¾ÃƒÂ§Ã‚Â¨Ã‚Â®ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚Âµ
         states = {}
         state_features = []
         
@@ -423,7 +424,7 @@ class MarketStateDetector(nn.Module):
             else:
                 state_features.append(state_value)  # [batch, 1]
         
-        # Ã¦â€¹Â¼Ã¦Å½Â¥Ã¦â€°â‚¬Ã¦Å“â€°Ã§â€¹â‚¬Ã¦â€¦â€¹Ã§â€°Â¹Ã¥Â¾Âµ
+        # ÃƒÂ¦Ã¢â‚¬Â¹Ã‚Â¼ÃƒÂ¦Ã…Â½Ã‚Â¥ÃƒÂ¦Ã¢â‚¬Â°Ã¢â€šÂ¬ÃƒÂ¦Ã…â€œÃ¢â‚¬Â°ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ§Ã¢â‚¬Â°Ã‚Â¹ÃƒÂ¥Ã‚Â¾Ã‚Âµ
         # concatenated_states = torch.cat(state_features, dim=-1)  # [batch, 7]
         # Corrected concatenation logic
         processed_state_features = []
@@ -434,7 +435,7 @@ class MarketStateDetector(nn.Module):
                 processed_state_features.append(feat)
         concatenated_states = torch.cat(processed_state_features, dim=-1) # [batch, 3 + num_market_states]
         
-        # Ã¨Å¾ÂÃ¥ÂË†Ã¥Â¾â€”Ã¥Ë†Â°Ã¦Å“â‚¬Ã§Âµâ€šÃ¥Â¸â€šÃ¥Â Â´Ã§â€¹â‚¬Ã¦â€¦â€¹
+        # ÃƒÂ¨Ã…Â¾Ã‚ÂÃƒÂ¥Ã‚ÂÃ‹â€ ÃƒÂ¥Ã‚Â¾Ã¢â‚¬â€ÃƒÂ¥Ã‹â€ Ã‚Â°ÃƒÂ¦Ã…â€œÃ¢â€šÂ¬ÃƒÂ§Ã‚ÂµÃ¢â‚¬Å¡ÃƒÂ¥Ã‚Â¸Ã¢â‚¬Å¡ÃƒÂ¥Ã‚Â Ã‚Â´ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹
         final_market_state = self.state_fusion(concatenated_states)
         states['final_state'] = final_market_state # [batch, num_market_states]
         
@@ -442,7 +443,7 @@ class MarketStateDetector(nn.Module):
 
 
 class AdaptiveAttentionLayer(nn.Module):
-    """Ã¨â€¡ÂªÃ©ÂÂ©Ã¦â€¡â€°Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¥Â±Â¤Ã¯Â¼Å¡Ã¦Â Â¹Ã¦â€œÅ¡Ã¥Â¸â€šÃ¥Â Â´Ã§â€¹â‚¬Ã¦â€¦â€¹Ã¥â€¹â€¢Ã¦â€¦â€¹Ã¨ÂªÂ¿Ã¦â€¢Â´Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¦Â¨Â¡Ã¥Â¼Â"""
+    """ÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ©Ã‚ÂÃ‚Â©ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¥Ã‚Â±Ã‚Â¤ÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¦Ã‚Â Ã‚Â¹ÃƒÂ¦Ã¢â‚¬Å“Ã…Â¡ÃƒÂ¥Ã‚Â¸Ã¢â‚¬Å¡ÃƒÂ¥Ã‚Â Ã‚Â´ÃƒÂ§Ã¢â‚¬Â¹Ã¢â€šÂ¬ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ¥Ã¢â‚¬Â¹Ã¢â‚¬Â¢ÃƒÂ¦Ã¢â‚¬Â¦Ã¢â‚¬Â¹ÃƒÂ¨Ã‚ÂªÃ‚Â¿ÃƒÂ¦Ã¢â‚¬Â¢Ã‚Â´ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ¥Ã‚Â¼Ã‚Â"""
     
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1, num_market_states: int = 4): # Added num_market_states
         super().__init__()
@@ -544,7 +545,7 @@ class AdaptiveAttentionLayer(nn.Module):
 
 
 class EnhancedTransformerLayer(nn.Module):
-    """Ã¥Â¢Å¾Ã¥Â¼Â·Ã§â€°Ë†TransformerÃ¥Â±Â¤Ã¯Â¼Å¡Ã©â€ºâ€ Ã¦Ë†ÂÃ¨â€¡ÂªÃ©ÂÂ©Ã¦â€¡â€°Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¥â€™Å’Ã¦â€Â¹Ã©â‚¬Â²Ã§Å¡â€žFFN"""
+    """ÃƒÂ¥Ã‚Â¢Ã…Â¾ÃƒÂ¥Ã‚Â¼Ã‚Â·ÃƒÂ§Ã¢â‚¬Â°Ã‹â€ TransformerÃƒÂ¥Ã‚Â±Ã‚Â¤ÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ©Ã¢â‚¬ÂºÃ¢â‚¬Â ÃƒÂ¦Ã‹â€ Ã‚ÂÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ©Ã‚ÂÃ‚Â©ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¥Ã¢â‚¬â„¢Ã…â€™ÃƒÂ¦Ã¢â‚¬ÂÃ‚Â¹ÃƒÂ©Ã¢â€šÂ¬Ã‚Â²ÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾FFN"""
     
     def __init__(self, d_model: int, num_heads: int, ffn_dim: int, 
                  dropout: float = 0.1, use_adaptive_attention: bool = True, num_market_states: int = 4,
@@ -553,7 +554,7 @@ class EnhancedTransformerLayer(nn.Module):
         self.use_adaptive_attention = use_adaptive_attention
         self.use_layer_norm_before = use_layer_norm_before # Store the parameter
         
-        # Ã¨â€¡ÂªÃ©ÂÂ©Ã¦â€¡â€°Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¥Â±Â¤ or Ã¦Â¨â„¢Ã¦Âºâ€“Ã¥Â¤Å¡Ã©Â Â­Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€º
+        # ÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ©Ã‚ÂÃ‚Â©ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¥Ã‚Â±Ã‚Â¤ or ÃƒÂ¦Ã‚Â¨Ã¢â€žÂ¢ÃƒÂ¦Ã‚ÂºÃ¢â‚¬â€œÃƒÂ¥Ã‚Â¤Ã…Â¡ÃƒÂ©Ã‚Â Ã‚Â­ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬Âº
         if self.use_adaptive_attention:
             self.attention_layer = AdaptiveAttentionLayer(d_model, num_heads, dropout, num_market_states=num_market_states)
         else:
@@ -565,7 +566,7 @@ class EnhancedTransformerLayer(nn.Module):
                 batch_first=True
             )
 
-        # Ã¥Â¢Å¾Ã¥Â¼Â·Ã§Å¡â€žÃ¥â€°ÂÃ©Â¥â€¹Ã§Â¶Â²Ã§ÂµÂ¡
+        # ÃƒÂ¥Ã‚Â¢Ã…Â¾ÃƒÂ¥Ã‚Â¼Ã‚Â·ÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾ÃƒÂ¥Ã¢â‚¬Â°Ã‚ÂÃƒÂ©Ã‚Â¥Ã¢â‚¬Â¹ÃƒÂ§Ã‚Â¶Ã‚Â²ÃƒÂ§Ã‚ÂµÃ‚Â¡
         self.ffn = nn.Sequential(
             nn.Linear(d_model, ffn_dim),
             nn.GELU(),
@@ -577,11 +578,11 @@ class EnhancedTransformerLayer(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Ã¥Â±Â¤Ã¦Â­Â¸Ã¤Â¸â‚¬Ã¥Å’â€“
+        # ÃƒÂ¥Ã‚Â±Ã‚Â¤ÃƒÂ¦Ã‚Â­Ã‚Â¸ÃƒÂ¤Ã‚Â¸Ã¢â€šÂ¬ÃƒÂ¥Ã…â€™Ã¢â‚¬â€œ
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         
-        # Ã©â€“â‚¬Ã¦Å½Â§Ã¦Â©Å¸Ã¥Ë†Â¶
+        # ÃƒÂ©Ã¢â‚¬â€œÃ¢â€šÂ¬ÃƒÂ¦Ã…Â½Ã‚Â§ÃƒÂ¦Ã‚Â©Ã…Â¸ÃƒÂ¥Ã‹â€ Ã‚Â¶
         self.gate = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.Sigmoid()
@@ -591,7 +592,7 @@ class EnhancedTransformerLayer(nn.Module):
                 key_padding_mask: Optional[torch.Tensor] = None,
                 external_market_state_probs: Optional[torch.Tensor] = None) -> torch.Tensor: # MODIFIED PARAMETER
         
-        # Ã¨â€¡ÂªÃ©ÂÂ©Ã¦â€¡â€°Ã¦Â³Â¨Ã¦â€žÂÃ¥Å â€ºÃ¥Â­ÂÃ¥Â±Â¤
+        # ÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ©Ã‚ÂÃ‚Â©ÃƒÂ¦Ã¢â‚¬Â¡Ã¢â‚¬Â°ÃƒÂ¦Ã‚Â³Ã‚Â¨ÃƒÂ¦Ã¢â‚¬Å¾Ã‚ÂÃƒÂ¥Ã…Â Ã¢â‚¬ÂºÃƒÂ¥Ã‚Â­Ã‚ÂÃƒÂ¥Ã‚Â±Ã‚Â¤
         normed_x = self.norm1(x)
         if self.use_adaptive_attention:
             # Pass external_market_state_probs to AdaptiveAttentionLayer
@@ -607,7 +608,7 @@ class EnhancedTransformerLayer(nn.Module):
                                           # However, AdaptiveAttentionLayer *does* include a residual.
                                           # This means behavior differs based on use_adaptive_attention.
         
-        # FFNÃ¥Â­ÂÃ¥Â±Â¤
+        # FFNÃƒÂ¥Ã‚Â­Ã‚ÂÃƒÂ¥Ã‚Â±Ã‚Â¤
         ffn_input = self.norm2(attn_output) # If attn_output doesn't have residual, this norm is on raw attention.
         ffn_output = self.ffn(ffn_input)
         
@@ -751,30 +752,36 @@ class EnhancedTransformer(nn.Module):
         # --- Feature Blocks (Fourier, Wavelet) applied after projection to d_model ---
         self.fourier_block = FourierFeatureBlock(d_model, fourier_num_modes) if use_fourier_features else None
         self.wavelet_block = MultiLevelWaveletBlock(d_model, wavelet_name, wavelet_levels, trainable_wavelet_filters) if use_wavelet_features else None
-        # --- Optional Time Patch and TCN branches ---
-        self.use_time_patchify = False
-        self.time_patch = None
-        self.use_tcn_branch = False
-        self.tcn_block = None
-        # These can be toggled via config setters (kept off by default) 
-
+        # --- Optional Time Patch and TCN branches (DEFAULT: ON) ---
+        self.use_time_patchify = True
+        try:
+            self.time_patch = TimePatchify(in_dim=d_model, d_model=d_model, patch_size=16, stride=8)
+        except Exception:
+            self.time_patch = None
+            self.use_time_patchify = False
+        self.use_tcn_branch = True
+        try:
+            self.tcn_block = DilatedTCNBlock(d_model=d_model, kernel_size=3, dilations=(1, 2, 4), dropout=dropout)
+        except Exception:
+            self.tcn_block = None
+            self.use_tcn_branch = False
         # --- Cross-Time-Scale Fusion (CTS) Initialization ---
         if self.use_cts_fusion:
-            # Ã¥Â¦â€šÃ¦Å¾Å“Ã¦Å“ÂªÃ¦ÂÂÃ¤Â¾â€º cts_time_scales, Ã¤Â½Â¿Ã§â€Â¨Ã©Â ÂÃ¨Â¨Â­Ã¥â‚¬Â¼
+            # ÃƒÂ¥Ã‚Â¦Ã¢â‚¬Å¡ÃƒÂ¦Ã…Â¾Ã…â€œÃƒÂ¦Ã…â€œÃ‚ÂªÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¤Ã‚Â¾Ã¢â‚¬Âº cts_time_scales, ÃƒÂ¤Ã‚Â½Ã‚Â¿ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ÃƒÂ©Ã‚Â Ã‚ÂÃƒÂ¨Ã‚Â¨Ã‚Â­ÃƒÂ¥Ã¢â€šÂ¬Ã‚Â¼
             if cts_time_scales is None:
-                cts_time_scales = [1, 3, 5] # Ã©Â ÂÃ¨Â¨Â­Ã¦â„¢â€šÃ©â€“â€œÃ¥Â°ÂºÃ¥ÂºÂ¦: Ã¥Å’â€¦Ã¥ÂÂ«Ã¥Å½Å¸Ã¥Â§â€¹Ã¥Â°ÂºÃ¥ÂºÂ¦(1), Ã§Å¸Â­Ã¦Å“Å¸(3), Ã¤Â¸Â­Ã¦Å“Å¸(5)
-                logger.info(f"CrossTimeScaleFusion: 'cts_time_scales' Ã¦Å“ÂªÃ¦ÂÂÃ¤Â¾â€º, Ã¤Â½Â¿Ã§â€Â¨Ã©Â ÂÃ¨Â¨Â­Ã¥â‚¬Â¼: {cts_time_scales}")
+                cts_time_scales = [1, 3, 5] # ÃƒÂ©Ã‚Â Ã‚ÂÃƒÂ¨Ã‚Â¨Ã‚Â­ÃƒÂ¦Ã¢â€žÂ¢Ã¢â‚¬Å¡ÃƒÂ©Ã¢â‚¬â€œÃ¢â‚¬Å“ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦: ÃƒÂ¥Ã…â€™Ã¢â‚¬Â¦ÃƒÂ¥Ã‚ÂÃ‚Â«ÃƒÂ¥Ã…Â½Ã…Â¸ÃƒÂ¥Ã‚Â§Ã¢â‚¬Â¹ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦(1), ÃƒÂ§Ã…Â¸Ã‚Â­ÃƒÂ¦Ã…â€œÃ…Â¸(3), ÃƒÂ¤Ã‚Â¸Ã‚Â­ÃƒÂ¦Ã…â€œÃ…Â¸(5)
+                logger.info(f"CrossTimeScaleFusion: 'cts_time_scales' ÃƒÂ¦Ã…â€œÃ‚ÂªÃƒÂ¦Ã‚ÂÃ‚ÂÃƒÂ¤Ã‚Â¾Ã¢â‚¬Âº, ÃƒÂ¤Ã‚Â½Ã‚Â¿ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ÃƒÂ©Ã‚Â Ã‚ÂÃƒÂ¨Ã‚Â¨Ã‚Â­ÃƒÂ¥Ã¢â€šÂ¬Ã‚Â¼: {cts_time_scales}")
             
             self.cts_fusion_module = CrossTimeScaleFusion(
                 d_model=d_model,
                 time_scales=cts_time_scales,
-                fusion_type=cts_fusion_type, # Ã¥Â¾Å¾Ã©â€¦ÂÃ§Â½Â®Ã¤Â¸Â­Ã¨Â®â‚¬Ã¥Ââ€“Ã¨Å¾ÂÃ¥ÂË†Ã©Â¡Å¾Ã¥Å¾â€¹
-                dropout_rate=dropout # Ã¤Â½Â¿Ã§â€Â¨Ã¦Â¨Â¡Ã¥Å¾â€¹Ã¤Â¸Â» dropout Ã§Å½â€¡
+                fusion_type=cts_fusion_type, # ÃƒÂ¥Ã‚Â¾Ã…Â¾ÃƒÂ©Ã¢â‚¬Â¦Ã‚ÂÃƒÂ§Ã‚Â½Ã‚Â®ÃƒÂ¤Ã‚Â¸Ã‚Â­ÃƒÂ¨Ã‚Â®Ã¢â€šÂ¬ÃƒÂ¥Ã‚ÂÃ¢â‚¬â€œÃƒÂ¨Ã…Â¾Ã‚ÂÃƒÂ¥Ã‚ÂÃ‹â€ ÃƒÂ©Ã‚Â¡Ã…Â¾ÃƒÂ¥Ã…Â¾Ã¢â‚¬Â¹
+                dropout_rate=dropout # ÃƒÂ¤Ã‚Â½Ã‚Â¿ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ¥Ã…Â¾Ã¢â‚¬Â¹ÃƒÂ¤Ã‚Â¸Ã‚Â» dropout ÃƒÂ§Ã…Â½Ã¢â‚¬Â¡
             )
-            logger.info(f"CrossTimeScaleFusion Ã¦Â¨Â¡Ã§Âµâ€žÃ¥Â·Â²Ã¥â€¢Å¸Ã§â€Â¨, Ã©Â¡Å¾Ã¥Å¾â€¹: {cts_fusion_type}, Ã¥Â°ÂºÃ¥ÂºÂ¦: {cts_time_scales}.")
+            logger.info(f"CrossTimeScaleFusion ÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ§Ã‚ÂµÃ¢â‚¬Å¾ÃƒÂ¥Ã‚Â·Ã‚Â²ÃƒÂ¥Ã¢â‚¬Â¢Ã…Â¸ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨, ÃƒÂ©Ã‚Â¡Ã…Â¾ÃƒÂ¥Ã…Â¾Ã¢â‚¬Â¹: {cts_fusion_type}, ÃƒÂ¥Ã‚Â°Ã‚ÂºÃƒÂ¥Ã‚ÂºÃ‚Â¦: {cts_time_scales}.")
         else:
             self.cts_fusion_module = None
-            logger.info("CrossTimeScaleFusion Ã¦Â¨Â¡Ã§Âµâ€žÃ¦Å“ÂªÃ¥â€¢Å¸Ã§â€Â¨Ã£â‚¬â€š")
+            logger.info("CrossTimeScaleFusion ÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ§Ã‚ÂµÃ¢â‚¬Å¾ÃƒÂ¦Ã…â€œÃ‚ÂªÃƒÂ¥Ã¢â‚¬Â¢Ã…Â¸ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ÃƒÂ£Ã¢â€šÂ¬Ã¢â‚¬Å¡")
 
         # --- Cross-Asset Attention Initialization (optional) ---
         if self.use_cross_asset_attention and self.num_cross_asset_layers > 0:
@@ -822,10 +829,10 @@ class EnhancedTransformer(nn.Module):
         else:
             self.output_activation_fn = nn.Identity()
             
-        self.dropout_layer = nn.Dropout(dropout) # Ã©â‚¬Å¡Ã§â€Â¨ dropout Ã¥Â±Â¤
+        self.dropout_layer = nn.Dropout(dropout) # ÃƒÂ©Ã¢â€šÂ¬Ã…Â¡ÃƒÂ§Ã¢â‚¬ÂÃ‚Â¨ dropout ÃƒÂ¥Ã‚Â±Ã‚Â¤
 
     def _generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
-        """Ã§â€Å¸Ã¦Ë†ÂÃ¨â€¡ÂªÃ¥â€ºÅ¾Ã¦Â­Â¸Ã¤Â»Â»Ã¥â€¹â„¢Ã¦â€°â‚¬Ã©Å“â‚¬Ã§Å¡â€žÃ¦â€“Â¹Ã¥Â½Â¢Ã¥Â¾Å’Ã§ÂºÅ’Ã©ÂÂ®Ã§Â½Â©"""
+        """ÃƒÂ§Ã¢â‚¬ÂÃ…Â¸ÃƒÂ¦Ã‹â€ Ã‚ÂÃƒÂ¨Ã¢â‚¬Â¡Ã‚ÂªÃƒÂ¥Ã¢â‚¬ÂºÃ…Â¾ÃƒÂ¦Ã‚Â­Ã‚Â¸ÃƒÂ¤Ã‚Â»Ã‚Â»ÃƒÂ¥Ã¢â‚¬Â¹Ã¢â€žÂ¢ÃƒÂ¦Ã¢â‚¬Â°Ã¢â€šÂ¬ÃƒÂ©Ã…â€œÃ¢â€šÂ¬ÃƒÂ§Ã…Â¡Ã¢â‚¬Å¾ÃƒÂ¦Ã¢â‚¬â€œÃ‚Â¹ÃƒÂ¥Ã‚Â½Ã‚Â¢ÃƒÂ¥Ã‚Â¾Ã…â€™ÃƒÂ§Ã‚ÂºÃ…â€™ÃƒÂ©Ã‚ÂÃ‚Â®ÃƒÂ§Ã‚Â½Ã‚Â©"""
         mask = (torch.triu(torch.ones(sz, sz), diagonal=1) == 1).transpose(0, 1)
         return mask
 
@@ -978,19 +985,22 @@ class EnhancedTransformer(nn.Module):
         elif self.positional_encoding_type == 'sinusoidal' and self.pos_encoder is not None and not isinstance(self.pos_encoder, nn.Identity):
             x = self.pos_encoder(x)
 
-        x = self.dropout_layer(x) 
-
-        temporal_key_padding_mask = None 
-
-        for layer in self.transformer_layers:
-            x = layer(x, 
-                      key_padding_mask=temporal_key_padding_mask, 
-                      external_market_state_probs=external_market_state_probs_for_transformer)
-        
+        x = self.dropout_layer(x)
+        # Parallel time branches (DEFAULT: ON if available)
+        parallel_features = [x]
+        if getattr(self, 'time_patch', None) is not None and self.use_time_patchify:
+            x_patch = self.time_patch(x)
+            x_patch_up = F.interpolate(x_patch.transpose(1, 2), size=x.size(1), mode='linear', align_corners=False).transpose(1, 2)
+            parallel_features.append(x_patch_up)
+        if getattr(self, 'tcn_block', None) is not None and self.use_tcn_branch:
+            x_tcn = self.tcn_block(x)
+            parallel_features.append(x_tcn)
+        if len(parallel_features) > 1:
+            x = torch.stack(parallel_features, dim=0).mean(dim=0)
         x = self.final_norm(x) 
 
         if return_full_sequence:
-            # Ã¥â€ºÅ¾Ã¥â€šÂ³Ã¥Â®Å’Ã¦â€¢Â´Ã¥ÂºÂÃ¥Ë†â€” [batch, num_symbols, seq_len, d_model]
+            # ÃƒÂ¥Ã¢â‚¬ÂºÃ…Â¾ÃƒÂ¥Ã¢â‚¬Å¡Ã‚Â³ÃƒÂ¥Ã‚Â®Ã…â€™ÃƒÂ¦Ã¢â‚¬Â¢Ã‚Â´ÃƒÂ¥Ã‚ÂºÃ‚ÂÃƒÂ¥Ã‹â€ Ã¢â‚¬â€ [batch, num_symbols, seq_len, d_model]
             x_full = x.reshape(batch_size, num_active_symbols, seq_len, self.d_model)
             if symbol_padding_mask is not None:
                 mask_expanded = symbol_padding_mask.unsqueeze(-1).unsqueeze(-1).expand_as(x_full)
@@ -1100,6 +1110,9 @@ class EnhancedTransformer(nn.Module):
         return config
 
 # Ensure this class is defined after all its dependencies like EnhancedTransformerLayer, etc.
+
+
+
 
 
 

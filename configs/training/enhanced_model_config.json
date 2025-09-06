@@ -21,6 +21,10 @@
     "msfe_hidden_dim": 256,
     "msfe_scales": [3, 5, 7, 11],
     "use_cts_fusion": true,
+    "use_graph_attn": true,
+    "graph_layers": 2,
+    "graph_heads": 4,
+    "graph_topk": 5,
     "cts_time_scales": [1, 3, 5],
     "cts_fusion_type": "hierarchical_attention",
     "advanced_fusion_params": {
