@@ -29,6 +29,12 @@ except Exception:
 
 TRANSFORMER_OUTPUT_DIM_PER_SYMBOL = 64
 
+# Optional import: heavy model used only when requested via config
+try:
+    from oanda_trading_bot.training_system.models.enhanced_transformer import EnhancedTransformer
+except Exception:
+    EnhancedTransformer = None  # type: ignore
+
 class UniversalTransformer(nn.Module):
     """
     A universal transformer over symbol tokens with optional gradient checkpointing.
@@ -144,6 +150,71 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
             context_params = self.model_config.get('contextualized_embedding_params', {})
             self.symbol_embedding_dim = context_params.get('embedding_dim_override', self.model_config.get('symbol_embedding_dim', 16))
 
+        # If configured to use the EnhancedTransformer, initialize that path and return
+        if bool(self.model_config.get('use_enhanced_transformer', False)):
+            # Expect sequence features for each symbol
+            if 'features_from_dataset' not in observation_space.spaces:
+                raise ValueError("EnhancedTransformer path requires 'features_from_dataset' in observation_space.")
+            dataset_features_dim = int(observation_space.spaces['features_from_dataset'].shape[-1])
+
+            transformer_output_dim = int(self.model_config.get('output_dim', 256))
+            aux_dim = 0
+            for key, space in observation_space.spaces.items():
+                if key not in ['features_from_dataset', 'symbol_id', 'padding_mask']:
+                    aux_dim += int(np.prod(space.shape))
+            # Infer actual num symbols from observation space (preferred for correct flatten size)
+            try:
+                num_symbols_from_space = int(observation_space.spaces['features_from_dataset'].shape[0])
+            except Exception:
+                num_symbols_from_space = int(self.model_config.get('num_symbols', self.model_config.get('symbol_universe_size', 1)))
+            features_dim = transformer_output_dim * max(1, num_symbols_from_space) + aux_dim
+
+            # Initialize base extractor
+            super().__init__(observation_space, features_dim=features_dim)
+            self.observation_space = observation_space
+            self.aux_features_dim = aux_dim
+            self.use_enhanced_transformer = True
+
+            if EnhancedTransformer is None:
+                raise ImportError("EnhancedTransformer could not be imported.")
+
+            self.enhanced_transformer = EnhancedTransformer(
+                input_dim=dataset_features_dim,
+                d_model=int(self.model_config.get('hidden_dim', 768)),
+                transformer_nhead=int(self.model_config.get('num_heads', 12)),
+                num_encoder_layers=int(self.model_config.get('num_layers', 12)),
+                dim_feedforward=int(self.model_config.get('intermediate_dim', 3072)),
+                dropout=float(self.model_config.get('dropout_rate', 0.1)),
+                max_seq_len=int(self.model_config.get('max_sequence_length', 512)),
+                num_symbols=int(self.model_config.get('num_symbols', 10)),
+                output_dim=transformer_output_dim,
+                use_msfe=bool(self.model_config.get('use_msfe', True)),
+                msfe_hidden_dim=int(self.model_config.get('msfe_hidden_dim', 256)) if self.model_config.get('msfe_hidden_dim') is not None else None,
+                msfe_scales=list(self.model_config.get('msfe_scales', [3, 5, 7, 11])),
+                use_final_norm=bool(self.model_config.get('use_final_norm', True)),
+                use_adaptive_attention=bool(self.model_config.get('use_adaptive_attention', True)),
+                num_market_states=int(self.model_config.get('num_market_states', 4)),
+                use_gmm_market_state_detector=bool(self.model_config.get('use_gmm_market_state_detector', False)),
+                gmm_market_state_detector_path=self.model_config.get('gmm_market_state_detector_path'),
+                gmm_ohlcv_feature_config=self.model_config.get('gmm_ohlcv_feature_config'),
+                use_cts_fusion=bool(self.model_config.get('use_cts_fusion', True)),
+                cts_time_scales=list(self.model_config.get('cts_time_scales', [1, 3, 5])),
+                cts_fusion_type=str(self.model_config.get('cts_fusion_type', 'hierarchical_attention')),
+                use_symbol_embedding=bool(self.model_config.get('use_symbol_embedding', True)),
+                symbol_embedding_dim=int(self.model_config.get('symbol_embedding_dim', 16)),
+                use_fourier_features=bool(self.model_config.get('use_fourier_features', False)),
+                fourier_num_modes=int(self.model_config.get('fourier_num_modes', 32)) if self.model_config.get('fourier_num_modes') is not None else None,
+                use_wavelet_features=bool(self.model_config.get('use_wavelet_features', False)),
+                wavelet_name=str(self.model_config.get('wavelet_name', 'db4')) if self.model_config.get('wavelet_name') is not None else None,
+                wavelet_levels=int(self.model_config.get('wavelet_levels', 3)) if self.model_config.get('wavelet_levels') is not None else None,
+                use_graph_attn=bool(self.model_config.get('use_graph_attn', False)),
+                use_cross_asset_attention=bool(self.model_config.get('use_cross_asset_attention', False)),
+                num_cross_asset_layers=int(self.model_config.get('num_cross_asset_layers', 0)),
+            )
+
+            logger.info(f"EnhancedTransformerFeatureExtractor: using EnhancedTransformer. features_dim={self._features_dim}, aux={self.aux_features_dim}")
+            return
+
         try:
             market_features_dim = observation_space.spaces['market_features'].shape[-1]
         except KeyError:
@@ -194,10 +265,38 @@ class EnhancedTransformerFeatureExtractor(BaseFeaturesExtractor):
         logger.info(f"  Associated model_config: {json.dumps(self.model_config, indent=2)}")
 
     def forward(self, observations: PyTorchObs) -> th.Tensor:
-        """Extracts features from observation dict with masking over padded symbol slots.
-        Expected observation keys: 'market_features' [B,N,F], 'symbol_id' [B,N], plus auxiliary keys (flattened).
-        Returns: [B, features_dim] where features_dim = transformer_output_dim + sum(aux_dims).
+        """Extract features with optional EnhancedTransformer path.
+        Enhanced: uses 'features_from_dataset' [B,N,T,F] (+ optional 'symbol_id','padding_mask'), outputs flattened per-symbol features + auxiliaries.
+        Simple: uses 'market_features' [B,N,F] (+ optional 'symbol_id'), pooled + auxiliaries.
         """
+        if getattr(self, 'use_enhanced_transformer', False) and hasattr(self, 'enhanced_transformer'):
+            src = observations['features_from_dataset']  # [B,N,T,F]
+            symbol_ids = observations.get('symbol_id', None)
+            if symbol_ids is not None and not th.is_floating_point(symbol_ids):
+                symbol_ids = symbol_ids.long()
+            elif symbol_ids is not None:
+                symbol_ids = symbol_ids.long()
+            pad_mask = observations.get('padding_mask', None)
+            if pad_mask is not None:
+                pad_mask = pad_mask.bool()
+
+            x_dict = {
+                'src': src,
+                'symbol_ids': symbol_ids,
+                'src_key_padding_mask': pad_mask,
+            }
+            per_symbol = self.enhanced_transformer(x_dict)  # [B,N,D]
+            batch = per_symbol.size(0)
+            flat = per_symbol.reshape(batch, -1)
+
+            aux = []
+            for key, val in observations.items():
+                if key not in ['features_from_dataset', 'symbol_id', 'padding_mask']:
+                    aux.append(val.view(val.size(0), -1))
+            if aux:
+                return th.cat([flat, th.cat(aux, dim=1)], dim=1)
+            return flat
+
         market_features = observations['market_features']  # [B,N,F]
         transformer_input = market_features
 

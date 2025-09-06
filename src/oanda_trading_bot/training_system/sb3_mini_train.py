@@ -5,14 +5,32 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.env_checker import check_env
 
 from oanda_trading_bot.training_system.sb3_mini_env import MiniDictTradingEnv
+from oanda_trading_bot.training_system.agent.enhanced_feature_extractor import EnhancedTransformerFeatureExtractor
+from configs.training.enhanced_model_config import ModelConfig as EnhancedModelConfig
 
 
 def main():
     env = MiniDictTradingEnv(symbols=5, feat=8, seq=16, ctx=5)
     check_env(env, warn=True)
 
-    model = SAC("MultiInputPolicy", env, verbose=0, tensorboard_log=None, learning_starts=100, train_freq=1, gradient_steps=1)
-    model.learn(total_timesteps=2000)
+    policy_kwargs = {
+        'features_extractor_class': EnhancedTransformerFeatureExtractor,
+        'features_extractor_kwargs': {
+            'model_config': EnhancedModelConfig,
+        }
+    }
+
+    model = SAC(
+        policy="MultiInputPolicy",
+        env=env,
+        verbose=1,
+        tensorboard_log=None,
+        learning_starts=100,
+        train_freq=1,
+        gradient_steps=1,
+        policy_kwargs=policy_kwargs,
+    )
+    model.learn(total_timesteps=3000)
 
     # Save to weights path expected by live runner
     # parents[3] resolves to repo root: .../Oanda_Trading_Bot
