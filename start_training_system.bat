@@ -32,6 +32,9 @@ echo Launching Training System UI...
 echo Main application file: src\oanda_trading_bot\training_system\app.py
 echo.
 
+REM Ensure Python can import the 'src' package layout
+set "PYTHONPATH=%CD%\src;%PYTHONPATH%"
+
 streamlit run src/oanda_trading_bot/training_system/app.py
 
 echo.

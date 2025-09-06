@@ -15,7 +15,8 @@ def main():
     model.learn(total_timesteps=2000)
 
     # Save to weights path expected by live runner
-    root = Path(__file__).resolve().parents[4]
+    # parents[3] resolves to repo root: .../Oanda_Trading_Bot
+    root = Path(__file__).resolve().parents[3]
     weights_dir = root / 'weights'
     weights_dir.mkdir(parents=True, exist_ok=True)
     out = weights_dir / 'sac_model_symbols5.zip'

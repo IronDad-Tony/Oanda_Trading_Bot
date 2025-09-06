@@ -108,14 +108,14 @@ This will launch the Streamlit web server and open the UI in your browser.
 The live trading system deploys a trained model to trade on your OANDA account.
 
 **To run (Windows):**
-Simply double-click the `start_live_trading_system.bat` file.
+Simply double-click `start_live_trading_system.bat` to launch the new Streamlit UI (`src/oanda_trading_bot/live_ui/app.py`).
 
-**To run (Manual):**
-Open a terminal in the project root and run the following command:
+**Headless quick check (Practice, few cycles):**
+After generating a minimal model, you can run a tiny live cycle in PRACTICE mode (no UI):
 ```sh
-python src/oanda_trading_bot/live_trading_system/main.py
+python scripts/run_small_live_cycle.py --cycles 3
 ```
-This script will first initialize all backend components and then automatically launch the Streamlit UI for monitoring.
+This initializes the live system with a practice client, executes a few trade cycles, and saves a short report under `reports/`.
 
 
 ## 5. System Verification
@@ -165,3 +165,29 @@ This project is built from several key components that work together.
 -   **`logger_setup`**: Centralized logging configuration for consistent logs across the application.
 -   **`shared_data_manager`**: (In Training System) A manager to safely share data between the training thread and the Streamlit UI thread.
 
+
+## 7. Quick Start: Minimal Training + Live Sanity Check
+
+- Train a tiny SB3 model and save to `weights/sac_model_symbols5.zip` (used by live):
+  ```sh
+  python src/oanda_trading_bot/training_system/sb3_mini_train.py
+  ```
+
+- Launch Training UI (configuration + full training workflow):
+  ```sh
+  start_training_system.bat
+  ```
+
+- Launch Live UI (monitoring + start/stop trading loop):
+  ```sh
+  start_live_trading_system.bat
+  ```
+
+- Optional headless live smoke test (PRACTICE mode, 2–3 cycles):
+  ```sh
+  python scripts/run_small_live_cycle.py --cycles 3
+  ```
+
+Notes:
+- All upgraded features are enabled by default: enhanced transformer, ESS quantum strategies, progressive reward system, reward normalization, gradient clipping, AMP (auto when stable), and GPU optimizations when CUDA is available.
+- `.env` in the project root provides OANDA credentials; the headless script forces PRACTICE to avoid accidental live orders.
