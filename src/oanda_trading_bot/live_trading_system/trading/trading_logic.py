@@ -140,6 +140,8 @@ class TradingLogic:
                 new_candle = latest_candles[-1]
                 if new_candle['time'] > last_buffered_time:
                     self.data_buffers[instrument].append(new_candle)
+                    # New data arrived -> reset stale counter
+                    self.stale_counts[instrument] = 0
                     self.logger.debug(f"Appended new candle for {instrument} from {new_candle['time']}.")
                 else:
                     self.logger.debug(f"No new candle data for {instrument}. Last known time: {last_buffered_time}")
@@ -235,5 +237,3 @@ class TradingLogic:
             _t.sleep(sleep_seconds)
         self.logger.warning("Warmup timeout reached; proceeding with current buffers.")
         return False
-                # New data arrived -> reset stale counter
-                self.stale_counts[instrument] = 0

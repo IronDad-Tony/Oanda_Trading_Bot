@@ -67,6 +67,8 @@ function renderModels() {
   optNone.value = '';
   optNone.textContent = '(不指定模型)';
   sel.appendChild(optNone);
+  // Ensure readable default label
+  try { optNone.textContent = '(不指定模型)'; } catch(e) {}
   state.models.forEach((m) => {
     const o = document.createElement('option');
     o.value = m.path;
