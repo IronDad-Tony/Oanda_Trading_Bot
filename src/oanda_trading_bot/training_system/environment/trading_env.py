@@ -477,6 +477,17 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             max_slip = Decimal(str(getattr(self, 'max_slippage_pips', 0.5))) * pip
             slip = min(magnitude, max_slip)
             fill_price = base_price + slip if side_units > 0 else base_price - slip
+            # Round fill price to instrument precision (align with live broker rules)
+            try:
+                det = self.instrument_details_map.get(symbol) if hasattr(self, 'instrument_details_map') else None
+                if not det:
+                    det = self.instrument_info_manager.get_details(symbol)
+                pip_loc = int(getattr(det, 'pip_location', -4) or -4)
+                decimals = max(0, -pip_loc)
+                q = Decimal('1').scaleb(-decimals)
+                fill_price = Decimal(fill_price).quantize(q, rounding=ROUND_HALF_UP)
+            except Exception:
+                pass
             # Simulated priceBound reject
             if getattr(self, 'reject_if_slippage_exceeds_bound', True) and magnitude > max_slip:
                 to_remove.append(slot_idx)
@@ -898,9 +909,23 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         sl_distance = atr * self.stop_loss_atr_multiplier
 
         if units > 0:  # Long position
-            self.stop_loss_prices_qc[slot_idx] = entry_price - sl_distance
+            sl_price = entry_price - sl_distance
         else:  # Short position
-            self.stop_loss_prices_qc[slot_idx] = entry_price + sl_distance
+            sl_price = entry_price + sl_distance
+
+        # Round SL to instrument precision (align with live trading rounding)
+        try:
+            symbol = self.slot_to_symbol_map.get(slot_idx)
+            if symbol:
+                det = self.instrument_info_manager.get_details(symbol)
+                pip_loc = int(getattr(det, 'pip_location', -4) or -4)
+                decimals = max(0, -pip_loc)
+                q = Decimal('1').scaleb(-decimals)
+                sl_price = Decimal(sl_price).quantize(q, rounding=ROUND_HALF_UP)
+        except Exception:
+            pass
+
+        self.stop_loss_prices_qc[slot_idx] = sl_price
 
     def _apply_stop_loss(self, all_prices_map: Dict[str, Tuple[Decimal, Decimal]], timestamp: pd.Timestamp):
         """

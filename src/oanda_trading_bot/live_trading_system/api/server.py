@@ -234,41 +234,78 @@ def available_symbols():
 
 @app.get("/symbols/catalog")
 def symbols_catalog():
-    """Return categorized symbols based on instrument type and known index tickers."""
+    """Return categorized symbols mirroring the training system's grouping."""
     comps = STATE.ensure_components()
     try:
         from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
         iim = getattr(comps.get("risk_manager"), 'iim', None) or InstrumentInfoManager()
-        symbols = iim.all_symbols if hasattr(iim, 'all_symbols') else (iim.get_all_available_symbols() or [])
-        out: Dict[str, List[str]] = {"FX": [], "Indices": [], "Metals": [], "Others": []}
-        index_tokens = ["NAS", "US30", "SPX", "DE30", "JP225", "UK100", "FR40", "EU50", "ES35", "HK50", "AUS200", "CN50"]
-        for s in symbols:
-            cat = "Others"
+        all_symbols: List[str] = iim.all_symbols if hasattr(iim, 'all_symbols') else (iim.get_all_available_symbols() or [])
+
+        # Categories matching training app
+        out: Dict[str, List[str]] = {
+            'Major Pairs': [],
+            'Minor Pairs': [],
+            'Precious Metals': [],
+            'Indices': [],
+            'Energy': [],
+            'Commodities': [],
+            'Crypto': [],
+            'Bonds': [],
+        }
+        major_pairs = {'EUR_USD','USD_JPY','GBP_USD','AUD_USD','USD_CHF','USD_CAD','NZD_USD'}
+        specific_classifications = {
+            'NL25_EUR': 'Indices',
+            'CH20_CHF': 'Indices',
+            'ESPIX_EUR': 'Indices',
+            'BCO_USD': 'Energy',
+            'XCU_USD': 'Precious Metals',
+            'US2000_USD': 'Indices',
+            'CHINAH_HKD': 'Indices',
+            'SG30_SGD': 'Indices',
+            'FR40_EUR': 'Indices',
+        }
+        index_keywords = ["SPX","NAS","US30","UK100","DE30","JP225","HK33","AU200","FRA40","EU50","CN50","NL25","CH20","ESPIX","US2000","CHINAH","SG30","FR40"]
+        energy_keywords = ["OIL","WTICO","BRENT","NATGAS","GAS","BCO"]
+        metal_keywords = ["XAU","XAG","GOLD","SILVER","PLAT","PALL","XCU"]
+        commodity_keywords = ["CORN","WHEAT","SOYBN","SUGAR","COFFEE","COCOA","COTTON"]
+        crypto_keywords = ["BTC","ETH","LTC","BCH","XRP","ADA","DOGE","CRYPTO"]
+
+        for sym in all_symbols:
             try:
-                d = iim.get_details(s)
-                t = (getattr(d, 'type', None) or '').upper()
-                if t == 'CURRENCY':
-                    cat = 'FX'
-                elif t == 'METAL' or s.startswith('XAU') or s.startswith('XAG'):
-                    cat = 'Metals'
-                elif any(tok in s for tok in index_tokens):
+                d = iim.get_details(sym)
+                if d is None:
+                    continue
+                symbol = getattr(d, 'symbol', sym)
+                t = (getattr(d, 'type', '') or '').upper()
+                if symbol in specific_classifications:
+                    cat = specific_classifications[symbol]
+                elif symbol in major_pairs:
+                    cat = 'Major Pairs'
+                elif t == 'CURRENCY' and '_' in symbol and not (symbol.startswith('XAU') or symbol.startswith('XAG')):
+                    cat = 'Minor Pairs'
+                elif any(k in symbol or k in (getattr(d, 'display_name','') or '').upper() for k in metal_keywords):
+                    cat = 'Precious Metals'
+                elif any(k in symbol for k in index_keywords):
                     cat = 'Indices'
-                elif t == 'CFD' and any(tok in s for tok in index_tokens):
-                    cat = 'Indices'
+                elif any(k in symbol for k in energy_keywords):
+                    cat = 'Energy'
+                elif any(k in symbol for k in commodity_keywords):
+                    cat = 'Commodities'
+                elif t == 'CRYPTO' or any(k in symbol for k in crypto_keywords):
+                    cat = 'Crypto'
+                else:
+                    cat = 'Bonds'
+                out.setdefault(cat, []).append(symbol)
             except Exception:
-                if any(tok in s for tok in index_tokens):
-                    cat = 'Indices'
-                elif s.startswith('XAU') or s.startswith('XAG'):
-                    cat = 'Metals'
-            out.setdefault(cat, []).append(s)
-        # Stable ordering
-        for k in list(out.keys()):
-            out[k] = sorted(set(out[k]))
+                out.setdefault('Bonds', []).append(sym)
+
+        # Deduplicate and sort
+        out = {k: sorted(set(v)) for k, v in out.items() if v}
         return {"catalog": out}
     except Exception:
         cfg = comps["config"] or {}
         syms = cfg.get("trading_instruments", [])
-        return {"catalog": {"Default": syms}}
+        return {"catalog": {"Major Pairs": syms}}
 
 
 @app.get("/models")

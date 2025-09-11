@@ -7,7 +7,7 @@ const state = {
   risk: {},
   accountCurrency: 'USD',
   running: false,
-  catalog: { FX: [], Indices: [], Metals: [], Others: [] },
+  catalog: { 'Major Pairs': [], 'Minor Pairs': [], 'Precious Metals': [], 'Indices': [], 'Energy': [], 'Commodities': [], 'Crypto': [], 'Bonds': [] },
 };
 
 const el = (id) => document.getElementById(id);
@@ -32,16 +32,29 @@ function renderCatalog() {
     sel.innerHTML = '';
     items.forEach(s => { const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); })
   };
-  fill('selFX', state.catalog.FX||[]);
-  fill('selIndices', state.catalog.Indices||[]);
-  fill('selMetals', state.catalog.Metals||[]);
-  fill('selOthers', state.catalog.Others||[]);
+  fill('selMajorPairs', state.catalog['Major Pairs']||[]);
+  fill('selMinorPairs', state.catalog['Minor Pairs']||[]);
+  fill('selPreciousMetals', state.catalog['Precious Metals']||[]);
+  fill('selIndices', state.catalog['Indices']||[]);
+  fill('selEnergy', state.catalog['Energy']||[]);
+  fill('selCommodities', state.catalog['Commodities']||[]);
+  fill('selCrypto', state.catalog['Crypto']||[]);
+  fill('selBonds', state.catalog['Bonds']||[]);
   // Restore current selections
   applySelectionsToUI();
 }
 
 function applySelectionsToUI() {
-  const sets = [ ['selFX', state.catalog.FX||[]], ['selIndices', state.catalog.Indices||[]], ['selMetals', state.catalog.Metals||[]], ['selOthers', state.catalog.Others||[]] ];
+  const sets = [
+    ['selMajorPairs', state.catalog['Major Pairs']||[]],
+    ['selMinorPairs', state.catalog['Minor Pairs']||[]],
+    ['selPreciousMetals', state.catalog['Precious Metals']||[]],
+    ['selIndices', state.catalog['Indices']||[]],
+    ['selEnergy', state.catalog['Energy']||[]],
+    ['selCommodities', state.catalog['Commodities']||[]],
+    ['selCrypto', state.catalog['Crypto']||[]],
+    ['selBonds', state.catalog['Bonds']||[]],
+  ];
   sets.forEach(([id, list]) => {
     const sel = el(id);
     if (!sel) return;
@@ -50,7 +63,7 @@ function applySelectionsToUI() {
 }
 
 function recomputeSelectionFromUI() {
-  const ids = ['selFX','selIndices','selMetals','selOthers'];
+  const ids = ['selMajorPairs','selMinorPairs','selPreciousMetals','selIndices','selEnergy','selCommodities','selCrypto','selBonds'];
   const newSet = new Set();
   ids.forEach(id => {
     const sel = el(id); if (!sel) return;
@@ -168,8 +181,8 @@ async function refreshSymbols() {
     catch { res = await api('/symbols/training'); }
     state.symbols = res.symbols || [];
     state.selectedSymbols = new Set([...state.selectedSymbols].filter(s => state.symbols.includes(s)));
-    // Put all into Others if no catalog
-    state.catalog = { FX: [], Indices: [], Metals: [], Others: state.symbols };
+    // Put all into Minor Pairs if no catalog
+    state.catalog = { 'Major Pairs': [], 'Minor Pairs': state.symbols, 'Precious Metals': [], 'Indices': [], 'Energy': [], 'Commodities': [], 'Crypto': [], 'Bonds': [] };
     renderCatalog();
   }
 }
@@ -315,7 +328,7 @@ async function refreshSessionStatus() {
 }
 
 function bindEvents() {
-  ['selFX','selIndices','selMetals','selOthers'].forEach(id => {
+  ['selMajorPairs','selMinorPairs','selPreciousMetals','selIndices','selEnergy','selCommodities','selCrypto','selBonds'].forEach(id => {
     const sel = el(id); if (!sel) return;
     sel.onchange = recomputeSelectionFromUI;
   });

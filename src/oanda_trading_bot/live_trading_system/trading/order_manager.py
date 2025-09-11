@@ -82,10 +82,19 @@ class OrderManager:
         pip = self._pip_size(instrument)
         bound = self.max_slippage_pips * pip
         # BUY: cap max price; SELL: cap min price
-        if side_units > 0:
-            return float(ref_price + bound)
-        else:
-            return float(ref_price - bound)
+        pr = float(ref_price + bound) if side_units > 0 else float(ref_price - bound)
+        # Round bound price to instrument precision to avoid OANDA precision errors
+        try:
+            iim = self.system_state.get_instrument_manager()
+            det = iim.get_details(instrument)
+            pl = int(getattr(det, 'pip_location', 0)) if det is not None else 0
+            decimals = max(0, -pl)
+            from decimal import Decimal, ROUND_HALF_UP
+            q = Decimal('1').scaleb(-decimals)
+            pr = float(Decimal(str(pr)).quantize(q, rounding=ROUND_HALF_UP))
+        except Exception:
+            pass
+        return pr
 
     def process_signal(self, signal_info: Dict[str, Any]):
         """

@@ -25,22 +25,38 @@
         <h2>Session 設定</h2>
         <div class="form-group">
           <label>Symbols</label>
-          <div id="symbolSelectors">
+          <div id="symbolSelectors" class="grid-2">
             <div class="form-group">
-              <label>外匯 (FX)</label>
-              <select id="selFX" multiple size="8"></select>
+              <label>Major Pairs</label>
+              <select id="selMajorPairs" multiple size="8"></select>
             </div>
             <div class="form-group">
-              <label>指數 (Indices)</label>
+              <label>Minor Pairs</label>
+              <select id="selMinorPairs" multiple size="8"></select>
+            </div>
+            <div class="form-group">
+              <label>Precious Metals</label>
+              <select id="selPreciousMetals" multiple size="6"></select>
+            </div>
+            <div class="form-group">
+              <label>Indices</label>
               <select id="selIndices" multiple size="8"></select>
             </div>
             <div class="form-group">
-              <label>貴金屬 (Metals)</label>
-              <select id="selMetals" multiple size="6"></select>
+              <label>Energy</label>
+              <select id="selEnergy" multiple size="6"></select>
             </div>
             <div class="form-group">
-              <label>其他 (Others/CFDs)</label>
-              <select id="selOthers" multiple size="6"></select>
+              <label>Commodities</label>
+              <select id="selCommodities" multiple size="6"></select>
+            </div>
+            <div class="form-group">
+              <label>Crypto</label>
+              <select id="selCrypto" multiple size="6"></select>
+            </div>
+            <div class="form-group">
+              <label>Bonds</label>
+              <select id="selBonds" multiple size="6"></select>
             </div>
           </div>
           <small class="hint">可多選；總數決定可選模型容量</small>

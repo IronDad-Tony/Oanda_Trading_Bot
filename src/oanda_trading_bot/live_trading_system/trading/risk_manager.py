@@ -56,6 +56,23 @@ class RiskManager:
         self.cur_mgr = CurrencyDependencyManager(self.account_currency, apply_oanda_markup=True)
         self.iim = InstrumentInfoManager()
 
+    def _round_price_to_instrument(self, instrument: str, price: float) -> float:
+        """Round price to instrument precision based on pip_location."""
+        try:
+            det = self.iim.get_details(instrument)
+            pl = int(getattr(det, 'pip_location', 0)) if det is not None else 0
+            decimals = max(0, -pl)
+            from decimal import Decimal, ROUND_HALF_UP
+            q = Decimal('1').scaleb(-decimals)  # 10**(-decimals)
+            return float(Decimal(str(price)).quantize(q, rounding=ROUND_HALF_UP))
+        except Exception:
+            try:
+                pl = int(self.iim.get_details(instrument).pip_location)
+                decimals = max(0, -pl)
+                return round(float(price), decimals)
+            except Exception:
+                return float(price)
+
     def update_params(self, params: Dict[str, Any]):
         """
         Update risk parameters at runtime from a dictionary. Only known keys are applied.
@@ -320,10 +337,16 @@ class RiskManager:
         # 4. Final check (placeholder for more complex checks like total exposure)
         # In a real system, you would check if this new trade exceeds max_total_exposure_usd.
 
+        # Final instrument-specific rounding for SL/TP to satisfy broker precision
+        if stop_loss_price is not None:
+            stop_loss_price = self._round_price_to_instrument(instrument, float(stop_loss_price))
+        if take_profit_price is not None:
+            take_profit_price = self._round_price_to_instrument(instrument, float(take_profit_price))
+
         self.logger.info(f"Trade approved for {instrument}. Units: {trade_size_units}, SL: {stop_loss_price}, TP: {take_profit_price}")
 
         return {
             "units": trade_size_units if signal == 1 else -trade_size_units,
-            "stop_loss": round(stop_loss_price, 5) if stop_loss_price is not None else None,
-            "take_profit": round(take_profit_price, 5) if take_profit_price is not None else None
+            "stop_loss": float(stop_loss_price) if stop_loss_price is not None else None,
+            "take_profit": float(take_profit_price) if take_profit_price is not None else None
         }
