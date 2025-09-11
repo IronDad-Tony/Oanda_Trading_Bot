@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Trading Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">▶</span>
+      <h1>Live Trading</h1>
+    </div>
+    <div class="header-actions">
+      <div id="engineStatus" class="badge">Stopped</div>
+      <button id="btnEmergency" class="btn btn-danger">緊急停止</button>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <aside class="sidebar">
+      <section class="card">
+        <h2>Session 設定</h2>
+        <div class="form-group">
+          <label>Symbols</label>
+          <div id="symbolsList" class="chip-list"></div>
+        </div>
+        <div class="form-group">
+          <label>可用模型 (依選擇數量篩選)</label>
+          <select id="modelSelect"></select>
+        </div>
+        <div class="form-group">
+          <label>目標操作金額 (<= Equity) <span id="accCcyLabel"></span></label>
+          <input id="targetCapital" type="number" min="0" step="1" placeholder="" />
+          <small id="equityHint" class="hint"></small>
+        </div>
+        <div class="form-actions">
+          <button id="btnApply" class="btn">套用設定</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>風險控制</h2>
+        <div class="grid-2">
+          <div class="form-group">
+            <label>Max Total Exposure (<span id="accCcyShort">CCY</span>)</label>
+            <input id="risk_max_exposure" type="number" step="1" />
+          </div>
+          <div class="form-group">
+            <label>Max Risk Per Trade (%)</label>
+            <input id="risk_max_risk_pct" type="number" step="0.1" />
+          </div>
+          <div class="form-group">
+            <label>Use ATR Sizing</label>
+            <select id="risk_use_atr">
+              <option value="false">False</option>
+              <option value="true">True</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>ATR Period</label>
+            <input id="risk_atr_period" type="number" step="1" />
+          </div>
+          <div class="form-group">
+            <label>SL ATR Multiplier</label>
+            <input id="risk_sl_atr_mult" type="number" step="0.1" />
+          </div>
+          <div class="form-group">
+            <label>TP ATR Multiplier</label>
+            <input id="risk_tp_atr_mult" type="number" step="0.1" />
+          </div>
+          <div class="form-group">
+            <label>Default SL (pips)</label>
+            <input id="risk_sl_pips" type="number" step="1" />
+          </div>
+          <div class="form-group">
+            <label>Default TP (pips)</label>
+            <input id="risk_tp_pips" type="number" step="1" />
+          </div>
+        </div>
+        <div class="form-actions">
+          <button id="btnRiskUpdate" class="btn">更新風險參數</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>控制</h2>
+        <div class="form-actions">
+          <button id="btnStart" class="btn btn-primary">開始</button>
+          <button id="btnStop" class="btn">停止</button>
+        </div>
+        <div class="warmup" id="warmupStatus">Warmup: 未開始</div>
+      </section>
+
+      <section class="card">
+        <h2>測試工具</h2>
+        <div class="form-group">
+          <label>單次測試單位</label>
+          <input id="smokeUnits" type="number" min="1" step="1" value="1" />
+        </div>
+        <div class="form-actions">
+          <button id="btnSmoke" class="btn">執行 Smoke Test (Practice)</button>
+        </div>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="grid-2">
+        <section class="card">
+          <h2>帳戶摘要</h2>
+          <div id="accountSummary" class="kv"></div>
+        </section>
+        <section class="card">
+          <h2>績效摘要</h2>
+          <div id="perfSummary" class="kv"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>持倉</h2>
+        <table class="table" id="positionsTable">
+          <thead>
+            <tr>
+              <th>Instrument</th>
+              <th>Side</th>
+              <th>Units</th>
+              <th>Avg Price</th>
+              <th>Unrealized P/L</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>交易紀錄</h2>
+        <table class="table" id="tradesTable">
+          <thead>
+            <tr>
+              <th>Trade ID</th>
+              <th>Instrument</th>
+              <th>Units</th>
+              <th>Entry</th>
+              <th>Status</th>
+              <th>Close</th>
+              <th>PnL</th>
+              <th>Opened</th>
+              <th>Closed</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>績效圖表</h2>
+        <div class="grid-2">
+          <div>
+            <label class="hint">累積實現PnL（帳戶幣別）</label>
+            <canvas id="equityChart" height="120"></canvas>
+          </div>
+          <div>
+            <label class="hint">各 Symbol 實現PnL</label>
+            <canvas id="symbolPerfChart" height="120"></canvas>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <span>© Live Trading UI</span>
+  </footer>
+
+  <script src="/app.js"></script>
+  <noscript>請啟用 JavaScript 使用完整功能。</noscript>
+</body>
+</html>

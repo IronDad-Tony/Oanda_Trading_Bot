@@ -4,14 +4,15 @@ import time
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from oanda_trading_bot.live_trading_system.main import initialize_system, trading_loop
 
 
-app = FastAPI(title="Live Trading API", version="0.1.0")
+app = FastAPI(title="Live Trading API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -132,6 +133,17 @@ async def _startup():
     if STATE.ws_task is None:
         STATE.ws_task = asyncio.create_task(_broadcaster())
 
+    # Mount static UI (served at "/")
+    try:
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ui"))
+        if os.path.isdir(root):
+            # Only mount once
+            mounted = any(hasattr(r, 'app') and isinstance(r.app, StaticFiles) for r in app.routes)
+            if not mounted:
+                app.mount("/", StaticFiles(directory=root, html=True), name="ui")
+    except Exception:
+        pass
+
 
 @app.get("/health")
 def health():
@@ -144,6 +156,14 @@ def health():
 def account_summary():
     comps = STATE.ensure_components()
     return comps["client"].get_account_summary() or {}
+
+
+@app.get("/account/currency")
+def account_currency():
+    comps = STATE.ensure_components()
+    acc = comps["client"].get_account_summary() or {}
+    ccy = ((((acc.get('account') or {}).get('currency')) or '') or '').upper()
+    return {"currency": ccy or (comps["config"].get("account_currency") or "USD")}
 
 
 @app.get("/account/positions")
@@ -186,6 +206,28 @@ def training_symbols():
     cfg = comps["config"] or {}
     syms = cfg.get("trading_instruments", [])
     return {"symbols": syms}
+
+
+@app.get("/symbols/available")
+def available_symbols():
+    """Return a comprehensive symbol list from InstrumentInfoManager cache (OANDA account)."""
+    comps = STATE.ensure_components()
+    # Reuse the RiskManager's InstrumentInfoManager if available
+    iim = None
+    try:
+        iim = getattr(comps.get("risk_manager"), 'iim', None)
+    except Exception:
+        iim = None
+    try:
+        if iim is None:
+            from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
+            iim = InstrumentInfoManager()
+        syms = iim.all_symbols if hasattr(iim, 'all_symbols') else (iim.get_all_available_symbols() or [])
+        return {"symbols": syms}
+    except Exception:
+        # Fallback to training set
+        cfg = comps["config"] or {}
+        return {"symbols": cfg.get("trading_instruments", [])}
 
 
 @app.get("/models")
@@ -275,11 +317,29 @@ def session_start(cold_start_timeout_sec: Optional[int] = None):
     ss = comps["system_state"]
     tl = comps["trading_logic"]
     cfg = comps["config"]
+    pred = comps["prediction_service"]
 
     # Warmup
     instruments = ss.get_selected_instruments()
     timeout = int(cold_start_timeout_sec or 120)
     tl.warmup_buffers(instruments, max_wait_seconds=timeout, sleep_seconds=1)
+
+    # Ensure a model is loaded
+    try:
+        model_cfg = (cfg or {}).get('model', {}) if isinstance(cfg, dict) else {}
+        if getattr(pred, 'model', None) is None:
+            mp = model_cfg.get('path')
+            if mp:
+                root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+                ap = os.path.join(root, mp)
+                if os.path.exists(ap):
+                    pred.load_model(ap, device=None)
+        if getattr(pred, 'model', None) is None:
+            raise HTTPException(status_code=400, detail="Model not loaded. Please select/load a model in Session settings.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to load model from configuration; please select a model.")
 
     # Start engine loop
     ss.start()
@@ -298,6 +358,126 @@ def session_stop():
     if th and th.is_alive():
         th.join(timeout=5)
     return {"stopped": True}
+
+
+@app.post("/session/close_position")
+def close_position(instrument: str):
+    comps = STATE.ensure_components()
+    client = comps["client"]
+    pm = comps["position_manager"]
+    resp_long = client.close_position(instrument, long_units="ALL")
+    resp_short = client.close_position(instrument, short_units="ALL")
+    # Update DB/PM if any closed
+    closed_any = False
+    for resp in (resp_long, resp_short):
+        if not resp:
+            continue
+        fill_tx = resp.get('longOrderFillTransaction') or resp.get('shortOrderFillTransaction')
+        if fill_tx and fill_tx.get('tradesClosed'):
+            closed_any = True
+            for closed_trade in fill_tx.get('tradesClosed', []):
+                try:
+                    trade_id_c = closed_trade.get("tradeID")
+                    price_c = float(closed_trade.get("price", 0))
+                    pnl_c = float(closed_trade.get("realizedPL", 0))
+                    comps["db_manager"].update_trade_on_close(trade_id_c, price_c, pnl_c)
+                except Exception:
+                    pass
+    if closed_any:
+        try:
+            pm.close_position(instrument)
+        except Exception:
+            pass
+    return {"ok": True, "closed": closed_any}
+
+
+@app.post("/session/emergency_stop")
+def emergency_stop():
+    comps = STATE.ensure_components()
+    ss = comps["system_state"]
+    client = comps["client"]
+    pm = comps["position_manager"]
+    # Stop engine
+    try:
+        ss.stop()
+    except Exception:
+        pass
+    # Flatten all open positions
+    try:
+        pos = client.get_open_positions() or {}
+        for p in pos.get("positions", []):
+            ins = p.get("instrument")
+            try:
+                if int(p.get("long", {}).get("units", 0)) != 0:
+                    client.close_position(ins, long_units="ALL")
+                if int(p.get("short", {}).get("units", 0)) != 0:
+                    client.close_position(ins, short_units="ALL")
+                try:
+                    pm.close_position(ins)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.get("/config/risk")
+def get_risk_config():
+    comps = STATE.ensure_components()
+    rm = comps["risk_manager"]
+    return {
+        "risk_management": getattr(rm, 'config', {})
+    }
+
+
+@app.post("/test/smoke_trade")
+def smoke_trade_per_symbol(units: Optional[int] = 1):
+    """
+    Test utility: for each selected symbol, place a small BUY then SELL order using override_units.
+    Intended for practice environment. No SL/TP attached.
+    """
+    comps = STATE.ensure_components()
+    ss = comps["system_state"]
+    tl = comps["trading_logic"]
+    om = comps["order_manager"]
+    cfg = comps["config"] or {}
+
+    symbols = ss.get_selected_instruments()
+    if not symbols:
+        raise HTTPException(status_code=400, detail="No symbols selected in session")
+
+    # Ensure buffers are warm for reading ref prices
+    try:
+        tl.warmup_buffers(symbols, max_wait_seconds=int(cfg.get('smoke_warmup_timeout', 60)))
+    except Exception:
+        pass
+
+    placed: List[str] = []
+    for ins in symbols:
+        try:
+            # Try to get latest
+            latest = comps["client"].get_bid_ask_candles_combined(ins, count=1) or []
+            price = 0.0
+            if latest:
+                last = latest[-1]
+                price = float(last.get('ask_close') or last.get('bid_close') or 0.0)
+            # BUY
+            om.process_signal({"instrument": ins, "signal": 1, "price": price, "override_units": int(units), "no_sl_tp": True})
+            time.sleep(1.5)
+            # SELL
+            latest2 = comps["client"].get_bid_ask_candles_combined(ins, count=1) or []
+            price2 = price
+            if latest2:
+                last2 = latest2[-1]
+                price2 = float(last2.get('ask_close') or last2.get('bid_close') or 0.0)
+            om.process_signal({"instrument": ins, "signal": -1, "price": price2, "override_units": int(units), "no_sl_tp": True})
+            placed.append(ins)
+        except Exception:
+            pass
+
+    return {"ok": True, "symbols": placed}
 
 
 @app.post("/risk/update")
@@ -329,4 +509,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
