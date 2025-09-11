@@ -49,6 +49,8 @@ class SystemState:
         self.current_model: str | None = "model_v1.pth"
         self.instrument_info_manager: Optional[InstrumentInfoManager] = None
         self.categorized_instruments: Dict[str, Any] = {}
+        # Suspended/untradeable instruments tracking
+        self._suspended: Dict[str, Any] = {}
 
     def get_instrument_manager(self) -> InstrumentInfoManager:
         """獲取 InstrumentInfoManager 的單例，並傳遞正確的憑證。"""

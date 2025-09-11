@@ -10,6 +10,7 @@ from ..core.system_state import SystemState
 from ..database.database_manager import DatabaseManager
 from .risk_manager import RiskManager
 from ..core.execution_metrics import ExecutionMetricsLogger
+from ..core import tradability_guard as guard
 
 
 class OrderManager:
@@ -260,6 +261,14 @@ class OrderManager:
             elif order_response and "orderCancelTransaction" in order_response:
                 reason = order_response['orderCancelTransaction'].get('reason')
                 self.logger.warning(f"Order for {instrument} was cancelled. Reason: {reason}")
+                # Suspend instrument for market-unavailable reasons
+                try:
+                    r = str(reason or '').upper()
+                    if any(tok in r for tok in ("MARKET_HALTED", "MARKET_CLOSED", "TRADE_DISABLED", "INSTRUMENT_NOT_TRADABLE")):
+                        guard.suspend(instrument, reason=r)
+                        self.logger.warning(f"Instrument {instrument} suspended due to reason={r}.")
+                except Exception:
+                    pass
                 if self.metrics:
                     try:
                         self.metrics.log({

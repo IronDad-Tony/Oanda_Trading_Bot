@@ -7,6 +7,7 @@ const state = {
   risk: {},
   accountCurrency: 'USD',
   running: false,
+  catalog: { FX: [], Indices: [], Metals: [], Others: [] },
 };
 
 const el = (id) => document.getElementById(id);
@@ -24,22 +25,38 @@ function renderEngineStatus() {
   badge.classList.toggle('running', !!state.running);
 }
 
-function renderSymbols() {
-  const wrap = el('symbolsList');
-  wrap.innerHTML = '';
-  state.symbols.forEach((s) => {
-    const c = document.createElement('div');
-    c.className = 'chip' + (state.selectedSymbols.has(s) ? ' selected': '');
-    c.textContent = s;
-    c.onclick = () => { toggleSymbol(s); };
-    wrap.appendChild(c);
+function renderCatalog() {
+  const fill = (id, items) => {
+    const sel = el(id);
+    if (!sel) return;
+    sel.innerHTML = '';
+    items.forEach(s => { const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); })
+  };
+  fill('selFX', state.catalog.FX||[]);
+  fill('selIndices', state.catalog.Indices||[]);
+  fill('selMetals', state.catalog.Metals||[]);
+  fill('selOthers', state.catalog.Others||[]);
+  // Restore current selections
+  applySelectionsToUI();
+}
+
+function applySelectionsToUI() {
+  const sets = [ ['selFX', state.catalog.FX||[]], ['selIndices', state.catalog.Indices||[]], ['selMetals', state.catalog.Metals||[]], ['selOthers', state.catalog.Others||[]] ];
+  sets.forEach(([id, list]) => {
+    const sel = el(id);
+    if (!sel) return;
+    [...sel.options].forEach(opt => { opt.selected = state.selectedSymbols.has(opt.value); });
   });
 }
 
-function toggleSymbol(sym) {
-  if (state.selectedSymbols.has(sym)) state.selectedSymbols.delete(sym);
-  else state.selectedSymbols.add(sym);
-  renderSymbols();
+function recomputeSelectionFromUI() {
+  const ids = ['selFX','selIndices','selMetals','selOthers'];
+  const newSet = new Set();
+  ids.forEach(id => {
+    const sel = el(id); if (!sel) return;
+    [...sel.selectedOptions].forEach(o => newSet.add(o.value));
+  });
+  state.selectedSymbols = newSet;
   refreshModels();
 }
 
@@ -134,14 +151,25 @@ function renderTrades(list) {
 }
 
 async function refreshSymbols() {
-  // Prefer available symbols from OANDA/manager; fallback to training symbols
-  let res;
-  try { res = await api('/symbols/available'); }
-  catch { res = await api('/symbols/training'); }
-  state.symbols = res.symbols || [];
-  // Preserve selection if still valid
-  state.selectedSymbols = new Set([...state.selectedSymbols].filter(s => state.symbols.includes(s)));
-  renderSymbols();
+  // Prefer catalog
+  try {
+    const cat = await api('/symbols/catalog');
+    state.catalog = cat.catalog || state.catalog;
+    // Preserve selection against full catalog set
+    const all = Object.values(state.catalog).flat();
+    state.selectedSymbols = new Set([...state.selectedSymbols].filter(s => all.includes(s)));
+    renderCatalog();
+  } catch {
+    // Fallback to flat available list
+    let res;
+    try { res = await api('/symbols/available'); }
+    catch { res = await api('/symbols/training'); }
+    state.symbols = res.symbols || [];
+    state.selectedSymbols = new Set([...state.selectedSymbols].filter(s => state.symbols.includes(s)));
+    // Put all into Others if no catalog
+    state.catalog = { FX: [], Indices: [], Metals: [], Others: state.symbols };
+    renderCatalog();
+  }
 }
 
 async function refreshModels() {
@@ -247,12 +275,27 @@ function connectWS() {
           renderEngineStatus();
           // Warmup info
           refreshSessionStatus();
+          // Suspended alerts
+          try { renderAlerts(obj.data && obj.data.suspended || {}); } catch {}
         } else if (obj.type === 'account') {
           renderAccount(obj.data);
         }
       } catch {}
     };
   } catch {}
+}
+
+function renderAlerts(map) {
+  const card = el('alertsCard');
+  const wrap = el('alerts');
+  wrap.innerHTML = '';
+  const entries = Object.entries(map||{});
+  if (!entries.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  entries.forEach(([sym, info]) => {
+    const k = document.createElement('div'); k.textContent = sym; wrap.appendChild(k);
+    const v = document.createElement('div'); v.textContent = (info && info.reason) ? info.reason : 'suspended'; wrap.appendChild(v);
+  });
 }
 
 async function refreshSessionStatus() {
@@ -270,6 +313,10 @@ async function refreshSessionStatus() {
 }
 
 function bindEvents() {
+  ['selFX','selIndices','selMetals','selOthers'].forEach(id => {
+    const sel = el(id); if (!sel) return;
+    sel.onchange = recomputeSelectionFromUI;
+  });
   el('btnApply').onclick = async () => { try { await applySessionConfig(); alert('設定已套用'); } catch (e) { alert('設定失敗: ' + e); } };
   el('btnRiskUpdate').onclick = async () => {
     try {

@@ -9,6 +9,7 @@ from ..data.data_preprocessor import LivePreprocessor
 from ..model.prediction_service import PredictionService
 from ..core.system_state import SystemState
 from .order_manager import OrderManager
+from ..core import tradability_guard as guard
 
 class TradingLogic:
     """
@@ -52,6 +53,8 @@ class TradingLogic:
         # Data buffers are now created on-the-fly when an instrument is processed.
         self.data_buffers: Dict[str, collections.deque] = {}
         self.logger.info("TradingLogic initialized to handle dynamic instrument selection.")
+        self.stale_counts: Dict[str, int] = {}
+        self.market_stale_threshold = int(self.config.get('market_stale_threshold_cycles', 6))
 
     def _initialize_all_data_buffers(self):
         """Pre-fills the data buffers for all instruments on startup."""
@@ -61,6 +64,26 @@ class TradingLogic:
         # The logic to get instruments would need to be redefined, e.g., from config.
         instruments = [] # e.g., self.config.get('tradeable_instruments', [])
         for instrument in instruments:
+            # Skip if suspended; try auto-resume on new data
+            try:
+                if guard.is_suspended(instrument):
+                    self.logger.warning(f"Instrument {instrument} is suspended. Probing for resume...")
+                    # Attempt resume by checking for new candle
+                    if instrument in self.data_buffers and len(self.data_buffers[instrument]) > 0:
+                        last_buffered_time = self.data_buffers[instrument][-1]['time']
+                    else:
+                        last_buffered_time = None
+                    latest = self.client.get_bid_ask_candles_combined(instrument, 1, self.granularity) or []
+                    if latest:
+                        if (last_buffered_time is None) or (latest[-1]['time'] > last_buffered_time):
+                            guard.resume(instrument)
+                            self.logger.info(f"Instrument {instrument} resumed for trading.")
+                        else:
+                            continue
+                    else:
+                        continue
+            except Exception:
+                pass
             self._fill_buffer(instrument)
 
     def _fill_buffer(self, instrument: str):
@@ -120,6 +143,15 @@ class TradingLogic:
                     self.logger.debug(f"Appended new candle for {instrument} from {new_candle['time']}.")
                 else:
                     self.logger.debug(f"No new candle data for {instrument}. Last known time: {last_buffered_time}")
+                    # Count consecutive stale cycles and suspend if over threshold
+                    sc = self.stale_counts.get(instrument, 0) + 1
+                    self.stale_counts[instrument] = sc
+                    if sc >= self.market_stale_threshold:
+                        try:
+                            guard.suspend(instrument, reason="market_stale")
+                            self.logger.warning(f"Instrument {instrument} suspended due to stale market data.")
+                        except Exception:
+                            pass
                     continue
 
                 # 特徵工程
@@ -138,6 +170,8 @@ class TradingLogic:
 
                 signal = prediction_map[instrument]
                 self.logger.info(f"Generated signal for {instrument}: {signal}")
+                if signal in (0, None):
+                    continue
 
                 # 處理交易訊號
                 last_candle = self.data_buffers[instrument][-1]
@@ -201,3 +235,5 @@ class TradingLogic:
             _t.sleep(sleep_seconds)
         self.logger.warning("Warmup timeout reached; proceeding with current buffers.")
         return False
+                # New data arrived -> reset stale counter
+                self.stale_counts[instrument] = 0

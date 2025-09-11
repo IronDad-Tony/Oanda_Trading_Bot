@@ -75,6 +75,10 @@ class PredictionService:
             raise
 
     def predict(self, processed_data_map: Dict[str, np.ndarray]) -> Dict[str, int]:
+        # Early guard with clean message
+        if self.model is None:
+            logger.error("Model is not loaded; call load_model() first.")
+            raise ValueError("Model not loaded. Please call load_model().")
         """
         æ ¹æ“šä¸€æ‰¹é è™•ç†å¾Œçš„æ•¸æ“šç”Ÿæˆé æ¸¬ã€‚
         è™•ç†å¤šå€‹äº¤æ˜“å°çš„æ•¸æ“šï¼Œé€²è¡Œå¿…è¦çš„å¡«å……å’ŒæŽ©ç¢¼ï¼Œç„¶å¾Œé€²è¡Œæ‰¹æ¬¡é æ¸¬ã€‚
@@ -264,6 +268,14 @@ class PredictionService:
                             if 'symbol_id' in obs_space.spaces:
                                 fixed_obs['symbol_id'] = np.arange(symbols_dim, dtype=np.int32)
 
+                            # Sanitize observation to avoid NaNs propagating
+                            for _k, _v in list(fixed_obs.items()):
+                                try:
+                                    arr = np.asarray(_v)
+                                    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+                                    fixed_obs[_k] = arr
+                                except Exception:
+                                    pass
                             action, _ = self.model.predict(fixed_obs, deterministic=True)
                             # Select action for this instrument and discretize to -1/0/1
                             try:

@@ -25,7 +25,25 @@
         <h2>Session 設定</h2>
         <div class="form-group">
           <label>Symbols</label>
-          <div id="symbolsList" class="chip-list"></div>
+          <div id="symbolSelectors">
+            <div class="form-group">
+              <label>外匯 (FX)</label>
+              <select id="selFX" multiple size="8"></select>
+            </div>
+            <div class="form-group">
+              <label>指數 (Indices)</label>
+              <select id="selIndices" multiple size="8"></select>
+            </div>
+            <div class="form-group">
+              <label>貴金屬 (Metals)</label>
+              <select id="selMetals" multiple size="6"></select>
+            </div>
+            <div class="form-group">
+              <label>其他 (Others/CFDs)</label>
+              <select id="selOthers" multiple size="6"></select>
+            </div>
+          </div>
+          <small class="hint">可多選；總數決定可選模型容量</small>
         </div>
         <div class="form-group">
           <label>可用模型 (依選擇數量篩選)</label>
@@ -117,6 +135,11 @@
           <div id="perfSummary" class="kv"></div>
         </section>
       </div>
+
+      <section class="card" id="alertsCard" style="display:none;">
+        <h2>警示</h2>
+        <div id="alerts" class="kv"></div>
+      </section>
 
       <section class="card">
         <h2>持倉</h2>

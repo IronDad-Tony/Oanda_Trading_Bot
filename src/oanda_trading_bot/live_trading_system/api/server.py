@@ -91,6 +91,8 @@ async def _broadcaster():
                     "running": getattr(ss, 'is_running', False),
                     "selected_symbols": ss.get_selected_instruments(),
                     "model": ss.get_current_model(),
+                    # Use global guard for suspended symbols
+                    "suspended": __import__('oanda_trading_bot.live_trading_system.core.tradability_guard', fromlist=['get_all']).get_all(),
                 }
                 await _ws_broadcast({"type": "status", "data": data})
 
@@ -230,6 +232,45 @@ def available_symbols():
         return {"symbols": cfg.get("trading_instruments", [])}
 
 
+@app.get("/symbols/catalog")
+def symbols_catalog():
+    """Return categorized symbols based on instrument type and known index tickers."""
+    comps = STATE.ensure_components()
+    try:
+        from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
+        iim = getattr(comps.get("risk_manager"), 'iim', None) or InstrumentInfoManager()
+        symbols = iim.all_symbols if hasattr(iim, 'all_symbols') else (iim.get_all_available_symbols() or [])
+        out: Dict[str, List[str]] = {"FX": [], "Indices": [], "Metals": [], "Others": []}
+        index_tokens = ["NAS", "US30", "SPX", "DE30", "JP225", "UK100", "FR40", "EU50", "ES35", "HK50", "AUS200", "CN50"]
+        for s in symbols:
+            cat = "Others"
+            try:
+                d = iim.get_details(s)
+                t = (getattr(d, 'type', None) or '').upper()
+                if t == 'CURRENCY':
+                    cat = 'FX'
+                elif t == 'METAL' or s.startswith('XAU') or s.startswith('XAG'):
+                    cat = 'Metals'
+                elif any(tok in s for tok in index_tokens):
+                    cat = 'Indices'
+                elif t == 'CFD' and any(tok in s for tok in index_tokens):
+                    cat = 'Indices'
+            except Exception:
+                if any(tok in s for tok in index_tokens):
+                    cat = 'Indices'
+                elif s.startswith('XAU') or s.startswith('XAG'):
+                    cat = 'Metals'
+            out.setdefault(cat, []).append(s)
+        # Stable ordering
+        for k in list(out.keys()):
+            out[k] = sorted(set(out[k]))
+        return {"catalog": out}
+    except Exception:
+        cfg = comps["config"] or {}
+        syms = cfg.get("trading_instruments", [])
+        return {"catalog": {"Default": syms}}
+
+
 @app.get("/models")
 def models(min_symbols: int = 1):
     comps = STATE.ensure_components()
@@ -253,12 +294,17 @@ def session_status():
             warm = False
             missing.append(inst)
     risk = comps["risk_manager"].config if hasattr(comps["risk_manager"], 'config') else {}
+    try:
+        suspended = __import__('oanda_trading_bot.live_trading_system.core.tradability_guard', fromlist=['get_all']).get_all()
+    except Exception:
+        suspended = {}
     return {
         "running": getattr(ss, 'is_running', False),
         "selected_symbols": instruments,
         "model": ss.get_current_model(),
         "risk": risk,
-        "warmup": {"ready": warm, "missing": missing}
+        "warmup": {"ready": warm, "missing": missing},
+        "suspended": suspended,
     }
 
 
@@ -272,11 +318,19 @@ def session_config(body: SessionConfig):
     client = comps["client"]
     cfg = comps["config"]
 
-    # Validate symbols
-    training_syms = set(cfg.get("trading_instruments", []))
-    if not set(body.symbols).issubset(training_syms):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Symbols not in training set")
+    # Validate symbols: allow any account-available instrument (not limited to training set)
+    try:
+        from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
+        iim = getattr(risk, 'iim', None) or InstrumentInfoManager()
+        available = set(iim.all_symbols if hasattr(iim, 'all_symbols') else (iim.get_all_available_symbols() or []))
+        unknown = [s for s in body.symbols if s not in available]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Unknown instruments: {unknown}")
+    except HTTPException:
+        raise
+    except Exception:
+        # If we cannot validate against OANDA now, accept and rely on execution-time checks
+        pass
 
     # Validate model capacity
     models = _scan_models(cfg)
