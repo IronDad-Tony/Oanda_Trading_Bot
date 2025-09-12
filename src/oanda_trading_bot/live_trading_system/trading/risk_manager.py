@@ -6,16 +6,18 @@ from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManag
 
 from .position_manager import PositionManager, Position
 from ..core.system_state import SystemState
+from ..core.oanda_client import OandaClient
 
 class RiskManager:
     """
     Enforces risk management rules before any order is placed.
     """
     def __init__(
-        self, 
-        config: Dict[str, Any], 
-        system_state: SystemState, 
-        position_manager: PositionManager
+        self,
+        config: Dict[str, Any],
+        system_state: SystemState,
+        position_manager: PositionManager,
+        oanda_client: OandaClient,
     ):
         """
         Initializes the RiskManager.
@@ -29,6 +31,7 @@ class RiskManager:
         self.config = config.get('risk_management', {})
         self.system_state = system_state
         self.position_manager = position_manager
+        self.client = oanda_client
 
         # Load risk parameters from config
         self.max_total_exposure_usd = self.config.get('max_total_exposure_usd', 1000)
@@ -165,26 +168,27 @@ class RiskManager:
                 mp[pair] = (Decimal('1'), Decimal('1'))
                 continue
 
-            # If direct pair exists with broker, fetch it
-            if pair in valid_symbols:
-                got = _fetch_pair(pair)
-                if got:
-                    mp[pair] = got
+            # Try direct pair first (even if not listed), then reverse
+            got_direct = None
+            try:
+                if (not valid_symbols) or (pair in valid_symbols):
+                    got_direct = _fetch_pair(pair)
+            except Exception:
+                got_direct = None
+            if got_direct:
+                mp[pair] = got_direct
                 continue
 
-            # If only reversed exists, fetch and invert
+            # Try reversed fetch and invert
             rev = f"{b}_{a}"
-            if rev in valid_symbols:
-                got = _fetch_pair(rev)
-                if got:
-                    mp[pair] = _invert(got)
-                continue
-
-            # If broker symbol list unavailable, attempt a cautious fetch on direct pair only
-            if not valid_symbols:
-                got = _fetch_pair(pair)
-                if got:
-                    mp[pair] = got
+            got_rev = None
+            try:
+                if (not valid_symbols) or (rev in valid_symbols):
+                    got_rev = _fetch_pair(rev)
+            except Exception:
+                got_rev = None
+            if got_rev:
+                mp[pair] = _invert(got_rev)
 
         return mp
 
@@ -217,11 +221,8 @@ class RiskManager:
 
         # 2. Calculate order size based on risk. Prefer ATR sizing if enabled and available; otherwise fallback to pips.
         try:
-            # Equity from account summary
-            from ..core.oanda_client import OandaClient
-            client = OandaClient.from_env()
-            acct = client.get_account_summary()
-            equity = float(acct['account'].get('NAV', acct['account'].get('balance', 0.0))) if acct and 'account' in acct else 0.0
+            acct = self.client.get_account_summary()
+            equity = float((acct or {}).get('account', {}).get('NAV', (acct or {}).get('account', {}).get('balance', 0.0)))
         except Exception:
             equity = 0.0
 
@@ -231,7 +232,7 @@ class RiskManager:
             return None
 
         # Build price map for conversions and ATR computation
-        price_map = self._build_price_map(instrument, client)
+        price_map = self._build_price_map(instrument, self.client)
         rate_qc_to_ac = float(self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map))
         if rate_qc_to_ac <= 0:
             self.logger.error("Failed to compute quote->account currency rate; aborting trade.")
@@ -346,7 +347,8 @@ class RiskManager:
         self.logger.info(f"Trade approved for {instrument}. Units: {trade_size_units}, SL: {stop_loss_price}, TP: {take_profit_price}")
 
         return {
-            "units": trade_size_units if signal == 1 else -trade_size_units,
+            # trade_size_units already encodes direction per signal
+            "units": int(trade_size_units),
             "stop_loss": float(stop_loss_price) if stop_loss_price is not None else None,
             "take_profit": float(take_profit_price) if take_profit_price is not None else None
         }

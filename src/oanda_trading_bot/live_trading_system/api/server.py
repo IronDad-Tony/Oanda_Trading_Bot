@@ -48,6 +48,17 @@ class SessionConfig(BaseModel):
 
 
 # ----- Helpers -----
+def _to_int_units(val) -> int:
+    try:
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            return int(val)
+        s = str(val).strip()
+        return int(float(s))
+    except Exception:
+        return 0
+
 def _scan_models(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
     candidates: List[str] = []
@@ -147,11 +158,18 @@ async def _startup():
         pass
 
 
+@app.get("/ready")
+def ready():
+    # Lightweight readiness probe: do NOT initialize full components
+    return {"ready": True}
+
+
 @app.get("/health")
 def health():
-    comps = STATE.ensure_components()
-    running = getattr(comps["system_state"], 'is_running', False)
-    return {"status": "ok", "engine": "running" if running else "stopped"}
+    # Keep health light; only report initialization status and engine state if available
+    comps = STATE.components
+    running = bool(comps and getattr(comps.get("system_state", object()), 'is_running', False))
+    return {"status": "ok", "engine": "running" if running else "stopped", "initialized": bool(comps)}
 
 
 @app.get("/account/summary")
@@ -175,8 +193,8 @@ def positions():
     out: List[Dict[str, Any]] = []
     for pos in data.get("positions", []):
         ins = pos.get("instrument")
-        long_units = int(pos.get("long", {}).get("units", "0"))
-        short_units = int(pos.get("short", {}).get("units", "0"))
+        long_units = _to_int_units(pos.get("long", {}).get("units", "0"))
+        short_units = _to_int_units(pos.get("short", {}).get("units", "0"))
         if long_units:
             out.append({
                 "instrument": ins,
@@ -499,9 +517,9 @@ def emergency_stop():
         for p in pos.get("positions", []):
             ins = p.get("instrument")
             try:
-                if int(p.get("long", {}).get("units", 0)) != 0:
+                if _to_int_units(p.get("long", {}).get("units", 0)) != 0:
                     client.close_position(ins, long_units="ALL")
-                if int(p.get("short", {}).get("units", 0)) != 0:
+                if _to_int_units(p.get("short", {}).get("units", 0)) != 0:
                     client.close_position(ins, short_units="ALL")
                 try:
                     pm.close_position(ins)
@@ -563,7 +581,8 @@ def smoke_trade_per_symbol(units: Optional[int] = 1):
             if latest2:
                 last2 = latest2[-1]
                 price2 = float(last2.get('ask_close') or last2.get('bid_close') or 0.0)
-            om.process_signal({"instrument": ins, "signal": -1, "price": price2, "override_units": int(units), "no_sl_tp": True})
+            sell_units = -abs(int(units))
+            om.process_signal({"instrument": ins, "signal": -1, "price": price2, "override_units": sell_units, "no_sl_tp": True})
             placed.append(ins)
         except Exception:
             pass

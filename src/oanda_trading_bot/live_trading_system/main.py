@@ -125,7 +125,7 @@ def initialize_system(
 
         # --- Trading Components ---
         position_manager = PositionManager()
-        risk_manager = RiskManager(config, system_state, position_manager)
+        risk_manager = RiskManager(config, system_state, position_manager, client)
         order_manager = OrderManager(client, system_state, position_manager, risk_manager, db_manager, config)
         
         # --- Main Logic Engine ---

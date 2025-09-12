@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   symbols: [],
   selectedSymbols: new Set(),
   models: [],
@@ -78,10 +78,10 @@ function renderModels() {
   sel.innerHTML = '';
   const optNone = document.createElement('option');
   optNone.value = '';
-  optNone.textContent = '(不指定模型)';
+  optNone.textContent = '(ä¸æŒ‡å®šæ¨¡åž‹)';
   sel.appendChild(optNone);
   // Ensure readable default label
-  try { optNone.textContent = '(不指定模型)'; } catch(e) {}
+  try { optNone.textContent = '(ä¸æŒ‡å®šæ¨¡åž‹)'; } catch(e) {}
   state.models.forEach((m) => {
     const o = document.createElement('option');
     o.value = m.path;
@@ -124,7 +124,7 @@ function renderPositions(list) {
       <td>${p.units}</td>
       <td>${fmt(p.avgPrice)}</td>
       <td>${fmt(p.unrealizedPL)}</td>
-      <td><button class="btn" data-ins="${p.instrument}">平倉</button></td>
+      <td><button class="btn" data-ins="${p.instrument}">å¹³å€‰</button></td>
     `;
     tr.querySelector('button').onclick = async (e) => {
       const ins = e.target.getAttribute('data-ins');
@@ -208,6 +208,7 @@ async function refreshTrades() {
   const tr = await api('/account/trades?limit=200');
   renderTrades(tr);
   updateCharts(tr);
+  try { updatePerSymbolCharts(tr); } catch {}
 }
 
 async function refreshRisk() {
@@ -262,7 +263,7 @@ async function stopSession() {
 }
 
 async function emergencyStop() {
-  if (!confirm('緊急停止將平倉所有倉位並停止策略，確定？')) return;
+  if (!confirm('ç·Šæ€¥åœæ­¢å°‡å¹³å€‰æ‰€æœ‰å€‰ä½ä¸¦åœæ­¢ç­–ç•¥ï¼Œç¢ºå®šï¼Ÿ')) return;
   await api('/session/emergency_stop', { method: 'POST' });
   state.running = false;
   renderEngineStatus();
@@ -272,7 +273,7 @@ async function emergencyStop() {
 
 async function runSmoke() {
   const units = Number(el('smokeUnits').value || 1);
-  if (!confirm('此為測試工具，只適用於 OANDA Practice。確定執行？')) return;
+  if (!confirm('æ­¤ç‚ºæ¸¬è©¦å·¥å…·ï¼Œåªé©ç”¨æ–¼ OANDA Practiceã€‚ç¢ºå®šåŸ·è¡Œï¼Ÿ')) return;
   await api(`/test/smoke_trade?units=${units}`, { method: 'POST' });
   // refresh after a short delay
   setTimeout(()=>{ refreshTrades(); refreshPositions(); refreshAccount(); }, 1500);
@@ -318,9 +319,9 @@ async function refreshSessionStatus() {
     const s = await api('/session/status');
     const elw = el('warmupStatus');
     if (s.warmup && s.warmup.ready) {
-      elw.textContent = 'Warmup: 完成';
+      elw.textContent = 'Warmup: å®Œæˆ';
     } else if (s.warmup) {
-      elw.textContent = `Warmup: 進行中，缺少 ${ (s.warmup.missing||[]).join(', ') }`;
+      elw.textContent = `Warmup: é€²è¡Œä¸­ï¼Œç¼ºå°‘ ${ (s.warmup.missing||[]).join(', ') }`;
     } else {
       elw.textContent = 'Warmup: -';
     }
@@ -332,18 +333,18 @@ function bindEvents() {
     const sel = el(id); if (!sel) return;
     sel.onchange = recomputeSelectionFromUI;
   });
-  el('btnApply').onclick = async () => { try { await applySessionConfig(); alert('設定已套用'); } catch (e) { alert('設定失敗: ' + e); } };
+  el('btnApply').onclick = async () => { try { await applySessionConfig(); alert('è¨­å®šå·²å¥—ç”¨'); } catch (e) { alert('è¨­å®šå¤±æ•—: ' + e); } };
   el('btnRiskUpdate').onclick = async () => {
     try {
       const body = collectRiskParams();
       await api('/risk/update', { method: 'POST', body: JSON.stringify(body) });
-      alert('風險參數已更新');
-    } catch(e) { alert('更新失敗: ' + e); }
+      alert('é¢¨éšªåƒæ•¸å·²æ›´æ–°');
+    } catch(e) { alert('æ›´æ–°å¤±æ•—: ' + e); }
   };
-  el('btnStart').onclick = async () => { try { await startSession(); } catch(e) { alert('啟動失敗: ' + e);} };
-  el('btnStop').onclick = async () => { try { await stopSession(); } catch(e) { alert('停止失敗: ' + e);} };
-  el('btnEmergency').onclick = async () => { try { await emergencyStop(); } catch(e) { alert('緊急停止失敗: ' + e);} };
-  el('btnSmoke').onclick = async () => { try { await runSmoke(); } catch(e) { alert('測試失敗: ' + e);} };
+  el('btnStart').onclick = async () => { try { await startSession(); } catch(e) { alert('å•Ÿå‹•å¤±æ•—: ' + e);} };
+  el('btnStop').onclick = async () => { try { await stopSession(); } catch(e) { alert('åœæ­¢å¤±æ•—: ' + e);} };
+  el('btnEmergency').onclick = async () => { try { await emergencyStop(); } catch(e) { alert('ç·Šæ€¥åœæ­¢å¤±æ•—: ' + e);} };
+  el('btnSmoke').onclick = async () => { try { await runSmoke(); } catch(e) { alert('æ¸¬è©¦å¤±æ•—: ' + e);} };
   el('modelSelect').onchange = (e) => { state.selectedModelPath = e.target.value || null; };
 }
 
@@ -365,6 +366,58 @@ boot();
 
 // ----------------- Charts -----------------
 let equityChart, symbolPerfChart;
+
+const perSymbolCharts = {}; // symbol -> Chart instance
+
+function ensurePerSymbolContainers() {
+  const wrap = el('perSymbolCharts');
+  if (!wrap) return;
+  const desired = [...(state.selectedSymbols || new Set())];
+  const existing = new Set([...wrap.querySelectorAll('canvas')].map(c => c.getAttribute('data-sym')));
+  // Remove canvases not in selection
+  [...existing].forEach(sym => { if (!desired.includes(sym)) {
+    const node = wrap.querySelector(`canvas[data-sym="${sym}"]`);
+    if (node && node.parentElement) node.parentElement.remove();
+    if (perSymbolCharts[sym]) { try { perSymbolCharts[sym].destroy(); } catch {} delete perSymbolCharts[sym]; }
+  }});
+  // Add missing canvases
+  desired.forEach(sym => {
+    if (!wrap.querySelector(`canvas[data-sym="${sym}"]`)) {
+      const box = document.createElement('div');
+      const label = document.createElement('label'); label.className = 'hint'; label.textContent = sym;
+      const cv = document.createElement('canvas'); cv.height = 100; cv.setAttribute('data-sym', sym);
+      box.appendChild(label); box.appendChild(cv); wrap.appendChild(box);
+    }
+  });
+}
+
+function updatePerSymbolCharts(trades) {
+  try {
+    ensurePerSymbolContainers();
+    const wrap = el('perSymbolCharts'); if (!wrap) return;
+    const closed = (trades||[]).filter(t => t.status === 'CLOSED' && t.close_timestamp);
+    const bySym = {};
+    closed.forEach(t => { const s=t.instrument; (bySym[s] = bySym[s]||[]).push(t); });
+    const selected = new Set(state.selectedSymbols || []);
+    selected.forEach(sym => {
+      const list = (bySym[sym]||[]).sort((a,b)=> new Date(a.close_timestamp) - new Date(b.close_timestamp)).slice(-50);
+      let acc = 0; const labels = list.map(t => new Date(t.close_timestamp).toLocaleString());
+      const values = list.map(t => (acc += Number(t.pnl||0)));
+      const cv = wrap.querySelector(`canvas[data-sym="${sym}"]`);
+      if (!cv) return;
+      if (!perSymbolCharts[sym]) {
+        perSymbolCharts[sym] = new Chart(cv.getContext('2d'), {
+          type: 'line',
+          data: { labels, datasets: [{ label: sym, data: values, borderColor: '#8e44ad', backgroundColor: 'rgba(142,68,173,0.15)', tension: 0.2 }]},
+          options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#9bb0c3'} }, y: { ticks: { color: '#9bb0c3'} } } }
+        });
+      } else {
+        const ch = perSymbolCharts[sym];
+        ch.data.labels = labels; ch.data.datasets[0].data = values; ch.update();
+      }
+    });
+  } catch {}
+}
 
 function updateCharts(trades) {
   try {
@@ -405,3 +458,4 @@ function updateCharts(trades) {
     }
   } catch {}
 }
+

@@ -129,7 +129,17 @@ class OrderManager:
             if not trade_details:
                 if override_units is not None:
                     self.logger.warning(f"RiskManager declined trade for {instrument}; proceeding with override_units={override_units} (test mode).")
-                    trade_details = {"units": int(override_units)}
+                    # Respect signal direction when overriding units
+                    try:
+                        base_units = int(override_units)
+                    except Exception:
+                        try:
+                            base_units = int(float(str(override_units).strip()))
+                        except Exception:
+                            base_units = 0
+                    if base_units == 0:
+                        return
+                    trade_details = {"units": base_units if signal == 1 else -abs(base_units)}
                 else:
                     self.logger.warning(f"Trade for {instrument} was not approved by RiskManager.")
                     return
@@ -167,9 +177,27 @@ class OrderManager:
             
             # Map risk manager output to OANDA API format
             if override_units is not None:
-                trade_details["units"] = int(override_units)
-            stop_loss_on_fill = None if no_sl_tp else ({"price": str(trade_details["stop_loss"])} if trade_details.get("stop_loss") else None)
-            take_profit_on_fill = None if no_sl_tp else ({"price": str(trade_details["take_profit"])} if trade_details.get("take_profit") else None)
+                try:
+                    base_units = int(override_units)
+                except Exception:
+                    try:
+                        base_units = int(float(str(override_units).strip()))
+                    except Exception:
+                        base_units = 0
+                trade_details["units"] = base_units if signal == 1 else -abs(base_units)
+            # Allow headless runs to disable SL/TP via env toggle
+            attach_flag = True
+            try:
+                v = os.getenv('ATTACH_SL_TP_ON_FILL', '1')
+                attach_flag = str(v).strip() not in ('0', 'false', 'False')
+            except Exception:
+                attach_flag = True
+            if no_sl_tp or not attach_flag:
+                stop_loss_on_fill = None
+                take_profit_on_fill = None
+            else:
+                stop_loss_on_fill = ({"price": str(trade_details["stop_loss"])} if trade_details.get("stop_loss") else None)
+                take_profit_on_fill = ({"price": str(trade_details["take_profit"])} if trade_details.get("take_profit") else None)
 
             # Optional priceBound to protect against large slippage
             ref_price = float(price) if price is not None else None
@@ -225,7 +253,14 @@ class OrderManager:
                     return 
 
                 executed_price = float(fill_details.get("price", 0))
-                executed_units = int(fill_details.get("units", 0))
+                # Units may arrive as strings like '1.0'; parse robustly
+                try:
+                    executed_units = int(fill_details.get("units", 0))
+                except Exception:
+                    try:
+                        executed_units = int(float(str(fill_details.get("units", 0)).strip()))
+                    except Exception:
+                        executed_units = 0
                 
                 self.logger.info(f"Order for {instrument} filled. Trade ID: {trade_id}, Price: {executed_price}, Units: {executed_units}.")
                 
