@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from typing import Dict, Any, Optional
 from decimal import Decimal
 from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager
@@ -245,7 +245,7 @@ class RiskManager:
 
         def _compute_atr(instrument: str, count: int = None) -> float:
             cnt = max(self.atr_period + 2, 20) if count is None else count
-            recs = client.get_bid_ask_candles_combined(instrument, count=cnt) or []
+            recs = self.client.get_bid_ask_candles_combined(instrument, count=cnt) or []
             if len(recs) < self.atr_period + 1:
                 return 0.0
             highs = []
@@ -303,7 +303,7 @@ class RiskManager:
             elif signal == -1:
                 stop_loss_price = price + self.stop_loss_pips * (10 ** details.pip_location)
 
-        # Take profitÃ¯Â¼Å¡Ã¤Â¿ÂÃ§â€¢â„¢ pip Ã¦Â¨Â¡Ã¥Â¼ÂÃ¯Â¼Ë†Ã¥ÂÂ¯Ã¦â€“Â¼Ã¦Å“ÂªÃ¤Â¾â€ Ã¦â€œÂ´Ã¥â€¦â€¦ ATR TPÃ¯Â¼â€°
+        # Take profitÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¤Ã‚Â¿Ã‚ÂÃƒÂ§Ã¢â‚¬Â¢Ã¢â€žÂ¢ pip ÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ¥Ã‚Â¼Ã‚ÂÃƒÂ¯Ã‚Â¼Ã‹â€ ÃƒÂ¥Ã‚ÂÃ‚Â¯ÃƒÂ¦Ã¢â‚¬â€œÃ‚Â¼ÃƒÂ¦Ã…â€œÃ‚ÂªÃƒÂ¤Ã‚Â¾Ã¢â‚¬Â ÃƒÂ¦Ã¢â‚¬Å“Ã‚Â´ÃƒÂ¥Ã¢â‚¬Â¦Ã¢â‚¬Â¦ ATR TPÃƒÂ¯Ã‚Â¼Ã¢â‚¬Â°
         if signal == 1: # Buy
             take_profit_price = price + self.take_profit_pips * (10 ** details.pip_location)
         elif signal == -1:

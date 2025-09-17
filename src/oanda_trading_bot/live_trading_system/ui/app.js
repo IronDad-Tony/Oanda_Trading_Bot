@@ -1,461 +1,991 @@
-﻿const state = {
-  symbols: [],
-  selectedSymbols: new Set(),
+const state = {
+  catalog: {},
+  pendingSymbols: new Set(),
+  serverSymbols: new Set(),
+  sessionDirty: false,
   models: [],
-  selectedModelPath: null,
-  equity: null,
-  risk: {},
+  pendingModelPath: '',
+  serverModelPath: '',
+  pendingTargetCapital: null,
   accountCurrency: 'USD',
-  running: false,
-  catalog: { 'Major Pairs': [], 'Minor Pairs': [], 'Precious Metals': [], 'Indices': [], 'Energy': [], 'Commodities': [], 'Crypto': [], 'Bonds': [] },
+  accountEquity: null,
+  risk: {},
+  engineRunning: false,
+  warmup: { ready: false, missing: [] },
+  suspended: [],
+  lastHeartbeat: null,
+  positions: [],
+  trades: [],
+  alerts: [],
+  charts: { equity: null, symbol: null, perSymbol: {} },
+  ws: null,
 };
 
-const el = (id) => document.getElementById(id);
-const fmt = (n, d=2) => (n===null||n===undefined||isNaN(n))? '-': Number(n).toFixed(d);
-
-async function api(path, opts={}) {
-  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
-  if (!r.ok) throw new Error(await r.text());
-  return await r.json();
-}
-
-function renderEngineStatus() {
-  const badge = el('engineStatus');
-  badge.textContent = state.running ? 'Running' : 'Stopped';
-  badge.classList.toggle('running', !!state.running);
-}
-
-function renderCatalog() {
-  const fill = (id, items) => {
-    const sel = el(id);
-    if (!sel) return;
-    sel.innerHTML = '';
-    items.forEach(s => { const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); })
-  };
-  fill('selMajorPairs', state.catalog['Major Pairs']||[]);
-  fill('selMinorPairs', state.catalog['Minor Pairs']||[]);
-  fill('selPreciousMetals', state.catalog['Precious Metals']||[]);
-  fill('selIndices', state.catalog['Indices']||[]);
-  fill('selEnergy', state.catalog['Energy']||[]);
-  fill('selCommodities', state.catalog['Commodities']||[]);
-  fill('selCrypto', state.catalog['Crypto']||[]);
-  fill('selBonds', state.catalog['Bonds']||[]);
-  // Restore current selections
-  applySelectionsToUI();
-}
-
-function applySelectionsToUI() {
-  const sets = [
-    ['selMajorPairs', state.catalog['Major Pairs']||[]],
-    ['selMinorPairs', state.catalog['Minor Pairs']||[]],
-    ['selPreciousMetals', state.catalog['Precious Metals']||[]],
-    ['selIndices', state.catalog['Indices']||[]],
-    ['selEnergy', state.catalog['Energy']||[]],
-    ['selCommodities', state.catalog['Commodities']||[]],
-    ['selCrypto', state.catalog['Crypto']||[]],
-    ['selBonds', state.catalog['Bonds']||[]],
-  ];
-  sets.forEach(([id, list]) => {
-    const sel = el(id);
-    if (!sel) return;
-    [...sel.options].forEach(opt => { opt.selected = state.selectedSymbols.has(opt.value); });
+const $ = (id) => document.getElementById(id);
+const fmtNumber = (value, decimals = 2) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  return num.toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
   });
-}
-
-function recomputeSelectionFromUI() {
-  const ids = ['selMajorPairs','selMinorPairs','selPreciousMetals','selIndices','selEnergy','selCommodities','selCrypto','selBonds'];
-  const newSet = new Set();
-  ids.forEach(id => {
-    const sel = el(id); if (!sel) return;
-    [...sel.selectedOptions].forEach(o => newSet.add(o.value));
-  });
-  state.selectedSymbols = newSet;
-  refreshModels();
-}
-
-function renderModels() {
-  const sel = el('modelSelect');
-  sel.innerHTML = '';
-  const optNone = document.createElement('option');
-  optNone.value = '';
-  optNone.textContent = '(ä¸æŒ‡å®šæ¨¡åž‹)';
-  sel.appendChild(optNone);
-  // Ensure readable default label
-  try { optNone.textContent = '(ä¸æŒ‡å®šæ¨¡åž‹)'; } catch(e) {}
-  state.models.forEach((m) => {
-    const o = document.createElement('option');
-    o.value = m.path;
-    o.textContent = `${m.name} (max ${m.max_symbols})`;
-    sel.appendChild(o);
-  });
-}
-
-function renderAccount(acc) {
+};
+const fmtCurrency = (value, decimals = 2) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
   try {
-    const a = acc.account || {};
-    state.equity = Number(a.NAV || a.equity || 0);
-    state.accountCurrency = String(a.currency || state.accountCurrency || 'USD');
-    // Update currency labels
-    el('accCcyLabel').textContent = `(${state.accountCurrency})`;
-    el('accCcyShort').textContent = state.accountCurrency;
-    const targetInput = el('targetCapital');
-    if (targetInput && !targetInput.placeholder) { targetInput.placeholder = state.accountCurrency; }
-    el('equityHint').textContent = `Equity: ${fmt(state.equity)} ${state.accountCurrency}`;
-    const kv = el('accountSummary');
-    kv.innerHTML = '';
-    const add = (k,v) => { const kdv = document.createElement('div'); kdv.textContent = k; kv.appendChild(kdv); const vdv = document.createElement('div'); vdv.textContent = v; kv.appendChild(vdv); };
-    add('Balance', fmt(a.balance));
-    add('NAV', fmt(a.NAV || a.equity));
-    add('Unrealized P/L', fmt(a.unrealizedPL));
-    add('Margin Used', fmt(a.marginUsed));
-    add('Margin Available', fmt(a.marginAvailable));
-    add('Open Trades', (a.openTradeCount||0));
-  } catch {}
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: state.accountCurrency || 'USD',
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    }).format(num);
+  } catch (err) {
+    return fmtNumber(num, decimals);
+  }
+};
+const fmtPercent = (value, decimals = 2) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  return `${fmtNumber(num, decimals)}%`;
+};
+const parseNumeric = (value) => {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).trim();
+  if (trimmed === '') return null;
+  const num = Number(trimmed);
+  return Number.isFinite(num) ? num : null;
+};
+
+const normalizeInstrument = (value) => String(value || '').toUpperCase();
+const toNormalizedSet = (items) => {
+  const set = new Set();
+  (items || []).forEach((item) => {
+    const normalized = normalizeInstrument(item);
+    if (normalized) set.add(normalized);
+  });
+  return set;
+};
+const cloneSet = (src) => new Set(src ? [...src] : []);
+const setsEqual = (a, b) => {
+  if (!a || !b) return (!a || !a.size) && (!b || !b.size);
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
+};
+const getDisplaySymbols = () => {
+  if (state.sessionDirty && state.pendingSymbols.size) return state.pendingSymbols;
+  if (state.serverSymbols && state.serverSymbols.size) return state.serverSymbols;
+  return new Set();
+};
+const filterTradesByDisplaySymbols = (trades) => {
+  const symbols = getDisplaySymbols();
+  if (!symbols.size) return [];
+  return trades.filter((trade) => symbols.has(normalizeInstrument(trade.instrument)));
+};
+const getClosedTradesForDisplay = () => {
+  const closed = state.trades.filter((trade) => (trade.status || '').toUpperCase() === 'CLOSED');
+  return filterTradesByDisplaySymbols(closed);
+};\n\nconst CATEGORY_SELECTORS = [
+  { name: 'Major Pairs', id: 'symbolsMajorPairs' },
+  { name: 'Minor Pairs', id: 'symbolsMinorPairs' },
+  { name: 'Precious Metals', id: 'symbolsPreciousMetals' },
+  { name: 'Indices', id: 'symbolsIndices' },
+  { name: 'Energy', id: 'symbolsEnergy' },
+  { name: 'Commodities', id: 'symbolsCommodities' },
+  { name: 'Crypto', id: 'symbolsCrypto' },
+  { name: 'Bonds', id: 'symbolsBonds' },
+];
+
+function ensureCategoryDropdowns() {
+  const container = $('symbolDropdowns');
+  if (!container) return {};
+  const map = {};
+  CATEGORY_SELECTORS.forEach(({ name, id }) => {
+    let select = $(id);
+    if (!select) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'form-control';
+      const label = document.createElement('label');
+      label.htmlFor = id;
+      label.textContent = name;
+      select = document.createElement('select');
+      select.id = id;
+      select.multiple = true;
+      select.size = 8;
+      wrapper.appendChild(label);
+      wrapper.appendChild(select);
+      container.appendChild(wrapper);
+    }
+    select.onchange = handleDropdownChange;
+    map[id] = select;
+  });
+  return map;
 }
 
-function renderPositions(list) {
-  const tbody = el('positionsTable').querySelector('tbody');
-  tbody.innerHTML = '';
-  (list||[]).forEach((p) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${p.instrument}</td>
-      <td>${p.side}</td>
-      <td>${p.units}</td>
-      <td>${fmt(p.avgPrice)}</td>
-      <td>${fmt(p.unrealizedPL)}</td>
-      <td><button class="btn" data-ins="${p.instrument}">å¹³å€‰</button></td>
-    `;
-    tr.querySelector('button').onclick = async (e) => {
-      const ins = e.target.getAttribute('data-ins');
-      try { await api(`/session/close_position?instrument=${encodeURIComponent(ins)}`, { method: 'POST' }); refreshPositions(); } catch {}
-    };
-    tbody.appendChild(tr);
+function renderSymbolCatalog() {
+  const dropdowns = ensureCategoryDropdowns();
+  CATEGORY_SELECTORS.forEach(({ name, id }) => {
+    const select = dropdowns[id];
+    if (!select) return;
+    const options = [...(((state.catalog || {})[name]) || [])].sort();
+    const previousScroll = select.scrollTop;
+    select.innerHTML = '';
+    options.forEach((sym) => {
+      const option = document.createElement('option');
+      option.value = sym;
+      option.textContent = sym;
+      select.appendChild(option);
+    });
+    select.disabled = options.length === 0;
+    select.size = Math.min(10, Math.max(4, options.length || 4));
+    select.scrollTop = previousScroll;
   });
 }
 
-function renderTrades(list) {
-  const tbody = el('tradesTable').querySelector('tbody');
-  tbody.innerHTML = '';
-  (list||[]).forEach((t) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${t.oanda_trade_id || ''}</td>
-      <td>${t.instrument}</td>
-      <td>${t.units}</td>
-      <td>${fmt(t.entry_price)}</td>
-      <td>${t.status}</td>
-      <td>${fmt(t.close_price)}</td>
-      <td>${fmt(t.pnl)}</td>
-      <td>${t.open_timestamp || ''}</td>
-      <td>${t.close_timestamp || ''}</td>
-    `;
-    tbody.appendChild(tr);
+function applyPendingSymbolsToDropdowns() {
+  const dropdowns = ensureCategoryDropdowns();
+  CATEGORY_SELECTORS.forEach(({ id }) => {
+    const select = dropdowns[id];
+    if (!select) return;
+    [...select.options].forEach((option) => {
+      const normalized = normalizeInstrument(option.value);
+      option.selected = state.pendingSymbols.has(normalized);
+    });
   });
-  // Simple performance summary
-  const closed = (list||[]).filter(x => x.status === 'CLOSED');
-  const pnl = closed.reduce((a,b)=> a + (Number(b.pnl)||0), 0);
-  const wins = closed.filter(x => (Number(x.pnl)||0) > 0).length;
-  const total = closed.length || 1;
-  const kv = el('perfSummary');
-  kv.innerHTML = '';
-  const add = (k,v) => { const kdv = document.createElement('div'); kdv.textContent = k; kv.appendChild(kdv); const vdv = document.createElement('div'); vdv.textContent = v; kv.appendChild(vdv); };
-  add('Realized PnL', fmt(pnl));
-  add('Closed Trades', closed.length);
-  add('Win Rate', `${fmt(100*wins/total,1)}%`);
 }
 
-async function refreshSymbols() {
-  // Prefer catalog
-  try {
-    const cat = await api('/symbols/catalog');
-    state.catalog = cat.catalog || state.catalog;
-    // Preserve selection against full catalog set
-    const all = Object.values(state.catalog).flat();
-    state.selectedSymbols = new Set([...state.selectedSymbols].filter(s => all.includes(s)));
-    renderCatalog();
-  } catch {
-    // Fallback to flat available list
-    let res;
-    try { res = await api('/symbols/available'); }
-    catch { res = await api('/symbols/training'); }
-    state.symbols = res.symbols || [];
-    state.selectedSymbols = new Set([...state.selectedSymbols].filter(s => state.symbols.includes(s)));
-    // Put all into Minor Pairs if no catalog
-    state.catalog = { 'Major Pairs': [], 'Minor Pairs': state.symbols, 'Precious Metals': [], 'Indices': [], 'Energy': [], 'Commodities': [], 'Crypto': [], 'Bonds': [] };
-    renderCatalog();
+
+function collectSymbolsFromDropdowns() {
+  const collected = new Set();
+  const dropdowns = ensureCategoryDropdowns();
+  CATEGORY_SELECTORS.forEach(({ id }) => {
+    const select = dropdowns[id];
+    if (!select) return;
+    [...select.selectedOptions].forEach((option) => {
+      const normalized = normalizeInstrument(option.value);
+      if (normalized) collected.add(normalized);
+    });
+  });
+  return collected;
+}
+
+
+function handleDropdownChange() {
+  const next = collectSymbolsFromDropdowns();
+  if (!setsEqual(state.pendingSymbols, next)) {
+    state.pendingSymbols = next;
+    markSessionDirty();
+    applyPendingSymbolsToDropdowns();
+    renderSelectedPreview();
+    updateDirtyIndicators();
+    loadModels().catch((err) => pushAlert(`Model scan failed: ${err.message}`, 'error'));
+  } else {
+    applyPendingSymbolsToDropdowns();
+    renderSelectedPreview();
+    updateDirtyIndicators();
   }
 }
 
-async function refreshModels() {
-  const n = state.selectedSymbols.size || 1;
-  const items = await api(`/models?min_symbols=${n}`);
-  state.models = items;
-  renderModels();
+
+
+function removeSymbol(symbol) {
+  const normalized = normalizeInstrument(symbol);
+  if (!normalized || !state.pendingSymbols.has(normalized)) return;
+  const next = new Set(state.pendingSymbols);
+  next.delete(normalized);
+  state.pendingSymbols = next;
+  markSessionDirty();
+  applyPendingSymbolsToDropdowns();
+  renderSelectedPreview();
+  updateDirtyIndicators();
+  loadModels().catch((err) => pushAlert(`Model scan failed: ${err.message}`, 'error'));
+}
+async function loadSymbolCatalog() {
+  try {
+    const response = await api('/symbols/catalog');
+    const incoming = response?.catalog || {};
+    const normalized = {};
+    Object.entries(incoming).forEach(([category, list]) => {
+      normalized[category] = [...new Set((list || []).map((sym) => normalizeInstrument(sym)))];
+    });
+    state.catalog = normalized;
+    const allSymbols = new Set(Object.values(normalized).flat());
+    state.pendingSymbols = new Set([...state.pendingSymbols].filter((sym) => allSymbols.has(sym)));
+    state.serverSymbols = new Set([...state.serverSymbols].filter((sym) => allSymbols.has(sym)));
+    renderSymbolCatalog();
+    applyPendingSymbolsToDropdowns();
+    renderSelectedPreview();
+    updateDirtyIndicators();
+  } catch (err) {
+    pushAlert(`Failed to load symbol catalog: ${err.message}`, 'error');
+  }
 }
 
-async function refreshAccount() {
-  const acc = await api('/account/summary');
-  renderAccount(acc);
+
+async function loadModels() {
+  const minSymbols = Math.max(state.pendingSymbols.size, 1);
+  try {
+    const items = await api(`/models?min_symbols=${minSymbols}`);
+    state.models = Array.isArray(items) ? items : [];
+    renderModelSelect();
+  } catch (err) {
+    pushAlert(`Failed to load models: ${err.message}`, 'error');
+  }
 }
 
-async function refreshPositions() {
-  const pos = await api('/account/positions');
-  renderPositions(pos);
+function renderModelSelect() {
+  const select = modelSelect;
+  if (!select) return;
+  const current = state.pendingModelPath || '';
+  select.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.disabled = true;
+  placeholder.hidden = true;
+  placeholder.textContent = state.pendingSymbols.size ? 'Select a model...' : 'Select symbols first';
+  select.appendChild(placeholder);
+  const sorted = [...state.models];
+  sorted.sort((a, b) => {
+    const diff = (a.max_symbols || 0) - (b.max_symbols || 0);
+    if (diff !== 0) return diff;
+    return (a.name || '').localeCompare(b.name || '');
+  });
+  sorted.forEach((model) => {
+    const option = document.createElement('option');
+    option.value = model.path;
+    option.textContent = ${model.name} | max  | ;
+    select.appendChild(option);
+  });
+  if (current && sorted.some((m) => m.path === current)) {
+    select.value = current;
+  } else {
+    select.value = '';
+    if (current) state.pendingModelPath = '';
+  }
 }
 
-async function refreshTrades() {
-  const tr = await api('/account/trades?limit=200');
-  renderTrades(tr);
-  updateCharts(tr);
-  try { updatePerSymbolCharts(tr); } catch {}
+
+async function loadRisk() {
+  try {
+    const response = await api('/config/risk');
+    const risk = (response && response.risk_management) || {};
+    state.risk = risk;
+    populateRiskForm(risk);
+  } catch (err) {
+    pushAlert(`Failed to load risk configuration: ${err.message}`, 'error');
+  }
 }
 
-async function refreshRisk() {
-  const r = await api('/config/risk');
-  const rm = (r && r.risk_management) || {};
-  state.risk = rm;
-  // Fill fields
-  el('risk_max_exposure').value = rm.max_total_exposure_usd ?? '';
-  el('risk_max_risk_pct').value = rm.max_risk_per_trade_percent ?? '';
-  el('risk_use_atr').value = String(rm.use_atr_sizing ?? false);
-  el('risk_atr_period').value = rm.atr_period ?? '';
-  el('risk_sl_atr_mult').value = rm.stop_loss_atr_multiplier ?? '';
-  el('risk_tp_atr_mult').value = rm.take_profit_atr_multiplier ?? '';
-  el('risk_sl_pips').value = rm.stop_loss_pips ?? '';
-  el('risk_tp_pips').value = rm.take_profit_pips ?? '';
-}
-
-async function applySessionConfig() {
-  const body = {
-    symbols: [...state.selectedSymbols],
-    model_path: el('modelSelect').value || null,
-    target_capital_usd: Number(el('targetCapital').value || 0) || null,
-    risk: collectRiskParams(),
+function populateRiskForm(risk) {
+  const setValue = (id, value) => {
+    const node = $(id);
+    if (!node) return;
+    if (node.tagName === 'SELECT') {
+      node.value = String(value ?? false);
+    } else {
+      node.value = value ?? '';
+    }
   };
-  await api('/session/config', { method: 'POST', body: JSON.stringify(body) });
+  setValue('risk_max_total_exposure', risk.max_total_exposure_usd);
+  setValue('risk_max_risk_pct', risk.max_risk_per_trade_percent);
+  setValue('risk_stop_loss_pips', risk.stop_loss_pips);
+  setValue('risk_take_profit_pips', risk.take_profit_pips);
+  setValue('risk_use_atr', risk.use_atr_sizing);
+  setValue('risk_atr_period', risk.atr_period);
+  setValue('risk_sl_atr_mult', risk.stop_loss_atr_multiplier);
+  setValue('risk_tp_atr_mult', risk.take_profit_atr_multiplier);
 }
 
-function collectRiskParams() {
-  const o = {};
-  const put = (k,v) => { if (v !== '' && v !== null && v !== undefined) o[k]=v; };
-  put('max_total_exposure_usd', Number(el('risk_max_exposure').value||0) || null);
-  put('max_risk_per_trade_percent', Number(el('risk_max_risk_pct').value||0) || null);
-  put('use_atr_sizing', el('risk_use_atr').value === 'true');
-  put('atr_period', Number(el('risk_atr_period').value||0) || null);
-  put('stop_loss_atr_multiplier', Number(el('risk_sl_atr_mult').value||0) || null);
-  put('take_profit_atr_multiplier', Number(el('risk_tp_atr_mult').value||0) || null);
-  put('stop_loss_pips', Number(el('risk_sl_pips').value||0) || null);
-  put('take_profit_pips', Number(el('risk_tp_pips').value||0) || null);
-  return o;
+function gatherRiskForm() {
+  const readNumber = (id) => {
+    const node = $(id);
+    if (!node) return null;
+    return parseNumeric(node.value);
+  };
+  const readBool = (id) => {
+    const node = $(id);
+    if (!node) return null;
+    return node.value === 'true';
+  };
+  return {
+    max_total_exposure_usd: readNumber('risk_max_total_exposure'),
+    max_risk_per_trade_percent: readNumber('risk_max_risk_pct'),
+    stop_loss_pips: readNumber('risk_stop_loss_pips'),
+    take_profit_pips: readNumber('risk_take_profit_pips'),
+    use_atr_sizing: readBool('risk_use_atr'),
+    atr_period: readNumber('risk_atr_period'),
+    stop_loss_atr_multiplier: readNumber('risk_sl_atr_mult'),
+    take_profit_atr_multiplier: readNumber('risk_tp_atr_mult'),
+  };
 }
 
-async function startSession() {
-  await api('/session/start', { method: 'POST' });
-  state.running = true;
-  renderEngineStatus();
+async function updateRisk() {
+  const payload = gatherRiskForm();
+  const body = {};
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== '') {
+      body[key] = value;
+    }
+  });
+  try {
+    await api('/risk/update', { method: 'POST', body });
+    state.risk = { ...state.risk, ...body };
+    pushAlert('Risk parameters updated successfully.', 'success');
+  } catch (err) {
+    pushAlert(`Failed to update risk parameters: ${err.message}`, 'error');
+  }
 }
 
-async function stopSession() {
-  await api('/session/stop', { method: 'POST' });
-  state.running = false;
-  renderEngineStatus();
+async function loadAccountSummary() {
+  try {
+    const data = await api('/account/summary');
+    renderAccount(data);
+  } catch (err) {
+    pushAlert(`Failed to load account summary: ${err.message}`, 'error');
+  }
+}
+
+function renderAccount(data) {
+  const account = data?.account || {};
+  const currency = account.currency || state.accountCurrency;
+  if (currency) state.accountCurrency = String(currency).toUpperCase();
+  const balance = parseNumeric(account.balance) ?? 0;
+  const nav = parseNumeric(account.NAV) ?? parseNumeric(account.equity) ?? balance;
+  const unrealized = parseNumeric(account.unrealizedPL) ?? 0;
+  const marginUsed = parseNumeric(account.marginUsed) ?? 0;
+  const marginAvail = parseNumeric(account.marginAvailable) ?? 0;
+  const openTrades = parseNumeric(account.openTradeCount) ?? 0;
+  state.accountEquity = nav;
+  setText('peekEquity', fmtCurrency(nav));
+  setText('peekBalance', fmtCurrency(balance));
+  setText('peekUnrealized', fmtCurrency(unrealized));
+  setText('accountBalance', fmtCurrency(balance));
+  setText('accountNav', fmtCurrency(nav));
+  setText('accountUnrealized', fmtCurrency(unrealized));
+  setText('accountMarginUsed', fmtCurrency(marginUsed));
+  setText('accountMarginAvail', fmtCurrency(marginAvail));
+  setText('accountOpenTrades', openTrades ? openTrades.toString() : '0');
+  const label = $('targetCapitalLabel');
+  if (label) {
+    label.textContent = `Target capital (${state.accountCurrency})`;
+  }
+  setText('footerAccountCurrency', `Account currency: ${state.accountCurrency}`);
+}
+
+async function loadPositions() {
+  try {
+    const positions = await api('/account/positions');
+    state.positions = Array.isArray(positions) ? positions : [];
+    renderPositions();
+  } catch (err) {
+    pushAlert(`Failed to load open positions: ${err.message}`, 'error');
+  }
+}
+
+function renderPositions() {
+  const tbody = document.querySelector('#positionsTable tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!state.positions.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.style.textAlign = 'center';
+    td.textContent = 'No open positions';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  state.positions.forEach((pos) => {
+    const tr = document.createElement('tr');
+    const avgPrice = parseNumeric(pos.avgPrice);
+    const units = parseNumeric(pos.units);
+    const notional = Number.isFinite(avgPrice) && Number.isFinite(units)
+      ? Math.abs(units) * avgPrice
+      : null;
+    tr.innerHTML = `
+      <td>${pos.instrument || '-'}</td>
+      <td>${pos.side || '-'}</td>
+      <td>${fmtNumber(units, 0)}</td>
+      <td>${fmtNumber(avgPrice)}</td>
+      <td>${fmtCurrency(pos.unrealizedPL)}</td>
+      <td>${notional ? fmtCurrency(notional) : '-'}</td>
+      <td></td>
+    `;
+    const actionCell = tr.lastElementChild;
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-muted';
+    btn.textContent = 'Close';
+    btn.addEventListener('click', () => closePosition(pos.instrument));
+    actionCell.appendChild(btn);
+    tbody.appendChild(tr);
+  });
+}
+
+async function closePosition(instrument) {
+  if (!instrument) return;
+  try {
+    await api(`/session/close_position?instrument=${encodeURIComponent(instrument)}`, { method: 'POST' });
+    pushAlert(`Close request sent for ${instrument}.`, 'success');
+    await Promise.all([loadPositions(), loadAccountSummary(), loadTrades()]);
+  } catch (err) {
+    pushAlert(`Failed to close ${instrument}: ${err.message}`, 'error');
+  }
+}
+
+async function loadTrades() {
+  try {
+    const trades = await api('/account/trades?limit=300');
+    state.trades = Array.isArray(trades) ? trades : [];
+    renderTrades();
+    updatePerformanceMetrics();
+    updateCharts();
+  } catch (err) {
+    pushAlert(`Failed to load trade history: ${err.message}`, 'error');
+  }
+}
+
+function renderTrades() {
+  const tbody = document.querySelector('#tradesTable tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!state.trades.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 9;
+    td.style.textAlign = 'center';
+    td.textContent = 'No trades recorded yet';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  const sorted = [...state.trades].sort((a, b) => {
+    const aTime = new Date(a.open_timestamp || a.close_timestamp || 0).getTime();
+    const bTime = new Date(b.open_timestamp || b.close_timestamp || 0).getTime();
+    return bTime - aTime;
+  });
+  sorted.forEach((trade) => {
+    const tr = document.createElement('tr');
+    const entryPrice = parseNumeric(trade.entry_price ?? trade.open_price ?? trade.price);
+    const exitPrice = parseNumeric(trade.close_price ?? trade.exit_price);
+    const pnl = parseNumeric(trade.pnl);
+    const openTime = trade.open_timestamp ? new Date(trade.open_timestamp).toLocaleString() : '-';
+    const closeTime = trade.close_timestamp ? new Date(trade.close_timestamp).toLocaleString() : '-';
+    tr.innerHTML = `
+      <td>${trade.oanda_trade_id || trade.trade_id || '-'}</td>
+      <td>${trade.instrument || '-'}</td>
+      <td>${fmtNumber(trade.units, 0)}</td>
+      <td>${fmtNumber(entryPrice)}</td>
+      <td>${fmtNumber(exitPrice)}</td>
+      <td>${trade.status || '-'}</td>
+      <td>${fmtCurrency(pnl)}</td>
+      <td>${openTime}</td>
+      <td>${closeTime}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function calculateMaxDrawdown(pnls) {
+  let peak = 0;
+  let equity = 0;
+  let maxDrawdown = 0;
+  pnls.forEach((pnl) => {
+    equity += pnl;
+    peak = Math.max(peak, equity);
+    const drawdown = peak - equity;
+    if (drawdown > maxDrawdown) {
+      maxDrawdown = drawdown;
+    }
+  });
+  return maxDrawdown;
+}
+
+function calculateSharpe(values) {
+  if (!values.length) return null;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  const std = Math.sqrt(variance);
+  if (!std) return null;
+  return (mean / std) * Math.sqrt(values.length);
+}
+
+function updatePerformanceMetrics() {
+  const closed = getClosedTradesForDisplay();
+  if (!closed.length) {
+    setText('metricRealized', '-');
+    setText('metricAvgPnL', '-');
+    setText('metricWinRate', '-');
+    setText('metricTradesClosed', '0');
+    setText('metricDrawdown', '-');
+    setText('metricSharpe', '-');
+    return;
+  }
+  const ordered = [...closed].sort((a, b) => {
+    const at = new Date(a.close_timestamp || a.open_timestamp || 0).getTime();
+    const bt = new Date(b.close_timestamp || b.open_timestamp || 0).getTime();
+    return at - bt;
+  });
+  const pnls = ordered.map((t) => parseNumeric(t.pnl) ?? 0);
+  const realized = pnls.reduce((sum, v) => sum + v, 0);
+  const avg = realized / pnls.length;
+  const wins = pnls.filter((v) => v > 0).length;
+  const winRate = (wins / pnls.length) * 100;
+  const maxDrawdown = calculateMaxDrawdown(pnls);
+  const sharpe = calculateSharpe(pnls);
+
+  setText('metricRealized', fmtCurrency(realized));
+  setText('metricAvgPnL', fmtCurrency(avg));
+  setText('metricWinRate', fmtPercent(winRate));
+  setText('metricTradesClosed', pnls.length.toString());
+  setText('metricDrawdown', fmtCurrency(maxDrawdown));
+  setText('metricSharpe', sharpe !== null ? fmtNumber(sharpe, 2) : '-');
+}
+
+
+function resetChart(chart) {
+  if (!chart) return;
+  chart.data.labels = [];
+  chart.data.datasets.forEach((dataset) => {
+    dataset.data = [];
+  });
+  chart.update('none');
+}
+
+function chartLineOptions() {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label: (context) => `${context.dataset.label || ''}: ${fmtCurrency(context.parsed.y)}`,
+        },
+      },
+    },
+    scales: {
+      x: {
+        ticks: { color: '#8ea2c6', maxRotation: 0, autoSkip: true },
+        grid: { color: 'rgba(78, 102, 138, 0.12)' },
+      },
+      y: {
+        ticks: { color: '#8ea2c6' },
+        grid: { color: 'rgba(78, 102, 138, 0.12)' },
+      },
+    },
+  };
+}
+
+function updateCharts() {
+  if (!window.Chart) return;
+  const displaySymbols = getDisplaySymbols();
+  if (!displaySymbols.size) {
+    resetChart(state.charts.equity);
+    resetChart(state.charts.symbol);
+    updatePerSymbolCharts([]);
+    return;
+  }
+  const closed = [...getClosedTradesForDisplay()].sort((a, b) => {
+    const at = new Date(a.close_timestamp || a.open_timestamp || 0).getTime();
+    const bt = new Date(b.close_timestamp || b.open_timestamp || 0).getTime();
+    return at - bt;
+  });
+  if (!closed.length) {
+    resetChart(state.charts.equity);
+    resetChart(state.charts.symbol);
+    updatePerSymbolCharts([]);
+    return;
+  }
+
+  const equityCanvas = equityChart;
+  if (equityCanvas) {
+    const ctx = equityCanvas.getContext('2d');
+    let cumulative = 0;
+    const labels = closed.map((t) => new Date(t.close_timestamp || t.open_timestamp || Date.now()).toLocaleString());
+    const values = closed.map((t) => {
+      cumulative += parseNumeric(t.pnl) ?? 0;
+      return Number(cumulative.toFixed(2));
+    });
+    if (!state.charts.equity) {
+      state.charts.equity = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Cumulative realized PnL',
+              data: values,
+              borderColor: '#4c9dff',
+              backgroundColor: 'rgba(76, 157, 255, 0.15)',
+              fill: true,
+              tension: 0.25,
+            },
+          ],
+        },
+        options: chartLineOptions(),
+      });
+    } else {
+      state.charts.equity.data.labels = labels;
+      state.charts.equity.data.datasets[0].data = values;
+      state.charts.equity.update('none');
+    }
+  }
+
+  const symbolCanvas = symbolPerfChart;
+  if (symbolCanvas) {
+    const ctx = symbolCanvas.getContext('2d');
+    const totals = new Map();
+    closed.forEach((trade) => {
+      const key = normalizeInstrument(trade.instrument) || 'UNKNOWN';
+      totals.set(key, (totals.get(key) || 0) + (parseNumeric(trade.pnl) ?? 0));
+    });
+    const labels = [...totals.keys()].sort((a, b) => Math.abs(totals.get(b)) - Math.abs(totals.get(a)));
+    const values = labels.map((label) => Number((totals.get(label) || 0).toFixed(2)));
+    const colors = values.map((val) => (val >= 0 ? 'rgba(36, 196, 142, 0.65)' : 'rgba(255, 92, 92, 0.65)'));
+    if (!state.charts.symbol) {
+      state.charts.symbol = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Realized PnL',
+              data: values,
+              backgroundColor: colors,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          indexAxis: 'y',
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (context) => ${context.label}: ,
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: '#8ea2c6' },
+              grid: { color: 'rgba(78, 102, 138, 0.12)' },
+            },
+            y: {
+              ticks: { color: '#8ea2c6' },
+              grid: { display: false },
+            },
+          },
+        },
+      });
+    } else {
+      state.charts.symbol.data.labels = labels;
+      state.charts.symbol.data.datasets[0].data = values;
+      state.charts.symbol.data.datasets[0].backgroundColor = colors;
+      state.charts.symbol.update('none');
+    }
+  }
+
+  updatePerSymbolCharts(closed);
+}
+
+
+function syncPerSymbolChartContainers(symbols) {
+  const wrapper = $('perSymbolCharts');
+  if (!wrapper) return;
+  const desired = new Set(symbols);
+  const existingNodes = Array.from(wrapper.querySelectorAll('[data-symbol-card]'));
+  existingNodes.forEach((node) => {
+    const sym = node.dataset.symbolCard;
+    if (!desired.has(sym)) {
+      const chart = state.charts.perSymbol[sym];
+      if (chart) {
+        chart.destroy();
+        delete state.charts.perSymbol[sym];
+      }
+      node.remove();
+    }
+  });
+  symbols.forEach((sym) => {
+    if (!wrapper.querySelector(`[data-symbol-card="${sym}"]`)) {
+      const card = document.createElement('div');
+      card.className = 'chart-card';
+      card.dataset.symbolCard = sym;
+      const label = document.createElement('label');
+      label.textContent = sym;
+      const canvas = document.createElement('canvas');
+      card.appendChild(label);
+      card.appendChild(canvas);
+      wrapper.appendChild(card);
+    }
+  });
+}
+
+function updatePerSymbolCharts(closed) {
+  if (!window.Chart) return;
+  const displaySymbols = [...getDisplaySymbols()].sort();
+  const wrapper = $('perSymbolCharts');
+  if (!wrapper) return;
+  if (!displaySymbols.length) {
+    wrapper.innerHTML = '';
+    Object.values(state.charts.perSymbol).forEach((chart) => {
+      if (chart) chart.destroy();
+    });
+    state.charts.perSymbol = {};
+    return;
+  }
+  syncPerSymbolChartContainers(displaySymbols);
+  displaySymbols.forEach((sym) => {
+    const card = wrapper.querySelector(`[data-symbol-card="${sym}"]`);
+    if (!card) return;
+    const canvas = card.querySelector('canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const series = closed
+      .filter((trade) => normalizeInstrument(trade.instrument) === sym)
+      .sort((a, b) => {
+        const at = new Date(a.close_timestamp || a.open_timestamp || 0).getTime();
+        const bt = new Date(b.close_timestamp || b.open_timestamp || 0).getTime();
+        return at - bt;
+      });
+    if (!series.length) {
+      const chart = state.charts.perSymbol[sym];
+      if (chart) resetChart(chart);
+      return;
+    }
+    let cumulative = 0;
+    const labels = series.map((trade) => new Date(trade.close_timestamp || trade.open_timestamp || Date.now()).toLocaleString());
+    const values = series.map((trade) => {
+      cumulative += parseNumeric(trade.pnl) ?? 0;
+      return Number(cumulative.toFixed(2));
+    });
+    if (!state.charts.perSymbol[sym]) {
+      state.charts.perSymbol[sym] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: sym,
+              data: values,
+              borderColor: '#8e7dff',
+              backgroundColor: 'rgba(142, 125, 255, 0.18)',
+              fill: true,
+              tension: 0.25,
+            },
+          ],
+        },
+        options: chartLineOptions(),
+      });
+    } else {
+      const chart = state.charts.perSymbol[sym];
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = values;
+      chart.update('none');
+    }
+  });
+}
+
+
+
+async function applySession() {
+  if (!state.pendingSymbols.size) {
+    pushAlert('Select at least one symbol before applying.', 'error');
+    return;
+  }
+  const symbols = Array.from(state.pendingSymbols);
+  const modelPath = $('modelSelect')?.value || '';
+  const targetInput = $('inputTargetCapital');
+  const targetValue = targetInput ? parseNumeric(targetInput.value) : null;
+  const risk = gatherRiskForm();
+  const riskPayload = {};
+  Object.entries(risk).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== '') {
+      riskPayload[key] = value;
+    }
+  });
+  const body = {
+    symbols,
+    model_path: modelPath || null,
+    target_capital_usd: targetValue !== null ? targetValue : null,
+    risk: riskPayload,
+  };
+  try {
+    await api('/session/config', { method: 'POST', body });
+    pushAlert('Session configuration applied.', 'success');
+    state.serverSymbols = new Set(symbols);
+    state.pendingSymbols = new Set(symbols);
+    state.serverModelPath = modelPath;
+    state.pendingModelPath = modelPath;
+    clearSessionDirty();
+    renderSymbolCatalog();
+    applyPendingSymbolsToDropdowns();
+    renderSelectedPreview();
+    await Promise.all([loadModels(), refreshStatus()]);
+  } catch (err) {
+    pushAlert(`Failed to apply session configuration: ${err.message}`, 'error');
+  }
+}
+
+async function startEngine() {
+  const seconds = parseNumeric($('coldStartSeconds')?.value) ?? 120;
+  const timeout = Math.max(30, Math.floor(seconds));
+  try {
+    await api(`/session/start?cold_start_timeout_sec=${timeout}`, { method: 'POST' });
+    pushAlert('Cold start initiated. Engine will activate after buffers are warm.', 'success');
+    await refreshStatus();
+  } catch (err) {
+    pushAlert(`Failed to start engine: ${err.message}`, 'error');
+  }
+}
+
+async function stopEngine() {
+  try {
+    await api('/session/stop', { method: 'POST' });
+    pushAlert('Engine stop requested.', 'warning');
+    await refreshStatus();
+  } catch (err) {
+    pushAlert(`Failed to stop engine: ${err.message}`, 'error');
+  }
 }
 
 async function emergencyStop() {
-  if (!confirm('ç·Šæ€¥åœæ­¢å°‡å¹³å€‰æ‰€æœ‰å€‰ä½ä¸¦åœæ­¢ç­–ç•¥ï¼Œç¢ºå®šï¼Ÿ')) return;
-  await api('/session/emergency_stop', { method: 'POST' });
-  state.running = false;
-  renderEngineStatus();
-  await refreshPositions();
-  await refreshAccount();
-}
-
-async function runSmoke() {
-  const units = Number(el('smokeUnits').value || 1);
-  if (!confirm('æ­¤ç‚ºæ¸¬è©¦å·¥å…·ï¼Œåªé©ç”¨æ–¼ OANDA Practiceã€‚ç¢ºå®šåŸ·è¡Œï¼Ÿ')) return;
-  await api(`/test/smoke_trade?units=${units}`, { method: 'POST' });
-  // refresh after a short delay
-  setTimeout(()=>{ refreshTrades(); refreshPositions(); refreshAccount(); }, 1500);
-}
-
-function connectWS() {
   try {
-    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
-    ws.onmessage = (evt) => {
-      try {
-        const obj = JSON.parse(evt.data);
-        if (obj.type === 'status') {
-          state.running = !!(obj.data && obj.data.running);
-          renderEngineStatus();
-          // Warmup info
-          refreshSessionStatus();
-          // Suspended alerts
-          try { renderAlerts(obj.data && obj.data.suspended || {}); } catch {}
-        } else if (obj.type === 'account') {
-          renderAccount(obj.data);
-        }
-      } catch {}
-    };
-  } catch {}
+    await api('/session/emergency_stop', { method: 'POST' });
+    pushAlert('Emergency stop executed. All positions are being flattened.', 'error');
+    await Promise.all([loadPositions(), loadAccountSummary(), refreshStatus()]);
+  } catch (err) {
+    pushAlert(`Emergency stop failed: ${err.message}`, 'error');
+  }
 }
 
-function renderAlerts(map) {
-  const card = el('alertsCard');
-  const wrap = el('alerts');
-  wrap.innerHTML = '';
-  const entries = Object.entries(map||{});
-  if (!entries.length) { card.style.display = 'none'; return; }
-  card.style.display = '';
-  entries.forEach(([sym, info]) => {
-    const k = document.createElement('div'); k.textContent = sym; wrap.appendChild(k);
-    const v = document.createElement('div'); v.textContent = (info && info.reason) ? info.reason : 'suspended'; wrap.appendChild(v);
-  });
-}
-
-async function refreshSessionStatus() {
+async function runSmokeTest() {
+  const units = parseNumeric($('smokeUnits')?.value) ?? 1;
   try {
-    const s = await api('/session/status');
-    const elw = el('warmupStatus');
-    if (s.warmup && s.warmup.ready) {
-      elw.textContent = 'Warmup: å®Œæˆ';
-    } else if (s.warmup) {
-      elw.textContent = `Warmup: é€²è¡Œä¸­ï¼Œç¼ºå°‘ ${ (s.warmup.missing||[]).join(', ') }`;
-    } else {
-      elw.textContent = 'Warmup: -';
-    }
-  } catch {}
+    const res = await api(`/test/smoke_trade?units=${units}`, { method: 'POST' });
+    const symbols = res?.symbols || [];
+    pushAlert(`Smoke test submitted for ${symbols.length} symbol(s).`, 'success');
+  } catch (err) {
+    pushAlert(`Smoke test failed: ${err.message}`, 'error');
+  }
 }
+
+async function refreshStatus() {
+  try {
+    const status = await api('/session/status');
+    handleStatus(status || {});
+  } catch (err) {
+    pushAlert(`Failed to refresh session status: ${err.message}`, 'error');
+  }
+}
+
+function handleStatus(data) {
+  state.engineRunning = !!data.running;
+  state.warmup = data.warmup || state.warmup;
+  updateSuspendedLabel(data.suspended);
+
+  const newServerSymbols = toNormalizedSet(data.selected_symbols);
+  const serverChanged = !setsEqual(state.serverSymbols, newServerSymbols);
+  if (serverChanged) {
+    state.serverSymbols = newServerSymbols;
+  }
+  if (!state.sessionDirty && serverChanged && !setsEqual(state.pendingSymbols, newServerSymbols)) {
+    state.pendingSymbols = cloneSet(newServerSymbols);
+    renderSymbolCatalog();
+    applyPendingSymbolsToDropdowns();
+    renderSelectedPreview();
+    clearSessionDirty();
+  }
+
+  const newModelPath = data.model || '';
+  if (state.serverModelPath !== newModelPath) {
+    state.serverModelPath = newModelPath;
+  }
+  if (!state.sessionDirty && state.pendingModelPath !== newModelPath) {
+    state.pendingModelPath = newModelPath;
+    renderModelSelect();
+  }
+
+  updateEngineStatus();
+  updateWarmupBadge();
+  updateModelBadge();
+  state.lastHeartbeat = new Date();
+  updateHeartbeatDisplay();
+}
+
+
 
 function bindEvents() {
-  ['selMajorPairs','selMinorPairs','selPreciousMetals','selIndices','selEnergy','selCommodities','selCrypto','selBonds'].forEach(id => {
-    const sel = el(id); if (!sel) return;
-    sel.onchange = recomputeSelectionFromUI;
-  });
-  el('btnApply').onclick = async () => { try { await applySessionConfig(); alert('è¨­å®šå·²å¥—ç”¨'); } catch (e) { alert('è¨­å®šå¤±æ•—: ' + e); } };
-  el('btnRiskUpdate').onclick = async () => {
-    try {
-      const body = collectRiskParams();
-      await api('/risk/update', { method: 'POST', body: JSON.stringify(body) });
-      alert('é¢¨éšªåƒæ•¸å·²æ›´æ–°');
-    } catch(e) { alert('æ›´æ–°å¤±æ•—: ' + e); }
-  };
-  el('btnStart').onclick = async () => { try { await startSession(); } catch(e) { alert('å•Ÿå‹•å¤±æ•—: ' + e);} };
-  el('btnStop').onclick = async () => { try { await stopSession(); } catch(e) { alert('åœæ­¢å¤±æ•—: ' + e);} };
-  el('btnEmergency').onclick = async () => { try { await emergencyStop(); } catch(e) { alert('ç·Šæ€¥åœæ­¢å¤±æ•—: ' + e);} };
-  el('btnSmoke').onclick = async () => { try { await runSmoke(); } catch(e) { alert('æ¸¬è©¦å¤±æ•—: ' + e);} };
-  el('modelSelect').onchange = (e) => { state.selectedModelPath = e.target.value || null; };
+  ensureCategoryDropdowns();
+  const applyBtn = $('applySessionBtn');
+  if (applyBtn) applyBtn.addEventListener('click', () => applySession());
+  const riskBtn = $('updateRiskBtn');
+  if (riskBtn) riskBtn.addEventListener('click', () => updateRisk());
+  const startBtn = $('startEngineBtn');
+  if (startBtn) startBtn.addEventListener('click', () => startEngine());
+  const stopBtn = $('stopEngineBtn');
+  if (stopBtn) stopBtn.addEventListener('click', () => stopEngine());
+  const emergencyBtn = $('btnEmergency');
+  if (emergencyBtn) emergencyBtn.addEventListener('click', () => emergencyStop());
+  const smokeBtn = $('smokeTestBtn');
+  if (smokeBtn) smokeBtn.addEventListener('click', () => runSmokeTest());
+  const modelSelect = $('modelSelect');
+  if (modelSelect) {
+    modelSelect.addEventListener('change', (event) => {
+      state.pendingModelPath = event.target.value || '';
+      markSessionDirty();
+    });
+  }
+  const targetInput = $('inputTargetCapital');
+  if (targetInput) {
+    targetInput.addEventListener('input', () => {
+      state.pendingTargetCapital = parseNumeric(targetInput.value);
+      markSessionDirty();
+    });
+  }
 }
 
 async function boot() {
   bindEvents();
-  connectWS();
-  await refreshSymbols();
-  await refreshModels();
-  await refreshAccount();
-  await refreshPositions();
-  await refreshTrades();
-  await refreshRisk();
-  setInterval(refreshPositions, 5000);
-  setInterval(refreshTrades, 7000);
-  setInterval(refreshSessionStatus, 5000);
+  updateDirtyIndicators();
+  try { await loadSymbolCatalog(); } catch (err) { pushAlert(err.message, 'error'); }
+  try { await loadRisk(); } catch (err) { pushAlert(err.message, 'error'); }
+  try { await refreshStatus(); } catch (err) { pushAlert(err.message, 'error'); }
+  renderSymbolCatalog();
+  applyPendingSymbolsToDropdowns();
+  renderSelectedPreview();
+  updateDirtyIndicators();
+  try { await loadAccountSummary(); } catch (err) { pushAlert(err.message, 'error'); }
+  try { await loadPositions(); } catch (err) { pushAlert(err.message, 'error'); }
+  try { await loadTrades(); } catch (err) { pushAlert(err.message, 'error'); }
+  await loadModels();
+  connectWebSocket();
+  setInterval(loadAccountSummary, 8000);
+  setInterval(loadPositions, 6000);
+  setInterval(loadTrades, 12000);
+  setInterval(refreshStatus, 7000);
 }
 
-boot();
+document.addEventListener('DOMContentLoaded', boot);
 
-// ----------------- Charts -----------------
-let equityChart, symbolPerfChart;
 
-const perSymbolCharts = {}; // symbol -> Chart instance
 
-function ensurePerSymbolContainers() {
-  const wrap = el('perSymbolCharts');
-  if (!wrap) return;
-  const desired = [...(state.selectedSymbols || new Set())];
-  const existing = new Set([...wrap.querySelectorAll('canvas')].map(c => c.getAttribute('data-sym')));
-  // Remove canvases not in selection
-  [...existing].forEach(sym => { if (!desired.includes(sym)) {
-    const node = wrap.querySelector(`canvas[data-sym="${sym}"]`);
-    if (node && node.parentElement) node.parentElement.remove();
-    if (perSymbolCharts[sym]) { try { perSymbolCharts[sym].destroy(); } catch {} delete perSymbolCharts[sym]; }
-  }});
-  // Add missing canvases
-  desired.forEach(sym => {
-    if (!wrap.querySelector(`canvas[data-sym="${sym}"]`)) {
-      const box = document.createElement('div');
-      const label = document.createElement('label'); label.className = 'hint'; label.textContent = sym;
-      const cv = document.createElement('canvas'); cv.height = 100; cv.setAttribute('data-sym', sym);
-      box.appendChild(label); box.appendChild(cv); wrap.appendChild(box);
-    }
-  });
-}
 
-function updatePerSymbolCharts(trades) {
-  try {
-    ensurePerSymbolContainers();
-    const wrap = el('perSymbolCharts'); if (!wrap) return;
-    const closed = (trades||[]).filter(t => t.status === 'CLOSED' && t.close_timestamp);
-    const bySym = {};
-    closed.forEach(t => { const s=t.instrument; (bySym[s] = bySym[s]||[]).push(t); });
-    const selected = new Set(state.selectedSymbols || []);
-    selected.forEach(sym => {
-      const list = (bySym[sym]||[]).sort((a,b)=> new Date(a.close_timestamp) - new Date(b.close_timestamp)).slice(-50);
-      let acc = 0; const labels = list.map(t => new Date(t.close_timestamp).toLocaleString());
-      const values = list.map(t => (acc += Number(t.pnl||0)));
-      const cv = wrap.querySelector(`canvas[data-sym="${sym}"]`);
-      if (!cv) return;
-      if (!perSymbolCharts[sym]) {
-        perSymbolCharts[sym] = new Chart(cv.getContext('2d'), {
-          type: 'line',
-          data: { labels, datasets: [{ label: sym, data: values, borderColor: '#8e44ad', backgroundColor: 'rgba(142,68,173,0.15)', tension: 0.2 }]},
-          options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#9bb0c3'} }, y: { ticks: { color: '#9bb0c3'} } } }
-        });
-      } else {
-        const ch = perSymbolCharts[sym];
-        ch.data.labels = labels; ch.data.datasets[0].data = values; ch.update();
-      }
-    });
-  } catch {}
-}
 
-function updateCharts(trades) {
-  try {
-    const closed = (trades||[]).filter(t => t.status === 'CLOSED' && t.close_timestamp);
-    const points = closed
-      .map(t => ({ t: new Date(t.close_timestamp), pnl: Number(t.pnl||0) }))
-      .sort((a,b) => a.t - b.t);
-    let acc = 0;
-    const labels = points.map(p => p.t.toLocaleString());
-    const values = points.map(p => (acc += p.pnl));
 
-    // Equity chart (cumulative realized PnL)
-    const ctx1 = document.getElementById('equityChart').getContext('2d');
-    if (!equityChart) {
-      equityChart = new Chart(ctx1, {
-        type: 'line',
-        data: { labels, datasets: [{ label: 'Cumulative PnL', data: values, borderColor: '#2ea0ff', backgroundColor: 'rgba(46,160,255,0.2)', tension: 0.2 }]},
-        options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#9bb0c3'} }, y: { ticks: { color: '#9bb0c3'} } } }
-      });
-    } else {
-      equityChart.data.labels = labels; equityChart.data.datasets[0].data = values; equityChart.update();
-    }
 
-    // Symbol performance (realized PnL per symbol)
-    const bySym = {};
-    closed.forEach(t => { const s=t.instrument; bySym[s] = (bySym[s]||0) + (Number(t.pnl)||0); });
-    const slabels = Object.keys(bySym);
-    const svalues = slabels.map(k => bySym[k]);
-    const ctx2 = document.getElementById('symbolPerfChart').getContext('2d');
-    if (!symbolPerfChart) {
-      symbolPerfChart = new Chart(ctx2, {
-        type: 'bar',
-        data: { labels: slabels, datasets: [{ label: 'PnL', data: svalues, backgroundColor: '#24c47e' }]},
-        options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#9bb0c3'} }, y: { ticks: { color: '#9bb0c3'} } } }
-      });
-    } else {
-      symbolPerfChart.data.labels = slabels; symbolPerfChart.data.datasets[0].data = svalues; symbolPerfChart.update();
-    }
-  } catch {}
-}
+
+
+
+
+
+
+
+
+
 

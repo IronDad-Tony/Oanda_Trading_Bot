@@ -1,225 +1,352 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Live Trading Dashboard</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <title>Live Trading Control Center</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
   <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand">
-      <span class="logo">▶</span>
-      <h1>Live Trading</h1>
-    </div>
-    <div class="header-actions">
-      <div id="engineStatus" class="badge">Stopped</div>
-      <button id="btnEmergency" class="btn btn-danger">緊急停止</button>
-    </div>
-  </header>
-
-  <main class="app-main">
-    <aside class="sidebar">
-      <section class="card">
-        <h2>Session 設定</h2>
-        <div class="form-group">
-          <label>Symbols</label>
-          <div id="symbolSelectors" class="grid-2">
-            <div class="form-group">
-              <label>Major Pairs</label>
-              <select id="selMajorPairs" multiple size="8"></select>
-            </div>
-            <div class="form-group">
-              <label>Minor Pairs</label>
-              <select id="selMinorPairs" multiple size="8"></select>
-            </div>
-            <div class="form-group">
-              <label>Precious Metals</label>
-              <select id="selPreciousMetals" multiple size="6"></select>
-            </div>
-            <div class="form-group">
-              <label>Indices</label>
-              <select id="selIndices" multiple size="8"></select>
-            </div>
-            <div class="form-group">
-              <label>Energy</label>
-              <select id="selEnergy" multiple size="6"></select>
-            </div>
-            <div class="form-group">
-              <label>Commodities</label>
-              <select id="selCommodities" multiple size="6"></select>
-            </div>
-            <div class="form-group">
-              <label>Crypto</label>
-              <select id="selCrypto" multiple size="6"></select>
-            </div>
-            <div class="form-group">
-              <label>Bonds</label>
-              <select id="selBonds" multiple size="6"></select>
-            </div>
-          </div>
-          <small class="hint">可多選；總數決定可選模型容量</small>
-        </div>
-        <div class="form-group">
-          <label>可用模型 (依選擇數量篩選)</label>
-          <select id="modelSelect"></select>
-        </div>
-        <div class="form-group">
-          <label>目標操作金額 (<= Equity) <span id="accCcyLabel"></span></label>
-          <input id="targetCapital" type="number" min="0" step="1" placeholder="" />
-          <small id="equityHint" class="hint"></small>
-        </div>
-        <div class="form-actions">
-          <button id="btnApply" class="btn">套用設定</button>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>風險控制</h2>
-        <div class="grid-2">
-          <div class="form-group">
-            <label>Max Total Exposure (<span id="accCcyShort">CCY</span>)</label>
-            <input id="risk_max_exposure" type="number" step="1" />
-          </div>
-          <div class="form-group">
-            <label>Max Risk Per Trade (%)</label>
-            <input id="risk_max_risk_pct" type="number" step="0.1" />
-          </div>
-          <div class="form-group">
-            <label>Use ATR Sizing</label>
-            <select id="risk_use_atr">
-              <option value="false">False</option>
-              <option value="true">True</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>ATR Period</label>
-            <input id="risk_atr_period" type="number" step="1" />
-          </div>
-          <div class="form-group">
-            <label>SL ATR Multiplier</label>
-            <input id="risk_sl_atr_mult" type="number" step="0.1" />
-          </div>
-          <div class="form-group">
-            <label>TP ATR Multiplier</label>
-            <input id="risk_tp_atr_mult" type="number" step="0.1" />
-          </div>
-          <div class="form-group">
-            <label>Default SL (pips)</label>
-            <input id="risk_sl_pips" type="number" step="1" />
-          </div>
-          <div class="form-group">
-            <label>Default TP (pips)</label>
-            <input id="risk_tp_pips" type="number" step="1" />
+  <div class="app-shell">
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <div class="brand">
+          <span class="brand-logo">QX</span>
+          <div class="brand-meta">
+            <h1>Live Trading Control Center</h1>
+            <span class="brand-subtitle">Execution | Risk | Monitoring</span>
           </div>
         </div>
-        <div class="form-actions">
-          <button id="btnRiskUpdate" class="btn">更新風險參數</button>
+        <div class="status-group">
+          <span id="engineStatus" class="badge badge-offline">Stopped</span>
+          <span id="warmupBadge" class="badge badge-muted">Warmup idle</span>
+          <span id="modelBadge" class="badge badge-muted">Model: n/a</span>
         </div>
-      </section>
-
-      <section class="card">
-        <h2>控制</h2>
-        <div class="form-actions">
-          <button id="btnStart" class="btn btn-primary">開始</button>
-          <button id="btnStop" class="btn">停止</button>
-        </div>
-        <div class="warmup" id="warmupStatus">Warmup: 未開始</div>
-      </section>
-
-      <section class="card">
-        <h2>測試工具</h2>
-        <div class="form-group">
-          <label>單次測試單位</label>
-          <input id="smokeUnits" type="number" min="1" step="1" value="1" />
-        </div>
-        <div class="form-actions">
-          <button id="btnSmoke" class="btn">執行 Smoke Test (Practice)</button>
-        </div>
-      </section>
-    </aside>
-
-    <section class="content">
-      <div class="grid-2">
-        <section class="card">
-          <h2>帳戶摘要</h2>
-          <div id="accountSummary" class="kv"></div>
-        </section>
-        <section class="card">
-          <h2>績效摘要</h2>
-          <div id="perfSummary" class="kv"></div>
-        </section>
       </div>
-
-      <section class="card" id="alertsCard" style="display:none;">
-        <h2>警示</h2>
-        <div id="alerts" class="kv"></div>
-      </section>
-
-      <section class="card">
-        <h2>持倉</h2>
-        <table class="table" id="positionsTable">
-          <thead>
-            <tr>
-              <th>Instrument</th>
-              <th>Side</th>
-              <th>Units</th>
-              <th>Avg Price</th>
-              <th>Unrealized P/L</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </section>
-
-      <section class="card">
-        <h2>交易紀錄</h2>
-        <table class="table" id="tradesTable">
-          <thead>
-            <tr>
-              <th>Trade ID</th>
-              <th>Instrument</th>
-              <th>Units</th>
-              <th>Entry</th>
-              <th>Status</th>
-              <th>Close</th>
-              <th>PnL</th>
-              <th>Opened</th>
-              <th>Closed</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </section>
-
-      <section class="card">
-        <h2>績效圖表</h2>
-        <div class="grid-2">
-          <div>
-            <label class="hint">累積實現PnL（帳戶幣別）</label>
-            <canvas id="equityChart" height="120"></canvas>
+      <div class="top-bar-right">
+        <div class="account-peek">
+          <div class="peek-item">
+            <label>Equity</label>
+            <span id="peekEquity">-</span>
           </div>
-          <div>
-            <label class="hint">各 Symbol 實現PnL</label>
-            <canvas id="symbolPerfChart" height="120"></canvas>
+          <div class="peek-item">
+            <label>Balance</label>
+            <span id="peekBalance">-</span>
+          </div>
+          <div class="peek-item">
+            <label>Unrealized</label>
+            <span id="peekUnrealized">-</span>
           </div>
         </div>
-      </section>
+        <button id="btnEmergency" class="btn btn-danger btn-lg">Emergency stop</button>
+      </div>
+    </header>
 
-      <section class="card">
-        <h2>每檔標的績效</h2>
-        <div id="perSymbolCharts" class="grid-2"></div>
-      </section>
-    </section>
-  </main>
+    <main class="main-layout">
+      <aside class="side-panels">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Session Designer</h2>
+            <span class="panel-caption">Synchronize with training universe & models</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-control">
+              <label>Trading symbols</label>
+              <small class="hint">Select instruments per category below (multi-select supported).</small>
+            </div>
+            <div id="symbolDropdowns" class="symbol-dropdowns"></div>
+<div class="selected-preview">
+              <div class="selected-header">
+                <label>Selected symbols</label>
+                <span id="selectedCount" class="badge badge-count">0</span>
+              </div>
+              <div id="selectedSymbols" class="chip-grid"></div>
+            </div>
 
-  <footer class="app-footer">
-    <span>© Live Trading UI</span>
-  </footer>
+            <div class="form-control">
+              <label for="modelSelect">Execution model</label>
+              <select id="modelSelect">
+                <option value="">Select a model...</option>
+              </select>
+              <small id="modelHint" class="hint">Select symbols first to filter by model capacity.</small>
+            </div>
+
+            <div class="form-grid">
+              <div class="form-control">
+                <label id="targetCapitalLabel" for="inputTargetCapital">Target capital</label>
+                <input id="inputTargetCapital" type="number" min="0" step="0.01" placeholder="0.00" />
+                <small class="hint">Must be smaller than account equity.</small>
+              </div>
+              <div class="form-control">
+                <label for="coldStartSeconds">Cold start timeout (sec)</label>
+                <input id="coldStartSeconds" type="number" min="30" step="15" value="120" />
+                <small class="hint">Historical preload before live execution.</small>
+              </div>
+            </div>
+
+            <div class="btn-group">
+              <button id="applySessionBtn" class="btn btn-primary">Apply configuration</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Risk Controls</h2>
+            <span class="panel-caption">Realtime guard-rails & limits</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-grid compact">
+              <div class="form-control">
+                <label for="risk_max_total_exposure">Max total exposure (account ccy)</label>
+                <input id="risk_max_total_exposure" type="number" min="0" step="0.01" />
+              </div>
+              <div class="form-control">
+                <label for="risk_max_risk_pct">Max risk per trade (%)</label>
+                <input id="risk_max_risk_pct" type="number" min="0" step="0.1" />
+              </div>
+              <div class="form-control">
+                <label for="risk_stop_loss_pips">Default stop loss (pips)</label>
+                <input id="risk_stop_loss_pips" type="number" min="0" step="1" />
+              </div>
+              <div class="form-control">
+                <label for="risk_take_profit_pips">Default take profit (pips)</label>
+                <input id="risk_take_profit_pips" type="number" min="0" step="1" />
+              </div>
+              <div class="form-control">
+                <label for="risk_use_atr">ATR sizing</label>
+                <select id="risk_use_atr">
+                  <option value="false">Disabled</option>
+                  <option value="true">Enabled</option>
+                </select>
+              </div>
+              <div class="form-control">
+                <label for="risk_atr_period">ATR period</label>
+                <input id="risk_atr_period" type="number" min="1" step="1" />
+              </div>
+              <div class="form-control">
+                <label for="risk_sl_atr_mult">SL ATR multiplier</label>
+                <input id="risk_sl_atr_mult" type="number" min="0" step="0.1" />
+              </div>
+              <div class="form-control">
+                <label for="risk_tp_atr_mult">TP ATR multiplier</label>
+                <input id="risk_tp_atr_mult" type="number" min="0" step="0.1" />
+              </div>
+            </div>
+            <div class="btn-group">
+              <button id="updateRiskBtn" class="btn">Update risk envelope</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Execution Controls</h2>
+            <span class="panel-caption">Launch, monitor, and verify</span>
+          </div>
+          <div class="panel-body">
+            <div class="btn-group">
+              <button id="startEngineBtn" class="btn btn-success">Start trading</button>
+              <button id="stopEngineBtn" class="btn btn-muted">Stop</button>
+            </div>
+            <div class="inline-stats">
+              <div>
+                <label>Status</label>
+                <span id="engineStatusText">Stopped</span>
+              </div>
+              <div>
+                <label>Heartbeat</label>
+                <span id="heartbeatTs">-</span>
+              </div>
+              <div>
+                <label>Suspended symbols</label>
+                <span id="suspendedSymbols">-</span>
+              </div>
+            </div>
+            <div class="form-control">
+              <label for="smokeUnits">Smoke test units / leg</label>
+              <input id="smokeUnits" type="number" min="1" step="1" value="1" />
+            </div>
+            <div class="btn-group">
+              <button id="smokeTestBtn" class="btn btn-muted">Run smoke test</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Alerts & Guardrails</h2>
+            <span class="panel-caption">Key risk and system messages</span>
+          </div>
+          <div class="panel-body">
+            <div id="alertFeed" class="alert-feed empty">No alerts</div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="dashboard">
+        <div class="grid grid-2">
+          <section class="panel stretch">
+            <div class="panel-header">
+              <h2>Account Snapshot</h2>
+              <span class="panel-caption">Live account telemetry</span>
+            </div>
+            <div class="panel-body">
+              <div class="metric-grid">
+                <div class="metric-card">
+                  <label>Balance</label>
+                  <span id="accountBalance">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>NAV</label>
+                  <span id="accountNav">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Unrealized P/L</label>
+                  <span id="accountUnrealized">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Margin used</label>
+                  <span id="accountMarginUsed">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Margin available</label>
+                  <span id="accountMarginAvail">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Open trades</label>
+                  <span id="accountOpenTrades">-</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel stretch">
+            <div class="panel-header">
+              <h2>Performance Summary</h2>
+              <span class="panel-caption">Realized KPIs and diagnostics</span>
+            </div>
+            <div class="panel-body">
+              <div class="metric-grid">
+                <div class="metric-card">
+                  <label>Total realized P/L</label>
+                  <span id="metricRealized">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Average trade P/L</label>
+                  <span id="metricAvgPnL">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Win rate</label>
+                  <span id="metricWinRate">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Trades closed</label>
+                  <span id="metricTradesClosed">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Max drawdown</label>
+                  <span id="metricDrawdown">-</span>
+                </div>
+                <div class="metric-card">
+                  <label>Sharpe (approx)</label>
+                  <span id="metricSharpe">-</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel stretch">
+          <div class="panel-header">
+            <h2>Equity Curve</h2>
+            <span class="panel-caption">Cumulative realized performance</span>
+          </div>
+          <div class="panel-body">
+            <canvas id="equityChart" height="200"></canvas>
+          </div>
+        </section>
+
+        <section class="panel stretch">
+          <div class="panel-header">
+            <h2>Symbol Attribution</h2>
+            <span class="panel-caption">Realized P/L contribution per instrument</span>
+          </div>
+          <div class="panel-body">
+            <canvas id="symbolPerfChart" height="200"></canvas>
+          </div>
+        </section>
+
+        <section class="panel stretch">
+          <div class="panel-header">
+            <h2>Per-Symbol Traces</h2>
+            <span class="panel-caption">Rolling P/L for selected instruments</span>
+          </div>
+          <div class="panel-body">
+            <div id="perSymbolCharts" class="chart-grid"></div>
+          </div>
+        </section>
+
+        <section class="panel stretch">
+          <div class="panel-header">
+            <h2>Open Positions</h2>
+            <span class="panel-caption">Live exposure overview</span>
+          </div>
+          <div class="panel-body">
+            <table id="positionsTable" class="data-table">
+              <thead>
+                <tr>
+                  <th>Instrument</th>
+                  <th>Side</th>
+                  <th>Units</th>
+                  <th>Avg price</th>
+                  <th>Unrealized P/L</th>
+                  <th>Risk</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel stretch">
+          <div class="panel-header">
+            <h2>Trade Ledger</h2>
+            <span class="panel-caption">Executed orders and lifecycle data</span>
+          </div>
+          <div class="panel-body">
+            <table id="tradesTable" class="data-table">
+              <thead>
+                <tr>
+                  <th>Trade ID</th>
+                  <th>Instrument</th>
+                  <th>Units</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                  <th>Status</th>
+                  <th>P/L</th>
+                  <th>Opened</th>
+                  <th>Closed</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <span>Live Trading UI - built for institutional-grade monitoring and control</span>
+      <span id="footerAccountCurrency"></span>
+    </footer>
+  </div>
 
   <script src="/app.js"></script>
-  <noscript>請啟用 JavaScript 使用完整功能。</noscript>
 </body>
 </html>
+
+

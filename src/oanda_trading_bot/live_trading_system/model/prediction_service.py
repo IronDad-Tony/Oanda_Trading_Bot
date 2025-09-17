@@ -52,7 +52,7 @@ class PredictionService:
                 self.model = SAC.load(model_path, device=self.device)
                 self.is_sac_model = True
                 self.current_model_path = model_path
-                logger.info(f"SAC æ¨¡åž‹å·²ä½¿ç”¨ stable_baselines3.SAC.load å¾ž {model_path} è¼‰å…¥åˆ° {self.device}ã€‚")
+                logger.info(f"Loaded SAC model via stable_baselines3 from {model_path} on {self.device}.")
             else:
                 # é è¨­ç‚º PyTorch é¡žåž‹æ¨¡åž‹
                 self.model = torch.load(model_path, map_location=self.device)
@@ -288,9 +288,9 @@ class PredictionService:
                             ai = action[i] if hasattr(action, '__len__') else action
                             results[instrument] = int(1 if ai > 0.05 else (-1 if ai < -0.05 else 0))
                     except Exception as e:
-                        logger.error(f"SAC 推論錯誤: {e}", exc_info=True)
+                        logger.error(f"SAC inference error: {e}", exc_info=True)
                         results[instrument] = None
-                logger.info(f"SAC æ¨¡åž‹æˆåŠŸç”Ÿæˆé æ¸¬: {results}")
+                logger.info(f"SAC prediction: {results}")
                 return results
             else:
                 # ========== åŽŸæœ¬ PyTorch æ¨¡åž‹æŽ¨è«–æµç¨‹ ==========
