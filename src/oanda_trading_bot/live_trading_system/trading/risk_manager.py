@@ -1,156 +1,476 @@
-﻿import logging
-from typing import Dict, Any, Optional
+﻿"""Risk management utilities for the live trading system."""
+from __future__ import annotations
+
+import logging
 from decimal import Decimal
-from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager
+from typing import Any, Dict, List, Optional, Tuple
+
+from oanda_trading_bot.training_system.data_manager.currency_manager import (
+    CurrencyDependencyManager,
+)
 from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
 
-from .position_manager import PositionManager, Position
+from .position_manager import PositionManager
 from ..core.system_state import SystemState
 from ..core.oanda_client import OandaClient
 
+
+def _to_int(value: Any) -> int:
+    try:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        return int(float(str(value).strip()))
+    except Exception:
+        return 0
+
+
 class RiskManager:
-    """
-    Enforces risk management rules before any order is placed.
-    """
+    """Enforces position sizing, exposure limits, and drawdown protection."""
+
     def __init__(
         self,
         config: Dict[str, Any],
         system_state: SystemState,
         position_manager: PositionManager,
         oanda_client: OandaClient,
-    ):
-        """
-        Initializes the RiskManager.
-
-        Args:
-            config (Dict[str, Any]): The system's configuration, containing risk parameters.
-            system_state (SystemState): The global state manager.
-            position_manager (PositionManager): The manager for open positions.
-        """
+    ) -> None:
         self.logger = logging.getLogger(__name__)
-        self.config = config.get('risk_management', {})
         self.system_state = system_state
         self.position_manager = position_manager
         self.client = oanda_client
 
-        # Load risk parameters from config
-        self.max_total_exposure_usd = self.config.get('max_total_exposure_usd', 1000)
-        self.max_risk_per_trade_percent = self.config.get('max_risk_per_trade_percent', 1.0)
-        # Fallback (pip-based) parameters
-        self.stop_loss_pips = self.config.get('stop_loss_pips', 20)
-        self.take_profit_pips = self.config.get('take_profit_pips', 40)
-        # ATR-based sizing parameters
-        self.use_atr_sizing = self.config.get('use_atr_sizing', False)
-        self.atr_period = int(self.config.get('atr_period', 14))
-        self.stop_loss_atr_multiplier = float(self.config.get('stop_loss_atr_multiplier', 2.0))
-        self.take_profit_atr_multiplier = float(self.config.get('take_profit_atr_multiplier', 3.0))
-        
-        self.logger.info("RiskManager initialized with the following parameters:")
-        self.logger.info(f"- Max Total Exposure (USD): {self.max_total_exposure_usd}")
-        self.logger.info(f"- Max Risk Per Trade: {self.max_risk_per_trade_percent}%")
-        self.logger.info(f"- Default Stop Loss (pips): {self.stop_loss_pips}")
-        self.logger.info(f"- Default Take Profit (pips): {self.take_profit_pips}")
-        self.logger.info(f"- Use ATR Sizing: {self.use_atr_sizing}")
-        if self.use_atr_sizing:
-            self.logger.info(f"- ATR Period: {self.atr_period}")
-            self.logger.info(f"- SL ATR Multiplier: {self.stop_loss_atr_multiplier}")
-        # Live conversion helper
-        self.account_currency = (config.get('account_currency') or 'USD').upper()
+        # Base configuration snapshot
+        live_cfg = config or {}
+        self.config = dict(live_cfg.get('risk_management', {}))
+
+        # Core risk parameters
+        self.max_total_exposure_usd: float = float(self.config.get('max_total_exposure_usd', 0) or 0)
+        self.max_total_exposure_percent: Optional[float] = (
+            float(self.config['max_total_exposure_percent'])
+            if self.config.get('max_total_exposure_percent') is not None
+            else None
+        )
+        self.max_position_exposure_percent: Optional[float] = (
+            float(self.config['max_position_exposure_percent'])
+            if self.config.get('max_position_exposure_percent') is not None
+            else None
+        )
+        self.max_risk_per_trade_percent: float = float(
+            self.config.get('max_risk_per_trade_percent', 1.0)
+        )
+
+        # Volatility-aware sizing
+        self.use_atr_sizing: bool = bool(self.config.get('use_atr_sizing', False))
+        self.atr_period: int = int(self.config.get('atr_period', 14))
+        self.stop_loss_atr_multiplier: float = float(self.config.get('stop_loss_atr_multiplier', 2.0))
+        self.take_profit_atr_multiplier: float = float(self.config.get('take_profit_atr_multiplier', 3.0))
+
+        # Pip based fallbacks
+        self.stop_loss_pips: float = float(self.config.get('stop_loss_pips', 20))
+        self.take_profit_pips: float = float(self.config.get('take_profit_pips', 40))
+
+        # Drawdown protection
+        self.hard_stop_loss_percent: Optional[float] = (
+            float(self.config['hard_stop_loss_percent'])
+            if self.config.get('hard_stop_loss_percent') is not None
+            else None
+        )
+        self.trailing_stop_loss_percent: Optional[float] = (
+            float(self.config['trailing_stop_loss_percent'])
+            if self.config.get('trailing_stop_loss_percent') is not None
+            else None
+        )
+        self.daily_loss_limit_percent: Optional[float] = (
+            float(live_cfg.get('daily_loss_limit_pct'))
+            if live_cfg.get('daily_loss_limit_pct') is not None
+            else None
+        )
+
+        self.account_currency: str = (live_cfg.get('account_currency') or 'USD').upper()
         self.cur_mgr = CurrencyDependencyManager(self.account_currency, apply_oanda_markup=True)
         self.iim = InstrumentInfoManager()
 
-    def _round_price_to_instrument(self, instrument: str, price: float) -> float:
-        """Round price to instrument precision based on pip_location."""
-        try:
-            det = self.iim.get_details(instrument)
-            pl = int(getattr(det, 'pip_location', 0)) if det is not None else 0
-            decimals = max(0, -pl)
-            from decimal import Decimal, ROUND_HALF_UP
-            q = Decimal('1').scaleb(-decimals)  # 10**(-decimals)
-            return float(Decimal(str(price)).quantize(q, rounding=ROUND_HALF_UP))
-        except Exception:
-            try:
-                pl = int(self.iim.get_details(instrument).pip_location)
-                decimals = max(0, -pl)
-                return round(float(price), decimals)
-            except Exception:
-                return float(price)
+        # Session runtime state
+        self.session_target_capital: Optional[float] = None
+        self.halt_triggered: bool = False
+        self.halt_reason: Optional[str] = None
 
-    def update_params(self, params: Dict[str, Any]):
-        """
-        Update risk parameters at runtime from a dictionary. Only known keys are applied.
-        """
+        self.logger.info(
+            "RiskManager initialised: max_exposure_usd=%s, max_risk_per_trade_pct=%s",
+            self.max_total_exposure_usd,
+            self.max_risk_per_trade_percent,
+        )
+
+    # ------------------------------------------------------------------
+    # Session lifecycle hooks
+    # ------------------------------------------------------------------
+    def register_target_capital(self, amount: Optional[float]) -> None:
+        self.session_target_capital = float(amount) if amount is not None else None
+
+    def on_session_start(self, equity: Optional[float]) -> None:
+        self.halt_triggered = False
+        self.halt_reason = None
+        self.system_state.mark_session_start_equity(equity)
+        if equity is not None:
+            self.system_state.update_peak_equity(equity)
+
+    # ------------------------------------------------------------------
+    # Public helpers used by the API / UI
+    # ------------------------------------------------------------------
+    def get_risk_snapshot(self) -> Dict[str, Any]:
+        exposure, per_symbol = self._compute_open_exposure()
+        limit_total = self._exposure_cap_absolute()
+        account = self._safe_account_summary()
+        equity = account.get('equity')
+        available = None
+        if limit_total is not None:
+            available = max(limit_total - exposure, 0.0)
+        return {
+            'account_currency': self.account_currency,
+            'target_capital': self.session_target_capital,
+            'max_total_exposure_usd': self.max_total_exposure_usd,
+            'max_total_exposure_percent': self.max_total_exposure_percent,
+            'max_position_exposure_percent': self.max_position_exposure_percent,
+            'max_risk_per_trade_percent': self.max_risk_per_trade_percent,
+            'use_atr_sizing': self.use_atr_sizing,
+            'atr_period': self.atr_period,
+            'stop_loss_atr_multiplier': self.stop_loss_atr_multiplier,
+            'take_profit_atr_multiplier': self.take_profit_atr_multiplier,
+            'stop_loss_pips': self.stop_loss_pips,
+            'take_profit_pips': self.take_profit_pips,
+            'hard_stop_loss_percent': self.hard_stop_loss_percent,
+            'trailing_stop_loss_percent': self.trailing_stop_loss_percent,
+            'daily_loss_limit_percent': self.daily_loss_limit_percent,
+            'total_exposure': exposure,
+            'per_symbol_exposure': per_symbol,
+            'exposure_capacity': limit_total,
+            'available_capacity': available,
+            'halt_triggered': self.halt_triggered,
+            'halt_reason': self.halt_reason,
+            'session_start_equity': self.system_state.session_start_equity,
+            'session_peak_equity': self.system_state.session_peak_equity,
+            'account_equity': equity,
+        }
+
+    def should_halt_trading(self) -> Tuple[bool, Optional[str]]:
+        if self.halt_triggered and self.halt_reason:
+            return True, self.halt_reason
+
+        account = self._safe_account_summary()
+        equity = account.get('equity')
+        if equity is None:
+            return False, None
+
+        self.system_state.update_peak_equity(equity)
+
+        start_eq = self.system_state.session_start_equity
+        if (
+            start_eq is not None
+            and self.hard_stop_loss_percent is not None
+            and start_eq > 0
+        ):
+            drawdown = (start_eq - equity) / start_eq * 100
+            if drawdown >= self.hard_stop_loss_percent:
+                reason = (
+                    f"Hard stop triggered: drawdown {drawdown:.2f}% exceeds "
+                    f"{self.hard_stop_loss_percent}%"
+                )
+                return self._record_halt(reason)
+
+        peak_eq = self.system_state.session_peak_equity
+        if (
+            peak_eq is not None
+            and self.trailing_stop_loss_percent is not None
+            and peak_eq > 0
+        ):
+            trailing_dd = max(0.0, (peak_eq - equity) / peak_eq * 100)
+            if trailing_dd >= self.trailing_stop_loss_percent:
+                reason = (
+                    f"Trailing stop triggered: drawdown {trailing_dd:.2f}% exceeds "
+                    f"{self.trailing_stop_loss_percent}%"
+                )
+                return self._record_halt(reason)
+
+        return False, None
+
+    # ------------------------------------------------------------------
+    # Parameter management
+    # ------------------------------------------------------------------
+    def update_params(self, params: Dict[str, Any]) -> None:
         if not params:
             return
         self.config.update(params)
-        # Apply supported keys to attributes
-        for key in [
-            'max_total_exposure_usd',
-            'max_risk_per_trade_percent',
-            'use_atr_sizing',
-            'atr_period',
-            'stop_loss_atr_multiplier',
-            'take_profit_atr_multiplier',
-            'stop_loss_pips',
-            'take_profit_pips',
-        ]:
-            if key in params and params[key] is not None:
-                setattr(self, key, params[key])
-        # Log summary of changes
+        mapping = {
+            'max_total_exposure_usd': 'max_total_exposure_usd',
+            'max_total_exposure_percent': 'max_total_exposure_percent',
+            'max_position_exposure_percent': 'max_position_exposure_percent',
+            'max_risk_per_trade_percent': 'max_risk_per_trade_percent',
+            'use_atr_sizing': 'use_atr_sizing',
+            'atr_period': 'atr_period',
+            'stop_loss_atr_multiplier': 'stop_loss_atr_multiplier',
+            'take_profit_atr_multiplier': 'take_profit_atr_multiplier',
+            'stop_loss_pips': 'stop_loss_pips',
+            'take_profit_pips': 'take_profit_pips',
+            'hard_stop_loss_percent': 'hard_stop_loss_percent',
+            'trailing_stop_loss_percent': 'trailing_stop_loss_percent',
+        }
+        for key, attr in mapping.items():
+            if key not in params:
+                continue
+            value = params[key]
+            if value is None:
+                setattr(self, attr, None)
+            else:
+                setattr(self, attr, float(value) if isinstance(value, (int, float)) else float(str(value)))
+
+        if 'use_atr_sizing' in params:
+            self.use_atr_sizing = bool(params['use_atr_sizing'])
+
+        if 'max_total_exposure_usd' in params:
+            self.max_total_exposure_usd = float(params['max_total_exposure_usd'] or 0)
+        self.logger.info("Risk parameters updated: %s", params)
+
+    # ------------------------------------------------------------------
+    # Trade assessment (main entry point for OrderManager)
+    # ------------------------------------------------------------------
+    def assess_trade(self, instrument: str, signal: int, price: float) -> Optional[Dict[str, Any]]:
+        self.logger.info("Assessing trade for %s signal=%s price=%s", instrument, signal, price)
+
+        existing_position = self.position_manager.get_position(instrument)
+        if existing_position:
+            same_direction = (
+                signal == 1 and existing_position.position_type == 'long'
+            ) or (
+                signal == -1 and existing_position.position_type == 'short'
+            )
+            if same_direction:
+                self.logger.warning("Ignoring pyramiding attempt on %s", instrument)
+                return None
+
+        account = self._safe_account_summary()
+        equity = account.get('equity') or 0.0
+
+        details = self.iim.get_details(instrument)
+        if details is None:
+            self.logger.error("Missing instrument details for %s", instrument)
+            return None
+
+        price_map = self._build_price_map(instrument, self.client)
+        rate_qc_to_ac = float(self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map))
+        if rate_qc_to_ac <= 0:
+            self.logger.error("Unable to convert %s quote currency into %s", instrument, self.account_currency)
+            return None
+
+        risk_amount_ac = (self.max_risk_per_trade_percent / 100.0) * equity if equity > 0 else 0.0
+        if risk_amount_ac <= 0:
+            risk_amount_ac = min(10.0, abs(float(price) * rate_qc_to_ac))
+
+        trade_size_units, stop_loss_price, take_profit_price = self._size_trade(
+            instrument=instrument,
+            signal=signal,
+            price=price,
+            rate_qc_to_ac=rate_qc_to_ac,
+            risk_amount_ac=risk_amount_ac,
+            details=details,
+            )
+        if trade_size_units == 0:
+            self.logger.warning("Trade size rounded to zero for %s", instrument)
+            return None
+
+        approved_units = self._apply_exposure_limits(
+            instrument=instrument,
+            proposed_units=trade_size_units,
+            price=price,
+            rate_qc_to_ac=rate_qc_to_ac,
+        )
+        if approved_units == 0:
+            self.logger.info("Exposure limits prevent new trade on %s", instrument)
+            return None
+        if approved_units != trade_size_units:
+            self.logger.info("Exposure adjustment changed units from %s to %s for %s", trade_size_units, approved_units, instrument)
+            trade_size_units = approved_units
+
+        stop_loss_price = self._round_price_to_instrument(instrument, stop_loss_price) if stop_loss_price is not None else None
+        take_profit_price = self._round_price_to_instrument(instrument, take_profit_price) if take_profit_price is not None else None
+
+        return {
+            'units': int(trade_size_units),
+            'stop_loss': float(stop_loss_price) if stop_loss_price is not None else None,
+            'take_profit': float(take_profit_price) if take_profit_price is not None else None,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _record_halt(self, reason: str) -> Tuple[bool, str]:
+        self.halt_triggered = True
+        self.halt_reason = reason
+        self.system_state.record_hard_stop(reason)
+        self.logger.error(reason)
+        return True, reason
+
+    def _safe_account_summary(self) -> Dict[str, float]:
         try:
-            self.logger.info(f"Risk parameters updated: { {k:v for k,v in params.items() if v is not None} }")
+            summary = self.client.get_account_summary() or {}
+            account = summary.get('account') or {}
+            equity = float(account.get('NAV') or account.get('equity') or account.get('balance') or 0.0)
+            balance = float(account.get('balance') or 0.0)
+            unrealised = float(account.get('unrealizedPL') or 0.0)
+            return {'equity': equity, 'balance': balance, 'unrealizedPL': unrealised}
         except Exception:
-            pass
+            return {'equity': 0.0, 'balance': 0.0, 'unrealizedPL': 0.0}
 
-    def _build_price_map(self, instrument: str, oanda_client) -> Dict[str, tuple]:
-        """
-        Build a minimal price map needed for risk sizing and PnL in account currency.
+    def _exposure_cap_absolute(self) -> Optional[float]:
+        limits: List[float] = []
+        if self.max_total_exposure_usd:
+            limits.append(float(self.max_total_exposure_usd))
+        if self.session_target_capital and self.max_total_exposure_percent:
+            limits.append(self.session_target_capital * self.max_total_exposure_percent / 100.0)
+        if self.session_target_capital and not limits:
+            limits.append(float(self.session_target_capital))
+        return min(limits) if limits else None
 
-        Avoids spamming OANDA with invalid instruments by checking broker symbol list and
-        inverting known pairs when only the reverse exists. Treats same-currency pairs (e.g., AUD_AUD)
-        as 1:1.
-        """
+    def _position_limit_for_symbol(self) -> Optional[float]:
+        if self.session_target_capital and self.max_position_exposure_percent:
+            return self.session_target_capital * self.max_position_exposure_percent / 100.0
+        return None
+
+    def _compute_open_exposure(self) -> Tuple[float, Dict[str, float]]:
+        total = 0.0
+        per_symbol: Dict[str, float] = {}
+        try:
+            data = self.client.get_open_positions() or {}
+        except Exception:
+            return 0.0, {}
+
+        for pos in data.get('positions', []):
+            instrument = pos.get('instrument') or ''
+            if not instrument:
+                continue
+            details = self.iim.get_details(instrument)
+            if details is None:
+                continue
+            price = float(
+                pos.get('long', {}).get('averagePrice')
+                or pos.get('short', {}).get('averagePrice')
+                or 0.0
+            )
+            if price <= 0:
+                continue
+            price_map = self._build_price_map(instrument, self.client)
+            rate_qc_to_ac = float(
+                self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map)
+            )
+            if rate_qc_to_ac <= 0:
+                continue
+            long_units = abs(_to_int(pos.get('long', {}).get('units')))
+            short_units = abs(_to_int(pos.get('short', {}).get('units')))
+            notional_qc = (long_units + short_units) * price
+            notional_ac = notional_qc * rate_qc_to_ac
+            if notional_ac <= 0:
+                continue
+            total += notional_ac
+            per_symbol[instrument] = per_symbol.get(instrument, 0.0) + notional_ac
+        return total, per_symbol
+
+    def _apply_exposure_limits(
+        self,
+        instrument: str,
+        proposed_units: int,
+        price: float,
+        rate_qc_to_ac: float,
+    ) -> int:
+        exposure_total, per_symbol = self._compute_open_exposure()
+        proposed_notional = abs(proposed_units) * price * rate_qc_to_ac
+
+        total_cap = self._exposure_cap_absolute()
+        if total_cap is not None:
+            if exposure_total >= total_cap:
+                self.logger.warning("Total exposure cap already reached (cap=%s)", total_cap)
+                return 0
+            remaining = max(total_cap - exposure_total, 0.0)
+            if proposed_notional > remaining:
+                scale = remaining / max(proposed_notional, 1e-9)
+                proposed_units = int(proposed_units * scale)
+                proposed_notional = abs(proposed_units) * price * rate_qc_to_ac
+
+        per_symbol_cap = self._position_limit_for_symbol()
+        if per_symbol_cap is not None:
+            current = per_symbol.get(instrument, 0.0)
+            if current >= per_symbol_cap:
+                self.logger.warning("Symbol %s exposure cap reached (cap=%s)", instrument, per_symbol_cap)
+                return 0
+            remaining_symbol = max(per_symbol_cap - current, 0.0)
+            if proposed_notional > remaining_symbol:
+                scale = remaining_symbol / max(proposed_notional, 1e-9)
+                proposed_units = int(proposed_units * scale)
+
+        details = self.iim.get_details(instrument)
+        if details is not None and proposed_units != 0:
+            try:
+                rounded = details.round_units(proposed_units)
+                proposed_units = int(rounded)
+            except Exception:
+                proposed_units = int(proposed_units)
+        return proposed_units
+
+    def _round_price_to_instrument(self, instrument: str, price: Optional[float]) -> Optional[float]:
+        if price is None:
+            return None
+        try:
+            det = self.iim.get_details(instrument)
+            pip_location = int(getattr(det, 'pip_location', 0)) if det is not None else 0
+            decimals = max(0, -pip_location)
+            quant = Decimal('1').scaleb(-decimals)
+            return float(Decimal(str(price)).quantize(quant))
+        except Exception:
+            return float(price)
+
+    def _build_price_map(self, instrument: str, oanda_client: OandaClient) -> Dict[str, Tuple[Decimal, Decimal]]:
         sym = instrument
         parts = sym.split('_')
         base, quote = parts[0], parts[1]
-        mp: Dict[str, tuple] = {}
+        mp: Dict[str, Tuple[Decimal, Decimal]] = {}
 
-        # Helper access to known symbols
         try:
-            valid_symbols = set(getattr(self.iim, 'all_symbols', []) or self.iim.get_all_available_symbols())
+            valid_symbols = set(
+                getattr(self.iim, 'all_symbols', []) or self.iim.get_all_available_symbols()
+            )
         except Exception:
             valid_symbols = set()
 
-        def _fetch_pair(pair_name: str) -> Optional[tuple]:
+        def _fetch(pair_name: str) -> Optional[Tuple[Decimal, Decimal]]:
             try:
-                rr = oanda_client.get_bid_ask_candles_combined(pair_name, count=1) or []
-                if rr:
-                    last = rr[-1]
+                candles = oanda_client.get_bid_ask_candles_combined(pair_name, count=1) or []
+                if candles:
+                    last = candles[-1]
                     return (
                         Decimal(str(last.get('bid_close', 0.0))),
                         Decimal(str(last.get('ask_close', 0.0))),
                     )
             except Exception:
-                pass
+                return None
             return None
 
-        def _invert(bid_ask: tuple) -> tuple:
-            # Inversion with bid/ask flip: (bid, ask) -> (1/ask, 1/bid)
+        def _invert(bid_ask: Tuple[Decimal, Decimal]) -> Tuple[Decimal, Decimal]:
             bid, ask = bid_ask
             try:
                 inv_bid = Decimal('1') / (ask if ask != 0 else Decimal('1'))
                 inv_ask = Decimal('1') / (bid if bid != 0 else Decimal('1'))
+                return inv_bid, inv_ask
             except Exception:
-                inv_bid, inv_ask = Decimal('0'), Decimal('0')
-            return (inv_bid, inv_ask)
+                return Decimal('0'), Decimal('0')
 
-        # 1) Always include the trading instrument's latest bid/ask
         recs = oanda_client.get_bid_ask_candles_combined(sym, count=1) or []
         if recs:
-            r = recs[-1]
-            mp[sym] = (Decimal(str(r.get('bid_close', 0.0))), Decimal(str(r.get('ask_close', 0.0))))
+            last = recs[-1]
+            mp[sym] = (
+                Decimal(str(last.get('bid_close', 0.0))),
+                Decimal(str(last.get('ask_close', 0.0))),
+            )
 
-        # 2) Candidate conversion pairs
         candidates = [
             (quote, self.account_currency),
             (self.account_currency, quote),
@@ -162,193 +482,98 @@ class RiskManager:
             pair = f"{a}_{b}"
             if pair in mp:
                 continue
-
-            # Same-currency pair -> 1:1
             if a == b:
                 mp[pair] = (Decimal('1'), Decimal('1'))
                 continue
-
-            # Try direct pair first (even if not listed), then reverse
-            got_direct = None
-            try:
-                if (not valid_symbols) or (pair in valid_symbols):
-                    got_direct = _fetch_pair(pair)
-            except Exception:
-                got_direct = None
-            if got_direct:
-                mp[pair] = got_direct
+            fetch_direct = None
+            if not valid_symbols or pair in valid_symbols:
+                fetch_direct = _fetch(pair)
+            if fetch_direct:
+                mp[pair] = fetch_direct
                 continue
-
-            # Try reversed fetch and invert
             rev = f"{b}_{a}"
-            got_rev = None
-            try:
-                if (not valid_symbols) or (rev in valid_symbols):
-                    got_rev = _fetch_pair(rev)
-            except Exception:
-                got_rev = None
-            if got_rev:
-                mp[pair] = _invert(got_rev)
-
+            fetch_rev = None
+            if not valid_symbols or rev in valid_symbols:
+                fetch_rev = _fetch(rev)
+            if fetch_rev:
+                mp[pair] = _invert(fetch_rev)
         return mp
 
-    def assess_trade(self, instrument: str, signal: int, price: float) -> Optional[Dict[str, Any]]:
-        """
-        Assesses a potential trade against risk management rules.
-
-        Args:
-            instrument (str): The instrument to trade.
-            signal (int): The trading signal (1 for buy, -1 for sell).
-            price (float): The current market price.
-
-        Returns:
-            Optional[Dict[str, Any]]: A dictionary with order details (units, stop_loss, take_profit)
-                                      if the trade is approved, otherwise None.
-        """
-        self.logger.info(f"Assessing trade for {instrument} with signal {signal} at price {price}")
-
-        # 1. Check for existing positions
-        existing_position = self.position_manager.get_position(instrument)
-        if existing_position:
-            # Rule: Do not open a new position if one already exists for the same instrument.
-            # More complex logic (e.g., adding to a position) can be added later.
-            if (signal == 1 and existing_position.position_type == 'long') or \
-               (signal == -1 and existing_position.position_type == 'short'):
-                self.logger.warning(f"Signal in the same direction as existing position for {instrument}. No action taken.")
-                return None
-            # If the signal is opposite, it implies closing the existing position, which is handled by OrderManager.
-            # We don't open a new one immediately.
-
-        # 2. Calculate order size based on risk. Prefer ATR sizing if enabled and available; otherwise fallback to pips.
-        try:
-            acct = self.client.get_account_summary()
-            equity = float((acct or {}).get('account', {}).get('NAV', (acct or {}).get('account', {}).get('balance', 0.0)))
-        except Exception:
-            equity = 0.0
-
-        details = self.iim.get_details(instrument)
-        if details is None:
-            self.logger.error(f"Instrument details not found for {instrument}.")
-            return None
-
-        # Build price map for conversions and ATR computation
-        price_map = self._build_price_map(instrument, self.client)
-        rate_qc_to_ac = float(self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map))
-        if rate_qc_to_ac <= 0:
-            self.logger.error("Failed to compute quote->account currency rate; aborting trade.")
-            return None
-
-        risk_amount_ac = (self.max_risk_per_trade_percent / 100.0) * equity if equity > 0 else 10.0
-        trade_size_units = 0
+    def _size_trade(
+        self,
+        instrument: str,
+        signal: int,
+        price: float,
+        rate_qc_to_ac: float,
+        risk_amount_ac: float,
+        details: Any,
+    ) -> Tuple[int, Optional[float], Optional[float]]:
+        trade_units = 0
         stop_loss_price = None
         take_profit_price = None
 
-        def _compute_atr(instrument: str, count: int = None) -> float:
-            cnt = max(self.atr_period + 2, 20) if count is None else count
-            recs = self.client.get_bid_ask_candles_combined(instrument, count=cnt) or []
-            if len(recs) < self.atr_period + 1:
-                return 0.0
-            highs = []
-            lows = []
-            closes = []
-            for r in recs:
-                h = (float(r.get('bid_high', 0.0)) + float(r.get('ask_high', 0.0))) / 2.0
-                l = (float(r.get('bid_low', 0.0)) + float(r.get('ask_low', 0.0))) / 2.0
-                c = (float(r.get('bid_close', 0.0)) + float(r.get('ask_close', 0.0))) / 2.0
-                highs.append(h); lows.append(l); closes.append(c)
-            trs = []
-            for i in range(1, len(highs)):
-                tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-                trs.append(tr)
-            if len(trs) < self.atr_period:
-                return 0.0
-            atr = sum(trs[-self.atr_period:]) / float(self.atr_period)
-            return atr
-
-        used_atr = False
         if self.use_atr_sizing and self.stop_loss_atr_multiplier > 0:
-            atr_val = _compute_atr(instrument)
-            if atr_val > 0:
-                sl_distance_qc = atr_val * self.stop_loss_atr_multiplier
-                risk_per_unit_ac = sl_distance_qc * rate_qc_to_ac
+            atr_value = self._compute_atr(instrument)
+            if atr_value > 0:
+                stop_distance_qc = atr_value * self.stop_loss_atr_multiplier
+                risk_per_unit_ac = stop_distance_qc * rate_qc_to_ac
                 if risk_per_unit_ac > 0:
                     units_float = risk_amount_ac / risk_per_unit_ac
                     units_decimal = details.round_units(units_float)
-                    trade_size_units = int(units_decimal) if signal == 1 else -int(units_decimal)
-                    # SL by ATR distance
-                    if signal == 1:
-                        stop_loss_price = price - sl_distance_qc
-                    elif signal == -1:
-                        stop_loss_price = price + sl_distance_qc
-                    if self.take_profit_atr_multiplier and self.take_profit_atr_multiplier > 0:
-                        tp_distance_qc = atr_val * self.take_profit_atr_multiplier
-                        if signal == 1:
-                            take_profit_price = price + tp_distance_qc
-                        elif signal == -1:
-                            take_profit_price = price - tp_distance_qc
-                    used_atr = True
+                    trade_units = int(units_decimal) if signal == 1 else -int(units_decimal)
+                    stop_loss_price = price - stop_distance_qc if signal == 1 else price + stop_distance_qc
+                    if self.take_profit_atr_multiplier > 0:
+                        tp_distance_qc = atr_value * self.take_profit_atr_multiplier
+                        take_profit_price = price + tp_distance_qc if signal == 1 else price - tp_distance_qc
 
-        if not used_atr:
-            # Fallback: pip-based sizing
+        if trade_units == 0:
             pip_value_qc_per_unit = abs(float(Decimal(str(10)) ** Decimal(str(details.pip_location))))
             pip_value_ac_per_unit = pip_value_qc_per_unit * rate_qc_to_ac
             if pip_value_ac_per_unit <= 0:
-                self.logger.error("Failed to compute pip value in account currency; aborting trade.")
-                return None
-            units_float = risk_amount_ac / (self.stop_loss_pips * pip_value_ac_per_unit)
+                return 0, None, None
+            units_float = risk_amount_ac / max(self.stop_loss_pips * pip_value_ac_per_unit, 1e-9)
             units_decimal = details.round_units(units_float)
-            trade_size_units = int(units_decimal) if signal == 1 else -int(units_decimal)
-            if signal == 1:
-                stop_loss_price = price - self.stop_loss_pips * (10 ** details.pip_location)
-            elif signal == -1:
-                stop_loss_price = price + self.stop_loss_pips * (10 ** details.pip_location)
+            trade_units = int(units_decimal) if signal == 1 else -int(units_decimal)
+            pip_step = (10 ** details.pip_location)
+            stop_loss_price = price - self.stop_loss_pips * pip_step if signal == 1 else price + self.stop_loss_pips * pip_step
+            take_profit_price = price + self.take_profit_pips * pip_step if signal == 1 else price - self.take_profit_pips * pip_step
 
-        # Take profitÃƒÂ¯Ã‚Â¼Ã…Â¡ÃƒÂ¤Ã‚Â¿Ã‚ÂÃƒÂ§Ã¢â‚¬Â¢Ã¢â€žÂ¢ pip ÃƒÂ¦Ã‚Â¨Ã‚Â¡ÃƒÂ¥Ã‚Â¼Ã‚ÂÃƒÂ¯Ã‚Â¼Ã‹â€ ÃƒÂ¥Ã‚ÂÃ‚Â¯ÃƒÂ¦Ã¢â‚¬â€œÃ‚Â¼ÃƒÂ¦Ã…â€œÃ‚ÂªÃƒÂ¤Ã‚Â¾Ã¢â‚¬Â ÃƒÂ¦Ã¢â‚¬Å“Ã‚Â´ÃƒÂ¥Ã¢â‚¬Â¦Ã¢â‚¬Â¦ ATR TPÃƒÂ¯Ã‚Â¼Ã¢â‚¬Â°
-        if signal == 1: # Buy
-            take_profit_price = price + self.take_profit_pips * (10 ** details.pip_location)
-        elif signal == -1:
-            take_profit_price = price - self.take_profit_pips * (10 ** details.pip_location)
-        else:
-            return None
+        if trade_units == 0:
+            min_units = int(getattr(details, 'minimum_trade_size', 1))
+            trade_units = min_units if signal == 1 else -min_units
 
-        # Cap by max_total_exposure_usd
+        return trade_units, stop_loss_price, take_profit_price
+
+    def _compute_atr(self, instrument: str) -> float:
         try:
-            notional_qc = abs(trade_size_units) * price
-            notional_ac = notional_qc * rate_qc_to_ac
-            if self.max_total_exposure_usd and notional_ac > float(self.max_total_exposure_usd):
-                scale = float(self.max_total_exposure_usd) / max(1e-9, notional_ac)
-                scaled_units = abs(trade_size_units) * scale
-                # Round using broker rules
-                units_decimal = details.round_units(scaled_units)
-                trade_size_units = int(units_decimal) if trade_size_units >= 0 else -int(units_decimal)
-                self.logger.info(f"Capped trade size by exposure: new units {trade_size_units} for {instrument}.")
+            candles = self.client.get_bid_ask_candles_combined(instrument, count=max(self.atr_period + 2, 20)) or []
         except Exception:
-            pass
+            return 0.0
+        if len(candles) < self.atr_period + 1:
+            return 0.0
+        highs: List[float] = []
+        lows: List[float] = []
+        closes: List[float] = []
+        for rec in candles:
+            bid_high = float(rec.get('bid_high', 0.0))
+            ask_high = float(rec.get('ask_high', 0.0))
+            bid_low = float(rec.get('bid_low', 0.0))
+            ask_low = float(rec.get('ask_low', 0.0))
+            bid_close = float(rec.get('bid_close', 0.0))
+            ask_close = float(rec.get('ask_close', 0.0))
+            highs.append((bid_high + ask_high) / 2.0)
+            lows.append((bid_low + ask_low) / 2.0)
+            closes.append((bid_close + ask_close) / 2.0)
+        true_ranges: List[float] = []
+        for idx in range(1, len(highs)):
+            tr = max(
+                highs[idx] - lows[idx],
+                abs(highs[idx] - closes[idx - 1]),
+                abs(lows[idx] - closes[idx - 1]),
+            )
+            true_ranges.append(tr)
+        if len(true_ranges) < self.atr_period:
+            return 0.0
+        return sum(true_ranges[-self.atr_period:]) / float(self.atr_period)
 
-        # Safety: ensure non-zero units for minimal live execution if sizing rounded to 0
-        if trade_size_units == 0:
-            try:
-                min_units = int(getattr(details, 'minimum_trade_size', 1))
-            except Exception:
-                min_units = 1
-            min_units = max(1, min_units)
-            trade_size_units = min_units if signal == 1 else -min_units
-            self.logger.info(f"Risk sizing rounded to zero; using minimum trade size {trade_size_units} for {instrument}.")
 
-        # 4. Final check (placeholder for more complex checks like total exposure)
-        # In a real system, you would check if this new trade exceeds max_total_exposure_usd.
-
-        # Final instrument-specific rounding for SL/TP to satisfy broker precision
-        if stop_loss_price is not None:
-            stop_loss_price = self._round_price_to_instrument(instrument, float(stop_loss_price))
-        if take_profit_price is not None:
-            take_profit_price = self._round_price_to_instrument(instrument, float(take_profit_price))
-
-        self.logger.info(f"Trade approved for {instrument}. Units: {trade_size_units}, SL: {stop_loss_price}, TP: {take_profit_price}")
-
-        return {
-            # trade_size_units already encodes direction per signal
-            "units": int(trade_size_units),
-            "stop_loss": float(stop_loss_price) if stop_loss_price is not None else None,
-            "take_profit": float(take_profit_price) if take_profit_price is not None else None
-        }

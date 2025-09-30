@@ -1,352 +1,275 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Live Trading Control Center</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
-  <link rel="stylesheet" href="/styles.css" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
+  <script type="module" src="main.js" defer></script>
 </head>
 <body>
-  <div class="app-shell">
-    <header class="top-bar">
-      <div class="top-bar-left">
-        <div class="brand">
-          <span class="brand-logo">QX</span>
-          <div class="brand-meta">
-            <h1>Live Trading Control Center</h1>
-            <span class="brand-subtitle">Execution | Risk | Monitoring</span>
-          </div>
-        </div>
-        <div class="status-group">
-          <span id="engineStatus" class="badge badge-offline">Stopped</span>
-          <span id="warmupBadge" class="badge badge-muted">Warmup idle</span>
-          <span id="modelBadge" class="badge badge-muted">Model: n/a</span>
-        </div>
+  <header class="app-header">
+    <div class="header-title">
+      <h1>Live Trading Control Center</h1>
+      <p id="statusMessage">Loading system state…</p>
+    </div>
+    <div class="header-controls">
+      <div class="status-group">
+        <span class="status-indicator" id="engineStatusIndicator"></span>
+        <span class="status-label" id="engineStatusLabel">Offline</span>
+        <span class="badge subtle" id="warmupBadge">Warmup Pending</span>
+        <span class="badge subtle" id="heartbeatBadge">Heartbeat —</span>
       </div>
-      <div class="top-bar-right">
-        <div class="account-peek">
-          <div class="peek-item">
-            <label>Equity</label>
-            <span id="peekEquity">-</span>
-          </div>
-          <div class="peek-item">
-            <label>Balance</label>
-            <span id="peekBalance">-</span>
-          </div>
-          <div class="peek-item">
-            <label>Unrealized</label>
-            <span id="peekUnrealized">-</span>
-          </div>
-        </div>
-        <button id="btnEmergency" class="btn btn-danger btn-lg">Emergency stop</button>
+      <div class="header-actions">
+        <button class="btn primary" id="startEngineBtn">Start</button>
+        <button class="btn" id="stopEngineBtn">Stop</button>
+        <button class="btn danger" id="emergencyStopBtn">Emergency Stop</button>
       </div>
-    </header>
+    </div>
+  </header>
 
-    <main class="main-layout">
-      <aside class="side-panels">
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Session Designer</h2>
-            <span class="panel-caption">Synchronize with training universe & models</span>
+  <main class="app-main">
+    <div class="layout-grid">
+      <div class="column column-left">
+        <section class="panel session-panel">
+          <header class="panel-header">
+            <h2>Session Configuration</h2>
+            <span class="badge subtle hidden" id="sessionDirtyBadge">Unsaved changes</span>
+          </header>
+          <div class="panel-section">
+            <h3>Symbols</h3>
+            <p class="section-help">Select instruments from each category. The list mirrors the training system groupings.</p>
+            <div id="symbolControls" class="symbol-grid"></div>
+            <div class="selected-symbols" id="selectedSymbolsList"></div>
           </div>
-          <div class="panel-body">
-            <div class="form-control">
-              <label>Trading symbols</label>
-              <small class="hint">Select instruments per category below (multi-select supported).</small>
-            </div>
-            <div id="symbolDropdowns" class="symbol-dropdowns"></div>
-<div class="selected-preview">
-              <div class="selected-header">
-                <label>Selected symbols</label>
-                <span id="selectedCount" class="badge badge-count">0</span>
+          <div class="panel-section form-grid">
+            <label class="form-field">
+              <span>Model</span>
+              <select id="modelSelect"></select>
+            </label>
+            <label class="form-field">
+              <span>Target Capital</span>
+              <div class="input-with-hint">
+                <input id="targetCapitalInput" type="number" min="0" step="0.01" placeholder="USD" />
+                <small>Must be &le; current account equity</small>
               </div>
-              <div id="selectedSymbols" class="chip-grid"></div>
-            </div>
-
-            <div class="form-control">
-              <label for="modelSelect">Execution model</label>
-              <select id="modelSelect">
-                <option value="">Select a model...</option>
-              </select>
-              <small id="modelHint" class="hint">Select symbols first to filter by model capacity.</small>
-            </div>
-
-            <div class="form-grid">
-              <div class="form-control">
-                <label id="targetCapitalLabel" for="inputTargetCapital">Target capital</label>
-                <input id="inputTargetCapital" type="number" min="0" step="0.01" placeholder="0.00" />
-                <small class="hint">Must be smaller than account equity.</small>
-              </div>
-              <div class="form-control">
-                <label for="coldStartSeconds">Cold start timeout (sec)</label>
-                <input id="coldStartSeconds" type="number" min="30" step="15" value="120" />
-                <small class="hint">Historical preload before live execution.</small>
-              </div>
-            </div>
-
-            <div class="btn-group">
-              <button id="applySessionBtn" class="btn btn-primary">Apply configuration</button>
-            </div>
+            </label>
+          </div>
+          <div class="panel-section" id="modelDetails"></div>
+          <div class="panel-actions">
+            <button class="btn primary" id="applySessionBtn">Save Session</button>
+            <button class="btn subtle" id="refreshSessionBtn">Refresh Status</button>
+            <button class="btn outline" id="smokeTestBtn">Smoke Test</button>
           </div>
         </section>
 
-        <section class="panel">
-          <div class="panel-header">
+        <section class="panel risk-panel">
+          <header class="panel-header">
             <h2>Risk Controls</h2>
-            <span class="panel-caption">Realtime guard-rails & limits</span>
+          </header>
+          <div class="panel-section risk-grid">
+            <label class="form-field">
+              <span>Total Exposure (USD)</span>
+              <input type="number" step="0.01" id="riskTotalExposureUsd" data-risk-key="max_total_exposure_usd" />
+            </label>
+            <label class="form-field">
+              <span>Total Exposure (%)</span>
+              <input type="number" step="0.01" id="riskTotalExposurePct" data-risk-key="max_total_exposure_percent" />
+            </label>
+            <label class="form-field">
+              <span>Per-Symbol Exposure (%)</span>
+              <input type="number" step="0.01" id="riskSymbolExposurePct" data-risk-key="max_position_exposure_percent" />
+            </label>
+            <label class="form-field">
+              <span>Risk / Trade (%)</span>
+              <input type="number" step="0.01" id="riskPerTradePct" data-risk-key="max_risk_per_trade_percent" />
+            </label>
+            <label class="form-field">
+              <span>Hard Stop Drawdown (%)</span>
+              <input type="number" step="0.1" id="riskHardStopPct" data-risk-key="hard_stop_loss_percent" />
+            </label>
+            <label class="form-field">
+              <span>Trailing Stop Drawdown (%)</span>
+              <input type="number" step="0.1" id="riskTrailingStopPct" data-risk-key="trailing_stop_loss_percent" />
+            </label>
+            <label class="form-field form-checkbox">
+              <input type="checkbox" id="riskUseAtr" data-risk-key="use_atr_sizing" />
+              <span>Use ATR-based sizing</span>
+            </label>
+            <label class="form-field">
+              <span>ATR Period</span>
+              <input type="number" min="1" step="1" id="riskAtrPeriod" data-risk-key="atr_period" />
+            </label>
+            <label class="form-field">
+              <span>ATR Stop Multiplier</span>
+              <input type="number" step="0.1" id="riskAtrSl" data-risk-key="stop_loss_atr_multiplier" />
+            </label>
+            <label class="form-field">
+              <span>ATR Take-Profit Multiplier</span>
+              <input type="number" step="0.1" id="riskAtrTp" data-risk-key="take_profit_atr_multiplier" />
+            </label>
+            <label class="form-field">
+              <span>Stop Loss (pips)</span>
+              <input type="number" step="0.1" id="riskStopPips" data-risk-key="stop_loss_pips" />
+            </label>
+            <label class="form-field">
+              <span>Take Profit (pips)</span>
+              <input type="number" step="0.1" id="riskTakeProfitPips" data-risk-key="take_profit_pips" />
+            </label>
           </div>
-          <div class="panel-body">
-            <div class="form-grid compact">
-              <div class="form-control">
-                <label for="risk_max_total_exposure">Max total exposure (account ccy)</label>
-                <input id="risk_max_total_exposure" type="number" min="0" step="0.01" />
-              </div>
-              <div class="form-control">
-                <label for="risk_max_risk_pct">Max risk per trade (%)</label>
-                <input id="risk_max_risk_pct" type="number" min="0" step="0.1" />
-              </div>
-              <div class="form-control">
-                <label for="risk_stop_loss_pips">Default stop loss (pips)</label>
-                <input id="risk_stop_loss_pips" type="number" min="0" step="1" />
-              </div>
-              <div class="form-control">
-                <label for="risk_take_profit_pips">Default take profit (pips)</label>
-                <input id="risk_take_profit_pips" type="number" min="0" step="1" />
-              </div>
-              <div class="form-control">
-                <label for="risk_use_atr">ATR sizing</label>
-                <select id="risk_use_atr">
-                  <option value="false">Disabled</option>
-                  <option value="true">Enabled</option>
-                </select>
-              </div>
-              <div class="form-control">
-                <label for="risk_atr_period">ATR period</label>
-                <input id="risk_atr_period" type="number" min="1" step="1" />
-              </div>
-              <div class="form-control">
-                <label for="risk_sl_atr_mult">SL ATR multiplier</label>
-                <input id="risk_sl_atr_mult" type="number" min="0" step="0.1" />
-              </div>
-              <div class="form-control">
-                <label for="risk_tp_atr_mult">TP ATR multiplier</label>
-                <input id="risk_tp_atr_mult" type="number" min="0" step="0.1" />
-              </div>
+          <div class="panel-actions">
+            <button class="btn outline" id="riskUpdateBtn">Update Risk</button>
+          </div>
+        </section>
+
+        <section class="panel alerts-panel">
+          <header class="panel-header">
+            <h2>Event Log</h2>
+          </header>
+          <div id="alertsContainer" class="alert-feed"></div>
+        </section>
+      </div>
+
+      <div class="column column-right">
+        <section class="panel account-panel">
+          <header class="panel-header">
+            <h2>Account Snapshot</h2>
+          </header>
+          <div class="metric-grid">
+            <div class="metric-card">
+              <span class="metric-label">Equity</span>
+              <span class="metric-value" id="accountEquity">—</span>
             </div>
-            <div class="btn-group">
-              <button id="updateRiskBtn" class="btn">Update risk envelope</button>
+            <div class="metric-card">
+              <span class="metric-label">Balance</span>
+              <span class="metric-value" id="accountBalance">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Unrealized PnL</span>
+              <span class="metric-value" id="accountUnrealized">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Available Margin</span>
+              <span class="metric-value" id="accountMarginAvailable">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Margin Used</span>
+              <span class="metric-value" id="accountMarginUsed">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Currency</span>
+              <span class="metric-value" id="accountCurrency">—</span>
             </div>
           </div>
         </section>
 
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Execution Controls</h2>
-            <span class="panel-caption">Launch, monitor, and verify</span>
+        <section class="panel exposures-panel">
+          <header class="panel-header">
+            <h2>Exposure Monitor</h2>
+          </header>
+          <div class="exposure-summary">
+            <div class="metric-line">
+              <span>Total Exposure</span>
+              <span id="totalExposureValue">—</span>
+            </div>
+            <div class="progress">
+              <div class="progress-bar" id="totalExposureBar"></div>
+            </div>
+            <div class="metric-caption" id="exposureCapacityLabel">Capacity: —</div>
           </div>
-          <div class="panel-body">
-            <div class="btn-group">
-              <button id="startEngineBtn" class="btn btn-success">Start trading</button>
-              <button id="stopEngineBtn" class="btn btn-muted">Stop</button>
+          <div class="exposure-list" id="exposureList"></div>
+        </section>
+
+        <section class="panel charts-panel">
+          <header class="panel-header">
+            <h2>Performance Analytics</h2>
+            <button class="btn subtle" id="refreshAnalyticsBtn">Refresh</button>
+          </header>
+          <div class="performance-metrics">
+            <div class="metric-card">
+              <span class="metric-label">Total PnL</span>
+              <span class="metric-value" id="perfTotalPnl">—</span>
             </div>
-            <div class="inline-stats">
-              <div>
-                <label>Status</label>
-                <span id="engineStatusText">Stopped</span>
-              </div>
-              <div>
-                <label>Heartbeat</label>
-                <span id="heartbeatTs">-</span>
-              </div>
-              <div>
-                <label>Suspended symbols</label>
-                <span id="suspendedSymbols">-</span>
+            <div class="metric-card">
+              <span class="metric-label">Win Rate</span>
+              <span class="metric-value" id="perfWinRate">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Max Drawdown</span>
+              <span class="metric-value" id="perfDrawdown">—</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Trades</span>
+              <span class="metric-value" id="perfTradeCount">—</span>
+            </div>
+          </div>
+          <div class="chart-grid">
+            <div class="chart-card" data-chart="equity">
+              <h3>Equity Curve</h3>
+              <div class="chart-shell">
+                <canvas id="equityChartCanvas"></canvas>
               </div>
             </div>
-            <div class="form-control">
-              <label for="smokeUnits">Smoke test units / leg</label>
-              <input id="smokeUnits" type="number" min="1" step="1" value="1" />
-            </div>
-            <div class="btn-group">
-              <button id="smokeTestBtn" class="btn btn-muted">Run smoke test</button>
+            <div class="chart-card" data-chart="symbol">
+              <h3>Per-Symbol PnL</h3>
+              <div class="chart-shell">
+                <canvas id="symbolChartCanvas"></canvas>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Alerts & Guardrails</h2>
-            <span class="panel-caption">Key risk and system messages</span>
-          </div>
-          <div class="panel-body">
-            <div id="alertFeed" class="alert-feed empty">No alerts</div>
-          </div>
-        </section>
-      </aside>
-
-      <section class="dashboard">
-        <div class="grid grid-2">
-          <section class="panel stretch">
-            <div class="panel-header">
-              <h2>Account Snapshot</h2>
-              <span class="panel-caption">Live account telemetry</span>
-            </div>
-            <div class="panel-body">
-              <div class="metric-grid">
-                <div class="metric-card">
-                  <label>Balance</label>
-                  <span id="accountBalance">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>NAV</label>
-                  <span id="accountNav">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Unrealized P/L</label>
-                  <span id="accountUnrealized">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Margin used</label>
-                  <span id="accountMarginUsed">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Margin available</label>
-                  <span id="accountMarginAvail">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Open trades</label>
-                  <span id="accountOpenTrades">-</span>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel stretch">
-            <div class="panel-header">
-              <h2>Performance Summary</h2>
-              <span class="panel-caption">Realized KPIs and diagnostics</span>
-            </div>
-            <div class="panel-body">
-              <div class="metric-grid">
-                <div class="metric-card">
-                  <label>Total realized P/L</label>
-                  <span id="metricRealized">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Average trade P/L</label>
-                  <span id="metricAvgPnL">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Win rate</label>
-                  <span id="metricWinRate">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Trades closed</label>
-                  <span id="metricTradesClosed">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Max drawdown</label>
-                  <span id="metricDrawdown">-</span>
-                </div>
-                <div class="metric-card">
-                  <label>Sharpe (approx)</label>
-                  <span id="metricSharpe">-</span>
-                </div>
-              </div>
-            </div>
-          </section>
-        </div>
-
-        <section class="panel stretch">
-          <div class="panel-header">
-            <h2>Equity Curve</h2>
-            <span class="panel-caption">Cumulative realized performance</span>
-          </div>
-          <div class="panel-body">
-            <canvas id="equityChart" height="200"></canvas>
-          </div>
-        </section>
-
-        <section class="panel stretch">
-          <div class="panel-header">
-            <h2>Symbol Attribution</h2>
-            <span class="panel-caption">Realized P/L contribution per instrument</span>
-          </div>
-          <div class="panel-body">
-            <canvas id="symbolPerfChart" height="200"></canvas>
-          </div>
-        </section>
-
-        <section class="panel stretch">
-          <div class="panel-header">
-            <h2>Per-Symbol Traces</h2>
-            <span class="panel-caption">Rolling P/L for selected instruments</span>
-          </div>
-          <div class="panel-body">
-            <div id="perSymbolCharts" class="chart-grid"></div>
-          </div>
-        </section>
-
-        <section class="panel stretch">
-          <div class="panel-header">
+        <section class="panel positions-panel">
+          <header class="panel-header">
             <h2>Open Positions</h2>
-            <span class="panel-caption">Live exposure overview</span>
-          </div>
-          <div class="panel-body">
-            <table id="positionsTable" class="data-table">
+            <span class="badge subtle" id="positionsCountBadge">0</span>
+          </header>
+          <div class="table-wrapper">
+            <table class="data-table">
               <thead>
                 <tr>
                   <th>Instrument</th>
                   <th>Side</th>
                   <th>Units</th>
-                  <th>Avg price</th>
-                  <th>Unrealized P/L</th>
-                  <th>Risk</th>
+                  <th>Avg Price</th>
+                  <th>Unrealized PnL</th>
+                  <th>Exposure</th>
                   <th></th>
                 </tr>
               </thead>
-              <tbody></tbody>
+              <tbody id="positionsTableBody"></tbody>
             </table>
           </div>
         </section>
 
-        <section class="panel stretch">
-          <div class="panel-header">
-            <h2>Trade Ledger</h2>
-            <span class="panel-caption">Executed orders and lifecycle data</span>
-          </div>
-          <div class="panel-body">
-            <table id="tradesTable" class="data-table">
+        <section class="panel trades-panel">
+          <header class="panel-header">
+            <h2>Recent Trades</h2>
+            <span class="badge subtle" id="tradesCountBadge">0</span>
+          </header>
+          <div class="table-wrapper">
+            <table class="data-table">
               <thead>
                 <tr>
-                  <th>Trade ID</th>
                   <th>Instrument</th>
                   <th>Units</th>
-                  <th>Entry</th>
-                  <th>Exit</th>
-                  <th>Status</th>
-                  <th>P/L</th>
+                  <th>PnL</th>
                   <th>Opened</th>
                   <th>Closed</th>
+                  <th>Status</th>
                 </tr>
               </thead>
-              <tbody></tbody>
+              <tbody id="tradesTableBody"></tbody>
             </table>
           </div>
         </section>
-      </section>
-    </main>
-
-    <footer class="app-footer">
-      <span>Live Trading UI - built for institutional-grade monitoring and control</span>
-      <span id="footerAccountCurrency"></span>
-    </footer>
-  </div>
-
-  <script src="/app.js"></script>
+      </div>
+    </div>
+  </main>
 </body>
 </html>
-
 

@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import threading
 import time
@@ -28,7 +28,7 @@ class OrderManager:
         db_manager: DatabaseManager,
         config: Optional[Dict[str, Any]] = None,
     ):
-        # 添加参数验证
+        # æ·»åŠ å‚æ•°éªŒè¯
         if not all([client, system_state, position_manager, risk_manager, db_manager]):
             raise ValueError("OrderManager missing required dependencies")
         
@@ -58,6 +58,7 @@ class OrderManager:
         except Exception:
             self.metrics = None
 
+        self._halt_processed = False
         self.logger.info("OrderManager initialized with per-symbol sequencing and slippage protection.")
 
     def _get_lock(self, instrument: str) -> threading.Lock:
@@ -117,6 +118,20 @@ class OrderManager:
             self.logger.info(f"Instrument {instrument} has an in-flight order. Skipping new signal until fill/cancel.")
             return
         try:
+            should_stop, halt_reason = self.risk_manager.should_halt_trading()
+            if should_stop:
+                if halt_reason:
+                    self.logger.error(f"Risk halt triggered for {instrument}: {halt_reason}")
+                if not self._halt_processed:
+                    self._halt_processed = True
+                    try:
+                        self.close_all_positions()
+                    except Exception:
+                        pass
+                return
+            else:
+                self._halt_processed = False
+
             now_ms = time.time() * 1000.0
             last_ms = self._last_order_ts_ms.get(instrument, 0)
             if now_ms - last_ms < self.min_interval_between_orders_ms:
@@ -460,3 +475,7 @@ class OrderManager:
                     self.logger.error(f"Failed to get fill details when closing {instrument}. Response: {response}")
             else:
                 self.logger.error(f"Failed to receive response when closing position for {instrument}.")
+
+
+
+

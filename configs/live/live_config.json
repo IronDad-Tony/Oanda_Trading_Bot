@@ -1,7 +1,13 @@
 {
-  "trading_instruments": ["EUR_USD", "GBP_USD", "XAU_USD", "NAS100_USD", "US30_USD"],
+  "trading_instruments": [
+    "EUR_USD",
+    "GBP_USD",
+    "XAU_USD",
+    "NAS100_USD",
+    "US30_USD"
+  ],
   "trading_granularity": "S5",
-  "model_lookback_window": 256,
+  "model_lookback_window": 512,
   "max_position_size_per_trade": 1000,
   "max_total_risk_pct": 2.0,
   "daily_loss_limit_pct": 5.0,

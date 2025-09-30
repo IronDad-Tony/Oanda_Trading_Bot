@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import time
 import threading
 import pandas as pd
@@ -100,7 +100,7 @@ class InstrumentMonitor:
         and updates the system state.
         """
         self.logger.info("Instrument monitor thread started.")
-        while self.system_state.is_running():
+        while getattr(self.system_state, 'is_running', False):
             self.logger.info("Running instrument monitor cycle...")
             best_instrument = self.select_best_instrument()
             
@@ -126,3 +126,4 @@ class InstrumentMonitor:
 
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
+

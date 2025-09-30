@@ -1,7 +1,8 @@
-import os
+﻿import os
 import threading
 import time
 import asyncio
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -40,11 +41,26 @@ STATE = AppState()
 
 
 # ----- Models -----
+class RiskOverrides(BaseModel):
+    max_total_exposure_usd: Optional[float] = None
+    max_total_exposure_percent: Optional[float] = None
+    max_position_exposure_percent: Optional[float] = None
+    max_risk_per_trade_percent: Optional[float] = None
+    use_atr_sizing: Optional[bool] = None
+    atr_period: Optional[int] = None
+    stop_loss_atr_multiplier: Optional[float] = None
+    take_profit_atr_multiplier: Optional[float] = None
+    stop_loss_pips: Optional[float] = None
+    take_profit_pips: Optional[float] = None
+    hard_stop_loss_percent: Optional[float] = None
+    trailing_stop_loss_percent: Optional[float] = None
+
+
 class SessionConfig(BaseModel):
     symbols: List[str]
     model_path: Optional[str] = None
     target_capital_usd: Optional[float] = None
-    risk: Optional[Dict[str, Any]] = None
+    risk: Optional[RiskOverrides] = None
 
 
 # ----- Helpers -----
@@ -348,18 +364,23 @@ def session_status():
         if not buf or len(buf) < lookback:
             warm = False
             missing.append(inst)
-    risk = comps["risk_manager"].config if hasattr(comps["risk_manager"], 'config') else {}
+    rm = comps["risk_manager"]
+    risk = getattr(rm, "config", {})
+    snapshot = rm.get_risk_snapshot() if hasattr(rm, "get_risk_snapshot") else {}
     try:
         suspended = __import__('oanda_trading_bot.live_trading_system.core.tradability_guard', fromlist=['get_all']).get_all()
     except Exception:
         suspended = {}
     return {
-        "running": getattr(ss, 'is_running', False),
+        "running": getattr(ss, "is_running", False),
         "selected_symbols": instruments,
         "model": ss.get_current_model(),
+        "target_capital": ss.get_target_capital(),
         "risk": risk,
+        "risk_snapshot": snapshot,
         "warmup": {"ready": warm, "missing": missing},
         "suspended": suspended,
+        "hard_stop_reason": getattr(ss, "session_hard_stop_reason", None),
     }
 
 
@@ -369,9 +390,11 @@ def session_config(body: SessionConfig):
     ss = comps["system_state"]
     tl = comps["trading_logic"]
     pred = comps["prediction_service"]
+    pre = comps.get("preprocessor")
     risk = comps["risk_manager"]
     client = comps["client"]
     cfg = comps["config"]
+    lookback_override: Optional[int] = None
 
     # Validate symbols: allow any account-available instrument (not limited to training set)
     try:
@@ -407,11 +430,31 @@ def session_config(body: SessionConfig):
     if body.model_path:
         pred.load_model(body.model_path, device=None)
         ss.set_current_model(body.model_path)
+        if model_info and model_info.get("lookback_window"):
+            try:
+                lookback_override = int(model_info.get("lookback_window"))
+            except Exception:
+                lookback_override = None
     # Risk updates (also map target capital to exposure cap)
     to_update = dict(body.risk or {})
     if body.target_capital_usd is not None:
         to_update['max_total_exposure_usd'] = float(body.target_capital_usd)
     risk.update_params(to_update)
+
+    if lookback_override:
+        try:
+            tl.lookback_window = int(lookback_override)
+        except Exception:
+            pass
+        try:
+            cfg["model_lookback_window"] = int(lookback_override)
+        except Exception:
+            pass
+        if pre is not None and hasattr(pre, "model_lookback_window"):
+            try:
+                pre.model_lookback_window = int(lookback_override)
+            except Exception:
+                pass
 
     # Reset buffers to force clean warmup if instruments changed
     for sym in body.symbols:
@@ -427,6 +470,8 @@ def session_start(cold_start_timeout_sec: Optional[int] = None):
     tl = comps["trading_logic"]
     cfg = comps["config"]
     pred = comps["prediction_service"]
+    risk = comps["risk_manager"]
+    client = comps["client"]
 
     # Warmup
     instruments = ss.get_selected_instruments()
@@ -449,6 +494,20 @@ def session_start(cold_start_timeout_sec: Optional[int] = None):
         raise
     except Exception:
         raise HTTPException(status_code=400, detail="Failed to load model from configuration; please select a model.")
+
+    # Register session baseline for risk monitoring
+    equity = None
+    try:
+        account_summary = client.get_account_summary() or {}
+        account_info = account_summary.get("account") or {}
+        equity = float(account_info.get("NAV") or account_info.get("equity") or account_info.get("balance") or 0.0)
+    except Exception:
+        equity = None
+    risk.on_session_start(equity)
+    try:
+        ss.clear_hard_stop()
+    except AttributeError:
+        pass
 
     # Start engine loop
     ss.start()
@@ -536,10 +595,29 @@ def emergency_stop():
 def get_risk_config():
     comps = STATE.ensure_components()
     rm = comps["risk_manager"]
+    snapshot = rm.get_risk_snapshot() if hasattr(rm, "get_risk_snapshot") else {}
     return {
-        "risk_management": getattr(rm, 'config', {})
+        "risk_management": getattr(rm, "config", {}),
+        "snapshot": snapshot,
     }
 
+@app.get("/risk/state")
+def risk_state():
+    comps = STATE.ensure_components()
+    rm = comps["risk_manager"]
+    return rm.get_risk_snapshot()
+
+
+
+
+@app.get("/analytics/performance")
+def analytics_performance(limit: int = 500, symbols: Optional[str] = None):
+    comps = STATE.ensure_components()
+    trades = comps["db_manager"].get_trade_history(limit=limit) or []
+    if symbols:
+        filters = {s.strip().upper() for s in symbols.split(",") if s.strip()}
+        trades = [t for t in trades if (t.get("instrument") or "").upper() in filters]
+    return _build_performance_summary(trades)
 
 @app.post("/test/smoke_trade")
 def smoke_trade_per_symbol(units: Optional[int] = 1):
@@ -619,3 +697,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
