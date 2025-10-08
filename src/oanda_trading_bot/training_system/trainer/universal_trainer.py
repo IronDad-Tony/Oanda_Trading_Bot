@@ -15,6 +15,7 @@ import time
 import torch
 import gc
 import os
+from oanda_trading_bot.common.artifact_metadata import write_metadata
 
 logger: logging.Logger = logging.getLogger("universal_trainer_module_init")
 _logger_initialized_by_common_ut = False
@@ -595,6 +596,11 @@ class UniversalTrainer:
                 # 保存最終模型（只覆蓋同一檔案）
                 final_model_path = self.get_model_save_path()
                 self.agent.save(str(final_model_path))
+                write_metadata(final_model_path, {
+                    "account_currency": self.account_currency,
+                    "total_timesteps": int(self.total_timesteps),
+                    "trading_symbols": list(map(str, self.trading_symbols)),
+                })
                 logger.info(f"最終模型已保存: {final_model_path}")
                 
                 training_duration = datetime.now(timezone.utc) - self.training_start_time
@@ -637,6 +643,11 @@ class UniversalTrainer:
             try:
                 checkpoint_path = self.get_model_save_path()
                 self.agent.save(str(checkpoint_path))
+                write_metadata(checkpoint_path, {
+                    "account_currency": self.account_currency,
+                    "total_timesteps": int(self.total_timesteps),
+                    "trading_symbols": list(map(str, self.trading_symbols)),
+                })
                 logger.info(f"當前模型已保存: {checkpoint_path}")
             except Exception as e:
                 logger.error(f"未能保存當前模型: {e}")

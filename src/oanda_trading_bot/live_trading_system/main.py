@@ -19,7 +19,10 @@ from .trading.position_manager import PositionManager
 from .trading.risk_manager import RiskManager
 from .database.database_manager import DatabaseManager
 from .core.transaction_stream import TransactionStreamWorker
-from dotenv import load_dotenv
+from oanda_trading_bot.common.account_profile import (
+    AccountProfileError,
+    get_account_profile,
+)
 
 def load_config() -> Optional[Dict[str, Any]]:
     """Loads the live_config.json file."""
@@ -67,20 +70,22 @@ def initialize_system(
             logging.critical(f"Attempted to load .env from: {dotenv_path}")
             return None
 
-        # Initialize OandaClient without requiring OANDA_ENVIRONMENT by probing
+        # Resolve account profile (currency + preferred environment)
+        try:
+            account_profile = get_account_profile()
+        except AccountProfileError as exc:
+            logging.critical("Unable to resolve account profile: %s", exc)
+            return None
+
+        # Initialize OandaClient using resolved environment unless overridden by mocks
         if mock_client:
             client = mock_client
         else:
-            # Try live first; if summary probe fails, switch to practice
-            client = OandaClient(api_key=oanda_api_key, account_id=oanda_account_id, environment="live")
-            try:
-                summary = client.get_account_summary()
-                if not summary:
-                    logging.info("Live summary probe returned no data; switching to practice.")
-                    client = OandaClient(api_key=oanda_api_key, account_id=oanda_account_id, environment="practice")
-            except Exception:
-                logging.info("Live environment probe failed; switching to practice.")
-                client = OandaClient(api_key=oanda_api_key, account_id=oanda_account_id, environment="practice")
+            client = OandaClient(
+                api_key=oanda_api_key,
+                account_id=oanda_account_id,
+                environment=account_profile.environment,
+            )
 
         system_state = SystemState()
         
@@ -92,16 +97,8 @@ def initialize_system(
         instrument_monitor = InstrumentMonitor(client, system_state, config)
 
         # Align account currency with broker account to size risk in native ccy
-        try:
-            acct = client.get_account_summary() or {}
-            acc_ccy = (((acct or {}).get('account') or {}).get('currency') or '').upper()
-            if acc_ccy:
-                config['account_currency'] = acc_ccy
-                logging.info(f"Account currency detected from OANDA: {acc_ccy}")
-            else:
-                logging.warning("Could not detect account currency from OANDA summary; using config value.")
-        except Exception as e:
-            logging.error(f"Failed to detect account currency: {e}")
+        config['account_currency'] = account_profile.currency
+        logging.info("Account currency resolved to %s via OANDA profile.", account_profile.currency)
 
         # --- Data and Model Components ---
         scalers_path = config.get('preprocessor', {}).get('scalers_path', 'data/training/scalers.json')

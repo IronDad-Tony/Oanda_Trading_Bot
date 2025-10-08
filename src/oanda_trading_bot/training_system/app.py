@@ -1615,13 +1615,18 @@ def download_data_with_progress(symbols, start_date, end_date, granularity="S5")
     """Download historical data for training symbols and required FX pairs with separate progress bars."""
     st.info("Checking required FX pairs for currency conversion and downloading data...")
     from oanda_trading_bot.training_system.data_manager.currency_manager import (
-        get_required_conversion_pairs,
+        ConversionRateError,
+        CurrencyDependencyManager,
     )
     from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
 
     iim = InstrumentInfoManager(force_refresh=False)
-    available = set(iim.get_all_available_symbols())
-    required_fx = sorted(list(get_required_conversion_pairs(symbols, available)))
+    currency_manager = CurrencyDependencyManager(ACCOUNT_CURRENCY, instrument_info_manager=iim)
+    try:
+        required_fx = sorted(list(currency_manager.refresh_routes_for_symbols(symbols)))
+    except ConversionRateError as exc:
+        st.error(f"Failed to resolve currency dependencies: {exc}")
+        return False
 
     start_iso = start_date.isoformat() + "T00:00:00Z"
     end_iso = end_date.isoformat() + "T23:59:59Z"

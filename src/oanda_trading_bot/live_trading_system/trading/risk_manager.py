@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from oanda_trading_bot.training_system.data_manager.currency_manager import (
+    ConversionRateError,
     CurrencyDependencyManager,
 )
 from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
@@ -258,7 +259,13 @@ class RiskManager:
             return None
 
         price_map = self._build_price_map(instrument, self.client)
-        rate_qc_to_ac = float(self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map))
+        try:
+            rate_qc_to_ac = float(
+                self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map)
+            )
+        except ConversionRateError as exc:
+            self.logger.error("Currency conversion failed for %s: %s", instrument, exc)
+            raise
         if rate_qc_to_ac <= 0:
             self.logger.error("Unable to convert %s quote currency into %s", instrument, self.account_currency)
             return None
@@ -360,9 +367,13 @@ class RiskManager:
             if price <= 0:
                 continue
             price_map = self._build_price_map(instrument, self.client)
-            rate_qc_to_ac = float(
-                self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map)
-            )
+            try:
+                rate_qc_to_ac = float(
+                    self.cur_mgr.convert_to_account_currency(details.quote_currency, price_map)
+                )
+            except ConversionRateError as exc:
+                self.logger.error("Currency conversion failed for %s: %s", instrument, exc)
+                raise
             if rate_qc_to_ac <= 0:
                 continue
             long_units = abs(_to_int(pos.get('long', {}).get('units')))

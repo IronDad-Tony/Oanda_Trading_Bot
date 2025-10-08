@@ -58,8 +58,9 @@ try:
     if not _import_logged:
         logger.info("trading_env.py (V5.0): Successfully imported and stored common.config values.")
     from oanda_trading_bot.training_system.data_manager.mmap_dataset import UniversalMemoryMappedDataset; from oanda_trading_bot.training_system.data_manager.oanda_downloader import format_datetime_for_oanda, manage_data_download_for_symbols; from oanda_trading_bot.common.instrument_info_manager import InstrumentDetails, InstrumentInfoManager;
-    from oanda_trading_bot.training_system.data_manager.currency_route_planner import (
-        compute_required_pairs_for_training, compute_conversion_rate_along_route,
+    from oanda_trading_bot.training_system.data_manager.currency_manager import (
+        ConversionRateError,
+        CurrencyDependencyManager,
     )
     if not _import_logged:
         logger.info("trading_env.py (V5.0): Successfully imported other dependencies.")
@@ -192,19 +193,11 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
 
         # 初始化統一的貨幣轉換管理器
         from oanda_trading_bot.training_system.data_manager.currency_manager import CurrencyDependencyManager
-        self.currency_manager = CurrencyDependencyManager(ACCOUNT_CURRENCY, apply_oanda_markup=True)
-        # Precompute conversion routes for active symbols' quote currencies to account currency
-        self._conversion_routes_map = {}
-        try:
-            required_symbols, routes = compute_required_pairs_for_training(
-                trading_symbols=list(self.active_symbols_for_episode) if hasattr(self, 'active_symbols_for_episode') else [],
-                account_currency=ACCOUNT_CURRENCY,
-                instrument_info_manager=self.instrument_info_manager,
-            )
-            for sym, route in routes.items():
-                self._conversion_routes_map[str(route.from_ccy).upper()] = route
-        except Exception as _e_routes_init:
-            logger.debug(f"Route precompute skipped: {_e_routes_init}")
+        self.currency_manager = CurrencyDependencyManager(
+            ACCOUNT_CURRENCY,
+            apply_oanda_markup=True,
+            instrument_info_manager=self.instrument_info_manager,
+        )
         if commission_percentage_override is not None:
             self.commission_percentage = Decimal(str(commission_percentage_override))
         else:
@@ -227,6 +220,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         if not all(s in self.instrument_details_map for s in self.active_symbols_for_episode):
             missing = [s for s in self.active_symbols_for_episode if s not in self.instrument_details_map]
             msg = f"部分活躍交易對象缺少詳細信息 (可能未從manager獲取到): {missing}"; logger.error(msg); raise ValueError(msg)
+        try:
+            route_seed = self.active_symbols_for_episode or list(self.instrument_details_map.keys())
+            self.currency_manager.refresh_routes_for_symbols(route_seed)
+        except ConversionRateError as exc:
+            logger.error(f"Failed to initialise currency routes: {exc}")
+            raise
+
         self.num_env_slots = MAX_SYMBOLS_ALLOWED
         self.symbol_to_slot_map: Dict[str, int] = {}; self.slot_to_symbol_map: Dict[int, Optional[str]] = {i: None for i in range(self.num_env_slots)}
         self.current_episode_tradable_slot_indices: List[int] = []
@@ -419,7 +419,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             pnl_per_unit_qc = current_price_for_pnl - entry_price_qc
             unrealized_pnl_qc = units * pnl_per_unit_qc
             
-            exchange_rate = self._get_exchange_rate_to_account_currency(self.instrument_details_map[symbol].quote_currency, all_prices_map)
+            try:
+                exchange_rate = self._get_exchange_rate_to_account_currency(
+                    self.instrument_details_map[symbol].quote_currency, all_prices_map
+                )
+            except ConversionRateError as exc:
+                logger.error("Unrealised PnL conversion failed for %s: %s", symbol, exc)
+                raise
             unrealized_pnl_ac = unrealized_pnl_qc * exchange_rate
             
             self.unrealized_pnl_ac[slot_idx] = unrealized_pnl_ac
@@ -565,15 +571,15 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         Gets the exchange rate to convert from a given currency to the account currency.
         """
         try:
-            ccy = str(currency).upper()
-            route = getattr(self, '_conversion_routes_map', {}).get(ccy)
-            if route is not None:
-                rate = compute_conversion_rate_along_route(route, all_prices_map, apply_oanda_markup=True)
-                if rate is not None and rate > 0:
-                    return rate
-        except Exception as _e_conv:
-            logger.debug(f"Route-based conversion failed, falling back: {_e_conv}")
-        return self.currency_manager.convert_to_account_currency(currency, all_prices_map)
+            return self.currency_manager.convert_to_account_currency(currency, all_prices_map)
+        except ConversionRateError as exc:
+            logger.error(
+                "Failed to convert %s into account currency %s: %s",
+                currency,
+                ACCOUNT_CURRENCY,
+                exc,
+            )
+            raise
 
     def _round_trade_units(self, units: Decimal, precision: int) -> Decimal:
         """Rounds trade units to the instrument's specified precision."""
@@ -604,9 +610,16 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         margin_required_qc = position_value_qc * Decimal(str(details.margin_rate))
 
         # Convert margin from quote currency to account currency directly
-        exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
-        if exchange_rate_qc_to_ac is None or exchange_rate_qc_to_ac <= 0:
-            logger.warning(f"Could not get exchange rate for {details.quote_currency}->{self.account_currency if hasattr(self,'account_currency') else 'AC'} for margin calculation. Setting margin to 0.")
+        try:
+            exchange_rate_qc_to_ac = self._get_exchange_rate_to_account_currency(
+                details.quote_currency, all_prices_map
+            )
+        except ConversionRateError:
+            logger.error(
+                "Margin calculation aborted: missing conversion from %s to %s",
+                details.quote_currency,
+                ACCOUNT_CURRENCY,
+            )
             self.margin_used_per_position_ac[slot_idx] = Decimal('0.0')
             return
         margin_required_ac = margin_required_qc * exchange_rate_qc_to_ac
@@ -623,9 +636,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         
         trade_value_qc = abs(units_to_trade) * trade_price_qc
         # Commissions are debits; apply debit conversion (mid*(1+markup)) per OANDA convention
-        commission_rate_ac = self.currency_manager.convert_to_account_currency(
-            details.quote_currency, all_prices_map, is_credit=False
-        )
+        try:
+            commission_rate_ac = self.currency_manager.convert_to_account_currency(
+                details.quote_currency, all_prices_map, is_credit=False
+            )
+        except ConversionRateError as exc:
+            logger.error("Commission conversion failed for %s: %s", symbol, exc)
+            raise
         trade_value_ac = trade_value_qc * commission_rate_ac
         commission = trade_value_ac * self.commission_percentage
         
@@ -680,9 +697,13 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
         
         # PnL conversion uses credit for gains and debit for losses
         pnl_is_credit = realized_pnl_qc >= 0
-        pnl_rate_ac = self.currency_manager.convert_to_account_currency(
-            details.quote_currency, all_prices_map, is_credit=pnl_is_credit
-        )
+        try:
+            pnl_rate_ac = self.currency_manager.convert_to_account_currency(
+                details.quote_currency, all_prices_map, is_credit=pnl_is_credit
+            )
+        except ConversionRateError as exc:
+            logger.error("PnL conversion failed for %s: %s", symbol, exc)
+            raise
         realized_pnl_ac = realized_pnl_qc * pnl_rate_ac
         self.cash += realized_pnl_ac
         
@@ -762,8 +783,10 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             
             # 1) Value cap by max_position_size_percentage (AC -> QC -> units)
             max_pos_value_ac = self.equity_ac * self.max_position_size_percentage
-            exchange_rate_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
-            if exchange_rate_to_ac <= 0:
+            try:
+                exchange_rate_to_ac = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+            except ConversionRateError as exc:
+                logger.error("Failed to derive position sizing conversion for %s: %s", symbol, exc)
                 continue
             max_pos_value_qc = max_pos_value_ac / exchange_rate_to_ac
             target_value_qc = max_pos_value_qc * Decimal(str(desired_position_ratio))
@@ -1200,7 +1223,11 @@ class UniversalTradingEnvV4(gym.Env): # 保持類名為V4，但內部是V5邏輯
             pos_ratio = Decimal('0.0')
             if ask_price_qc > 0 and self.equity_ac > 0:
                 details = self.instrument_details_map[symbol]
-                exchange_rate = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+                try:
+                    exchange_rate = self._get_exchange_rate_to_account_currency(details.quote_currency, all_prices_map)
+                except ConversionRateError as exc:
+                    logger.error("Exposure conversion failed for %s: %s", symbol, exc)
+                    raise
                 position_value_ac = abs(current_units) * ask_price_qc * exchange_rate
                 if self.equity_ac > 0:
                     pos_ratio = position_value_ac / self.equity_ac

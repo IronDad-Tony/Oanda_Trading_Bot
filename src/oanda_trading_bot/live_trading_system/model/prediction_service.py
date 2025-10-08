@@ -1,10 +1,12 @@
-﻿# åŒ¯å…¥ PyTorch èˆ‡ Numpy
-import torch
-import numpy as np
+# Prediction service helpers
 import logging
+from pathlib import Path
 from typing import Optional, Dict, Any
-# åŒ¯å…¥ stable_baselines3 çš„ SAC é¡žåˆ¥ï¼Œç”¨æ–¼æ­£ç¢ºè¼‰å…¥ SAC æ¨¡åž‹
+
+import numpy as np
+import torch
 from stable_baselines3 import SAC
+from oanda_trading_bot.common.artifact_metadata import read_metadata
 
 logger = logging.getLogger("LiveTradingSystem")
 
@@ -53,6 +55,7 @@ class PredictionService:
                 self.is_sac_model = True
                 self.current_model_path = model_path
                 logger.info(f"Loaded SAC model via stable_baselines3 from {model_path} on {self.device}.")
+                self._log_model_metadata(Path(model_path))
             else:
                 # é è¨­ç‚º PyTorch é¡žåž‹æ¨¡åž‹
                 self.model = torch.load(model_path, map_location=self.device)
@@ -73,6 +76,18 @@ class PredictionService:
             self.current_model_path = None
             self.is_sac_model = False
             raise
+
+    def _log_model_metadata(self, model_path: Path) -> None:
+        try:
+            metadata = read_metadata(model_path)
+        except Exception as exc:
+            logger.warning("Failed to read metadata for %s: %s", model_path, exc)
+            return
+        if metadata:
+            logger.info("Model metadata [%s]: %s", model_path.name, metadata)
+        else:
+            logger.warning("Metadata file not found for model %s", model_path)
+
 
     def predict(self, processed_data_map: Dict[str, np.ndarray]) -> Dict[str, int]:
         # Early guard with clean message

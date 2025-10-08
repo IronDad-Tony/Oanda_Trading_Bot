@@ -6,6 +6,7 @@ This project is a comprehensive, AI-powered trading bot designed for the OANDA p
 
 1.  **Training System**: A sophisticated environment for training and evaluating reinforcement learning models for trading. It features a Streamlit-based UI for real-time monitoring of training progress, model performance, and system resources.
 2.  **Live Trading System**: A robust system for deploying the trained models to a live (or paper) OANDA account. It also includes a Streamlit-based dashboard for monitoring live trades, account status, and system health.
+3.  **Unified Account Context** *(NEW)*: Both systems now auto-detect the configured OANDA account profile (currency, environment, alias) directly from the broker instead of relying on hard-coded defaults. All currency conversion, risk sizing, and data downloads use the detected account currency to avoid silent USD fallbacks.
 
 This codebase has been professionally refactored to follow modern software engineering best practices, ensuring modularity, maintainability, and ease of use.
 
@@ -189,5 +190,6 @@ This project is built from several key components that work together.
   ```
 
 Notes:
+- Account metadata and trained model metadata (`*.meta.json`) are generated automatically; the live system validates these sidecar files when models are loaded.
 - All upgraded features are enabled by default: enhanced transformer, ESS quantum strategies, progressive reward system, reward normalization, gradient clipping, AMP (auto when stable), and GPU optimizations when CUDA is available.
 - `.env` in the project root provides OANDA credentials; the headless script forces PRACTICE to avoid accidental live orders.

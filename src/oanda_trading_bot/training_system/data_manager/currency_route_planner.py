@@ -8,6 +8,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+OANDA_MARKUP = Decimal("0.005")
+
+
+def _apply_oanda_markup(midpoint: Decimal, is_credit: bool, apply_markup: bool) -> Decimal:
+    if not apply_markup:
+        return midpoint
+    adjustment = Decimal("1") - OANDA_MARKUP if is_credit else Decimal("1") + OANDA_MARKUP
+    return midpoint * adjustment
+
 
 @dataclass(frozen=True)
 class RouteEdge:
@@ -153,23 +162,19 @@ def compute_conversion_rate_along_route(
     - Step from instrument base->quote is treated as credit (markup -)
     - Step from quote->base is treated as debit (markup +), and inverted
     """
-    from .currency_manager import CurrencyDependencyManager  # lazy import to avoid cycles
-    mgr = CurrencyDependencyManager(account_currency=route.to_ccy, apply_oanda_markup=apply_oanda_markup)
-
     rate = Decimal('1')
     for edge in route.edges:
         bid, ask = prices_map.get(edge.symbol, (None, None))
         if bid is None or ask is None:
             logger.warning(f"Missing prices for {edge.symbol} while computing route {route.from_ccy}->{route.to_ccy}")
             return None
-        midpoint = mgr.get_midpoint_rate(bid, ask)
+        midpoint = (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
         if edge.from_ccy + "_" + edge.to_ccy == edge.symbol:
-            step = mgr.apply_conversion_fee(midpoint, is_credit=True)
+            step = _apply_oanda_markup(midpoint, is_credit=True, apply_markup=apply_oanda_markup)
             rate *= step
         else:
-            step = mgr.apply_conversion_fee(midpoint, is_credit=False)
+            step = _apply_oanda_markup(midpoint, is_credit=False, apply_markup=apply_oanda_markup)
             if step == 0:
                 return None
             rate *= (Decimal('1') / step)
     return rate
-
