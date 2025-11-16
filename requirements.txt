@@ -1,5 +1,5 @@
 # Core computation and data processing
-numpy
+numpy<2.0.0  # Pin to 1.x for compatibility with scikit-learn
 pandas
 scipy
 
