@@ -125,6 +125,11 @@ SAC_TRAIN_FREQ_STEPS: Final[int] = int(os.getenv("SAC_TRAIN_FREQ_STEPS", "1"))
 SAC_GRADIENT_STEPS: Final[int] = int(os.getenv("SAC_GRADIENT_STEPS", "1"))
 SAC_TAU: Final[float] = float(os.getenv("SAC_TAU", "0.005"))
 
+# Training Loop Parameters
+TIMESTEPS: Final[int] = int(os.getenv("TIMESTEPS", "100000"))
+TRAINER_SAVE_FREQ_STEPS: Final[int] = int(os.getenv("TRAINER_SAVE_FREQ_STEPS", "10000"))
+TRAINER_EVAL_FREQ_STEPS: Final[int] = int(os.getenv("TRAINER_EVAL_FREQ_STEPS", "10000"))
+
 # Model configuration paths
 ENHANCED_TRANSFORMER_CONFIG_PATH = BASE_DIR / "configs" / "enhanced_transformer_config.json"
 QUANTUM_STRATEGY_CONFIG_PATH = BASE_DIR / "configs" / "quantum_strategy_config.json"

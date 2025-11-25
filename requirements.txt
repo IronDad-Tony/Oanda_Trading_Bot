@@ -36,6 +36,10 @@ streamlit
 plotly
 matplotlib
 
+# Web API Framework
+fastapi
+uvicorn[standard]
+
 # Feature Engineering
 pywavelets
 pandas-ta

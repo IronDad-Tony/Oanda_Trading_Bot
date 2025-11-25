@@ -39,6 +39,7 @@ class SystemState:
     def _initialize(self) -> None:
         self.logger = logging.getLogger("LiveTradingSystem")
         self.is_running: bool = False
+        self.is_paused: bool = False # New attribute for pausing trades
         self.ui_controls_enabled: bool = True
         self.last_error: Optional[str] = None
         self.status_message: str = "Idle"

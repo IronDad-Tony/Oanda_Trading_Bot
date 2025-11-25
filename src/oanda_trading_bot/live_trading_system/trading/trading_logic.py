@@ -175,6 +175,11 @@ class TradingLogic:
                 if signal in (0, None):
                     continue
 
+                # Check if trading is paused before processing the signal
+                if self.system_state.is_paused:
+                    self.logger.warning(f"Trading is paused. Ignoring signal '{signal}' for {instrument}.")
+                    continue
+
                 # 處理交易訊號
                 last_candle = self.data_buffers[instrument][-1]
                 signal_info = {

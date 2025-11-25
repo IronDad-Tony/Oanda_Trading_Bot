@@ -476,6 +476,48 @@ class OrderManager:
             else:
                 self.logger.error(f"Failed to receive response when closing position for {instrument}.")
 
+    def close_specific_position(self, instrument: str) -> Dict[str, Any]:
+        """
+        Closes the open position for a specific instrument.
+        """
+        self.logger.warning(f"Attempting to close position for {instrument} via API request.")
+        
+        position = self.client.get_open_position(instrument)
+        if not position:
+            self.logger.warning(f"No open position found for {instrument} on OANDA.")
+            return {"status": "not_found", "message": f"No open position for {instrument}."}
+
+        long_units = position.get("long", {}).get("units", "0")
+        short_units = position.get("short", {}).get("units", "0")
+
+        response = None
+        if long_units != "0":
+            self.logger.info(f"Closing long position for {instrument} ({long_units} units)...")
+            response = self.client.close_position(instrument, long_units="ALL")
+        elif short_units != "0":
+            self.logger.info(f"Closing short position for {instrument} ({short_units} units)...")
+            response = self.client.close_position(instrument, short_units="ALL")
+        else:
+            return {"status": "no_units", "message": f"Position for {instrument} has no units to close."}
+
+        if response:
+            fill_transaction = response.get('longOrderFillTransaction') or response.get('shortOrderFillTransaction')
+            if fill_transaction and fill_transaction.get('tradesClosed'):
+                self.logger.info(f"Successfully submitted close order for {instrument}.")
+                for closed_trade in fill_transaction.get('tradesClosed', []):
+                    trade_id = closed_trade.get("tradeID")
+                    price = float(closed_trade.get("price", 0))
+                    pnl = float(closed_trade.get("realizedPL", 0))
+                    self.db_manager.update_trade_on_close(trade_id, price, pnl)
+                self.position_manager.close_position(instrument)
+                return {"status": "success", "message": f"Close order for {instrument} submitted."}
+            else:
+                self.logger.error(f"Failed to get fill details when closing {instrument}. Response: {response}")
+                return {"status": "error", "message": "Failed to get fill details.", "details": response}
+        else:
+            self.logger.error(f"Failed to receive response when closing position for {instrument}.")
+            return {"status": "error", "message": "No response from server."}
+
 
 
 
