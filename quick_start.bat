@@ -66,7 +66,7 @@ goto :end
 echo.
 echo Running Smoke Test...
 echo.
-python scripts\complete_smoke_test.py
+python scripts\testing\complete_smoke_test.py
 echo.
 pause
 goto :menu
@@ -76,7 +76,7 @@ echo.
 echo Training Mini Model (5000 steps)...
 echo This will take a few minutes...
 echo.
-python src\oanda_trading_bot\training_system\sb3_mini_train.py
+python scripts\training\train_quick_sac.py
 echo.
 pause
 goto :menu
