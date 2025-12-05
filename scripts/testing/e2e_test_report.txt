@@ -1,0 +1,58 @@
+================================================================================
+           OANDA TRADING SYSTEM - END-TO-END TEST REPORT
+================================================================================
+Report Generated: 2025-12-05 12:55:10
+
+========================================
+GPU STATUS
+========================================
+CUDA Available: True
+Device: NVIDIA GeForce RTX 5090
+Memory Total: 31.84 GB
+Memory Used: 0.00 GB
+Utilization: 4%
+
+========================================
+TRAINING PHASE
+========================================
+Success: True
+Duration: 0.0 seconds
+GPU Used: True
+Model Path: None
+Symbols Trained: 10
+Epochs: 2
+GPU Utilization: 2%
+
+========================================
+LIVE TRADING PHASE
+========================================
+Success: True
+Warmup Completed: True
+Model Loaded: False
+Risk Control Active: True
+GPU Used for Inference: True
+Trades Executed: 5
+Trades Successful: 5
+Balance Change: $+0.00
+Positions Opened: EUR_JPY, XAU_USD, AUD_USD, NAS100_USD, EUR_USD
+
+========================================
+POSITION CLOSING
+========================================
+Positions Closed: 5
+Final Balance: $598,675.98
+Total P/L: $-1,308.32
+
+========================================
+SUMMARY
+========================================
+✅ END-TO-END TEST PASSED
+
+========================================
+RECOMMENDATIONS
+========================================
+⚠️ Model not loaded - train a model first or fix model path
+
+================================================================================
+                          END OF REPORT
+================================================================================
