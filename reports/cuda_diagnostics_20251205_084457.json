@@ -1,0 +1,52 @@
+{
+  "python_version": "3.10.10 (tags/v3.10.10:aad5f6a, Feb  7 2023, 17:20:36) [MSC v.1929 64 bit (AMD64)]",
+  "pytorch_version": "2.8.0+cu129",
+  "cuda_available": true,
+  "cuda_version": "12.9",
+  "cuda_arch_list": [
+    "sm_70",
+    "sm_75",
+    "sm_80",
+    "sm_86",
+    "sm_90",
+    "sm_100",
+    "sm_120"
+  ],
+  "device_count": 1,
+  "cudnn_available": true,
+  "cudnn_version": 91002,
+  "gpu_0": {
+    "name": "NVIDIA GeForce RTX 5090",
+    "total_memory_gb": 34.19045888,
+    "major_compute": 12,
+    "minor_compute": 0,
+    "multi_processor_count": 170
+  },
+  "memory_allocation_test": {
+    "success": true,
+    "size_gb": 10,
+    "time_seconds": 0.28424811363220215
+  },
+  "bf16_supported": true,
+  "amp_test": {
+    "success": true,
+    "fp32_time_ms": 0.7151317596435547,
+    "amp_time_ms": 1.7850232124328613,
+    "speedup": 0.4006288291729721
+  },
+  "tensor_core_tflops": {
+    "FP32": 67.16371028780688,
+    "FP16": 194.49399517643087,
+    "BF16": 196.2726936995831
+  },
+  "transformer_benchmark": {
+    "fp32_ms": 26.816625595092773,
+    "amp_ms": 13.239874839782715,
+    "samples_per_second": 2416.9412768047864
+  },
+  "training_simulation": {
+    "steps_per_second": 434.4683488302161,
+    "samples_per_second": 27805.97432513383,
+    "estimated_steps_per_hour": 1564086.055788778
+  }
+}

@@ -42,13 +42,14 @@ echo Starting Unified API Backend...
 echo ============================================================
 echo.
 echo Access API docs at: http://localhost:8000/docs
-echo WebSocket: ws://localhost:8000/ws/training
+echo WebSocket: ws://localhost:8000/ws
+echo            ws://localhost:8000/ws/training
 echo            ws://localhost:8000/ws/live
 echo.
 echo Press Ctrl+C to stop
 echo.
-cd src\oanda_trading_bot\api
-python main.py
+set PYTHONPATH=%CD%\src
+python src\oanda_trading_bot\api\main.py
 goto :end
 
 :training

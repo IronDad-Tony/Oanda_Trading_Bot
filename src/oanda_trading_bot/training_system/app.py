@@ -64,6 +64,7 @@ except Exception:
     pass
 
 from oanda_trading_bot.training_system.common.logger_setup import logger # This will run logger_setup.py
+from oanda_trading_bot.common.instrument_info_manager import InstrumentInfoManager
 
 # --- Session State Initialization Flag ---
 # Moved to init_session_state() function
@@ -288,7 +289,7 @@ def get_categorized_symbols_and_details():
             continue
         symbol = details.symbol
         display = details.display_name if hasattr(details, 'display_name') else sym
-        t = details.type.upper() if details.type else ''
+        t = details.instrument_type.upper() if details.instrument_type else ''
         
         # --- Classification logic ---
         # 首先检查特定符号的明确分类

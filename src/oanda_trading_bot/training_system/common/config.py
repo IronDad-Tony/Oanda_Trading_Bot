@@ -106,6 +106,10 @@ PRICE_TYPES: Final[dict[str, list[str]]] = {
     "close": ["bid_close", "ask_close"],
 }
 
+# OANDA API constants
+OANDA_MAX_BATCH_CANDLES: Final[int] = int(os.getenv("OANDA_MAX_BATCH_CANDLES", "4800"))
+OANDA_REQUEST_INTERVAL: Final[float] = float(os.getenv("OANDA_REQUEST_INTERVAL", "0.1"))
+
 INITIAL_CAPITAL: Final[float] = float(os.getenv("INITIAL_CAPITAL", "100000.0"))
 USE_AMP: Final[bool] = os.getenv("USE_AMP", "true").strip().lower() == "true"
 DEVICE: Final[str] = "cuda" if torch.cuda.is_available() else "cpu"
@@ -113,6 +117,9 @@ DEVICE: Final[str] = "cuda" if torch.cuda.is_available() else "cpu"
 # Risk parameters
 OANDA_MARGIN_CLOSEOUT_LEVEL: Final[float] = float(os.getenv("MARGIN_CLOSEOUT_LEVEL", "0.5"))
 TRADE_COMMISSION_PERCENTAGE: Final[float] = float(os.getenv("TRADE_COMMISSION_PERCENTAGE", "0.0"))
+MAX_ACCOUNT_RISK_PERCENTAGE: Final[float] = float(os.getenv("MAX_ACCOUNT_RISK_PERCENTAGE", "0.02"))  # 2% max account risk per trade
+ATR_STOP_LOSS_MULTIPLIER: Final[float] = float(os.getenv("ATR_STOP_LOSS_MULTIPLIER", "2.0"))
+MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY: Final[float] = float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE_OF_EQUITY", "0.1"))  # 10% max per position
 
 # SAC hyperparameters (kept for compatibility)
 SAC_LEARNING_RATE: Final[float] = float(os.getenv("SAC_LEARNING_RATE", "0.0003"))
@@ -136,6 +143,9 @@ QUANTUM_STRATEGY_CONFIG_PATH = BASE_DIR / "configs" / "quantum_strategy_config.j
 _model_config_primary = BASE_DIR / "configs" / "training" / "enhanced_model_config.json"
 _model_config_legacy = BASE_DIR / "configs" / "enhanced_model_config.json"
 ENHANCED_MODEL_CONFIG_PATH = _model_config_primary if _model_config_primary.exists() else _model_config_legacy
+
+# Quantum Strategy Configuration
+QUANTUM_STRATEGY_NUM_STRATEGIES: Final[int] = int(os.getenv("QUANTUM_STRATEGY_NUM_STRATEGIES", "8"))
 
 # ---------------------------------------------------------------------------
 # Utility helpers

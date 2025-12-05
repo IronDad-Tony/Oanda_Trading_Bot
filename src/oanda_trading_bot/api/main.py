@@ -445,6 +445,93 @@ async def live_trading_websocket(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket, 'live')
 
+@app.websocket("/ws")
+async def general_websocket(websocket: WebSocket):
+    """通用WebSocket端點 - 供前端Dashboard連接，使用真實OANDA API數據"""
+    await manager.connect(websocket, 'general')
+    try:
+        while True:
+            await asyncio.sleep(1)
+            
+            # 獲取真實帳戶資訊
+            try:
+                from oanda_trading_bot.common.account_profile import get_account_profile
+                from oanda_trading_bot.live_trading_system.core.oanda_client import OandaClient
+                import os
+                
+                profile = get_account_profile()
+                api_key = os.getenv('OANDA_API_KEY')
+                client = OandaClient(api_key, profile.account_id, profile.environment)
+                response = client.get_account_summary()
+                
+                if response and 'account' in response:
+                    account = response['account']
+                    # 發送帳戶更新
+                    await websocket.send_json({
+                        "type": "account_update",
+                        "data": {
+                            "balance": float(account.get('balance', 0)),
+                            "equity": float(account.get('NAV', 0)),
+                            "unrealizedPL": float(account.get('unrealizedPL', 0)),
+                            "realizedPL": float(account.get('pl', 0)),
+                            "marginUsed": float(account.get('marginUsed', 0)),
+                            "marginAvailable": float(account.get('marginAvailable', 0)),
+                            "currency": account.get('currency', 'AUD'),
+                            "openTradeCount": int(account.get('openTradeCount', 0)),
+                            "openPositionCount": int(account.get('openPositionCount', 0)),
+                            "lastUpdated": datetime.now().isoformat()
+                        }
+                    })
+                
+                # 發送持倉更新
+                positions_response = client.get_open_positions()
+                position_data = []
+                if positions_response and 'positions' in positions_response:
+                    for pos in positions_response['positions']:
+                        for side in ['long', 'short']:
+                            side_data = pos.get(side, {})
+                            units = side_data.get('units', '0')
+                            if units != '0':
+                                position_data.append({
+                                    "instrument": pos['instrument'],
+                                    "side": side.upper(),
+                                    "units": int(float(units)),
+                                    "unrealizedPL": float(side_data.get('unrealizedPL', 0)),
+                                    "averagePrice": float(side_data.get('averagePrice', 0))
+                                })
+                
+                await websocket.send_json({
+                    "type": "positions_update",
+                    "data": position_data
+                })
+                
+            except Exception as e:
+                # 如果API調用失敗，發送錯誤訊息而非mock數據
+                logger.error(f"Failed to get OANDA data: {e}")
+                await websocket.send_json({
+                    "type": "error",
+                    "data": {
+                        "message": f"API Error: {str(e)}",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                })
+            
+            # 接收並回應客戶端消息
+            try:
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=0.1)
+                if data.get('type') == 'ping':
+                    await websocket.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+                
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, 'general')
+    except Exception as e:
+        logger.error(f"General WebSocket error: {e}")
+        manager.disconnect(websocket, 'general')
+
 # ==================== Startup & Shutdown ====================
 
 @app.on_event("startup")
